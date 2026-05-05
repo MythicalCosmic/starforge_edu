@@ -1,0 +1,64 @@
+[project]
+name = "starforge-edu"
+version = "0.1.0"
+description = "Multi-tenant education platform backend (Django 6, django-tenants, DRF, Channels, Celery)."
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+license = { text = "Proprietary" }
+authors = [{ name = "Starforge Edu" }]
+
+dependencies = [
+    "django>=6.0,<6.1",
+    "djangorestframework>=3.16",
+    "djangorestframework-simplejwt[crypto]>=5.4",
+    "drf-spectacular>=0.28",
+    "django-filter>=24.3",
+    "django-cors-headers>=4.6",
+
+    "django-tenants>=3.9",
+    "tenant-schemas-celery>=2.2",
+
+    "channels[daphne]>=4.2",
+    "channels-redis>=4.2",
+
+    "celery[redis]>=5.4",
+    "django-celery-beat>=2.7",
+
+    "psycopg[binary]>=3.2",
+
+    "django-storages[s3]>=1.14",
+    "boto3>=1.35",
+
+    "redis>=5.2",
+
+    "django-environ>=0.12",
+
+    "anthropic>=0.40",
+
+    "phonenumbers>=8.13",
+    "python-magic>=0.4.27",
+    "Pillow>=11.0",
+    "requests>=2.32",
+
+    "daphne>=4.1",
+    "gunicorn>=23.0",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "django-stubs[compatible-mypy]>=5.1",
+    "djangorestframework-stubs>=3.15",
+    "pytest>=8.3",
+    "pytest-django>=4.9",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
+    "pre-commit>=4.0",
+    "model-bakery>=1.20",
+    "ipython>=8.30",
+    "ipdb>=0.13",
+]
+
+[tool.uv]
+package = false

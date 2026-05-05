@@ -1,0 +1,377 @@
+"""
+Base settings shared across all environments.
+
+Tenancy: schema-per-tenant via django-tenants. Center is the tenant model;
+Domain maps a hostname (subdomain) to a Center. The public schema holds
+shared/platform-level data; each tenant schema holds the per-center data.
+
+Auth: JWT everywhere via simplejwt with refresh rotation + blacklist.
+Sessions remain enabled only so the built-in /admin/ keeps working.
+"""
+
+from datetime import timedelta
+from pathlib import Path
+
+import environ
+
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
+
+env = environ.Env(
+    DEBUG=(bool, False),
+    SECRET_KEY=(str, "dev-only-CHANGE-ME"),
+    ALLOWED_HOSTS=(list, ["*"]),
+    DATABASE_URL=(str, "postgres://starforge:starforge@localhost:5432/starforge"),
+    REDIS_URL=(str, "redis://localhost:6379/0"),
+    CELERY_BROKER_URL=(str, ""),
+    CELERY_RESULT_BACKEND=(str, ""),
+    CHANNEL_REDIS_URL=(str, ""),
+    CORS_ALLOWED_ORIGINS=(list, []),
+    CSRF_TRUSTED_ORIGINS=(list, []),
+    AWS_STORAGE_BUCKET_NAME=(str, "starforge-media"),
+    AWS_S3_ENDPOINT_URL=(str, ""),
+    AWS_S3_ACCESS_KEY_ID=(str, ""),
+    AWS_S3_SECRET_ACCESS_KEY=(str, ""),
+    AWS_S3_REGION_NAME=(str, "us-east-1"),
+    ESKIZ_API_URL=(str, "https://notify.eskiz.uz/api"),
+    ESKIZ_EMAIL=(str, ""),
+    ESKIZ_PASSWORD=(str, ""),
+    ESKIZ_USE_MOCK=(bool, True),
+    ANTHROPIC_API_KEY=(str, ""),
+    DEFAULT_FROM_EMAIL=(str, "noreply@starforge.uz"),
+    EMAIL_HOST=(str, "localhost"),
+    EMAIL_PORT=(int, 25),
+    EMAIL_HOST_USER=(str, ""),
+    EMAIL_HOST_PASSWORD=(str, ""),
+    EMAIL_USE_TLS=(bool, False),
+)
+
+env_file = BASE_DIR / ".env"
+if env_file.exists():
+    environ.Env.read_env(str(env_file))
+
+SECRET_KEY = env("SECRET_KEY")
+DEBUG = env("DEBUG")
+ALLOWED_HOSTS = env("ALLOWED_HOSTS")
+
+# ---------------------------------------------------------------------------
+# Apps: SHARED_APPS (public schema) vs TENANT_APPS (per-tenant schema)
+# ---------------------------------------------------------------------------
+# django-tenants requires this split. apps that appear in both will have a
+# table in the public schema AND in every tenant schema. Center/Domain live
+# only in public; every domain app lives only in tenants.
+
+SHARED_APPS = [
+    "django_tenants",
+    "apps.tenancy.apps.TenancyConfig",  # Center + Domain only (the tenant model)
+    "django.contrib.contenttypes",
+    "django.contrib.auth",
+    "django.contrib.admin",
+    "django.contrib.sessions",
+    "django.contrib.messages",
+    "django.contrib.staticfiles",
+    "django_celery_beat",
+    "channels",
+    "corsheaders",
+]
+
+TENANT_APPS = [
+    "django.contrib.contenttypes",
+    "django.contrib.auth",
+    "django.contrib.admin",
+    "django.contrib.sessions",
+    "django.contrib.messages",
+    "rest_framework",
+    "rest_framework_simplejwt.token_blacklist",
+    "drf_spectacular",
+    "django_filters",
+    "apps.users.apps.UsersConfig",
+    "apps.auth.apps.AuthAppConfig",
+    "apps.org.apps.OrgConfig",  # Branch + Department (per-tenant org structure)
+    "apps.students.apps.StudentsConfig",
+    "apps.parents.apps.ParentsConfig",
+    "apps.teachers.apps.TeachersConfig",
+    "apps.cohorts.apps.CohortsConfig",
+    "apps.schedule.apps.ScheduleConfig",
+    "apps.attendance.apps.AttendanceConfig",
+    "apps.academics.apps.AcademicsConfig",
+    "apps.assignments.apps.AssignmentsConfig",
+    "apps.content.apps.ContentConfig",
+    "apps.printing.apps.PrintingConfig",
+    "apps.finance.apps.FinanceConfig",
+    "apps.payments.apps.PaymentsConfig",
+    "apps.notifications.apps.NotificationsConfig",
+    "apps.ai.apps.AIConfig",
+    "apps.audit.apps.AuditConfig",
+    "apps.reports.apps.ReportsConfig",
+]
+
+INSTALLED_APPS = list(SHARED_APPS) + [a for a in TENANT_APPS if a not in SHARED_APPS]
+
+TENANT_MODEL = "tenancy.Center"
+TENANT_DOMAIN_MODEL = "tenancy.Domain"
+PUBLIC_SCHEMA_URLCONF = "config.urls_public"
+
+# ---------------------------------------------------------------------------
+# Middleware (TenantMainMiddleware MUST be first)
+# ---------------------------------------------------------------------------
+MIDDLEWARE = [
+    "django_tenants.middleware.main.TenantMainMiddleware",
+    "corsheaders.middleware.CorsMiddleware",
+    "django.middleware.security.SecurityMiddleware",
+    "django.contrib.sessions.middleware.SessionMiddleware",
+    "django.middleware.locale.LocaleMiddleware",
+    "django.middleware.common.CommonMiddleware",
+    "django.middleware.csrf.CsrfViewMiddleware",
+    "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "django.contrib.messages.middleware.MessageMiddleware",
+    "django.middleware.clickjacking.XFrameOptionsMiddleware",
+]
+
+ROOT_URLCONF = "config.urls"
+WSGI_APPLICATION = "config.wsgi.application"
+ASGI_APPLICATION = "config.asgi.application"
+
+# ---------------------------------------------------------------------------
+# Database (django-tenants postgresql backend)
+# ---------------------------------------------------------------------------
+DATABASES = {
+    "default": env.db_url("DATABASE_URL"),
+}
+DATABASES["default"]["ENGINE"] = "django_tenants.postgresql_backend"
+DATABASE_ROUTERS = ["django_tenants.routers.TenantSyncRouter"]
+DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+# ---------------------------------------------------------------------------
+# Templates
+# ---------------------------------------------------------------------------
+TEMPLATES = [
+    {
+        "BACKEND": "django.template.backends.django.DjangoTemplates",
+        "DIRS": [BASE_DIR / "templates"],
+        "APP_DIRS": True,
+        "OPTIONS": {
+            "context_processors": [
+                "django.template.context_processors.request",
+                "django.contrib.auth.context_processors.auth",
+                "django.contrib.messages.context_processors.messages",
+            ],
+        },
+    },
+]
+
+# ---------------------------------------------------------------------------
+# Auth
+# ---------------------------------------------------------------------------
+AUTH_USER_MODEL = "users.User"
+AUTHENTICATION_BACKENDS = [
+    "apps.auth.backends.PhoneOrEmailBackend",
+    "django.contrib.auth.backends.ModelBackend",  # for /admin/
+]
+
+AUTH_PASSWORD_VALIDATORS = [
+    {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
+    {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator", "OPTIONS": {"min_length": 10}},
+    {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
+    {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
+]
+
+# ---------------------------------------------------------------------------
+# DRF + simplejwt + drf-spectacular
+# ---------------------------------------------------------------------------
+REST_FRAMEWORK = {
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "rest_framework_simplejwt.authentication.JWTAuthentication",
+        "rest_framework.authentication.SessionAuthentication",
+    ],
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.IsAuthenticated",
+    ],
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+    "DEFAULT_PAGINATION_CLASS": "core.pagination.DefaultPagination",
+    "PAGE_SIZE": 25,
+    "DEFAULT_FILTER_BACKENDS": ["django_filters.rest_framework.DjangoFilterBackend"],
+    "DEFAULT_THROTTLE_CLASSES": [
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+    ],
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": "60/min",
+        "user": "1000/min",
+        "otp_phone": "3/min",
+        "otp_ip": "10/min",
+        "otp_global": "1000/hour",
+    },
+    "EXCEPTION_HANDLER": "core.exceptions.drf_exception_handler",
+}
+
+SIMPLE_JWT = {
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=15),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=14),
+    "ROTATE_REFRESH_TOKENS": True,
+    "BLACKLIST_AFTER_ROTATION": True,
+    "UPDATE_LAST_LOGIN": True,
+    "AUTH_HEADER_TYPES": ("Bearer",),
+    "USER_ID_FIELD": "id",
+    "USER_ID_CLAIM": "user_id",
+}
+
+SPECTACULAR_SETTINGS = {
+    "TITLE": "Starforge Edu API",
+    "DESCRIPTION": "Multi-tenant education platform backend.",
+    "VERSION": "1.0.0",
+    "SERVE_INCLUDE_SCHEMA": False,
+    "SCHEMA_PATH_PREFIX": r"/api/v1",
+    "COMPONENT_SPLIT_REQUEST": True,
+    "ENUM_NAME_OVERRIDES": {},
+}
+
+# ---------------------------------------------------------------------------
+# Channels (Redis)
+# ---------------------------------------------------------------------------
+_channel_redis = env("CHANNEL_REDIS_URL") or env("REDIS_URL")
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels_redis.core.RedisChannelLayer",
+        "CONFIG": {"hosts": [_channel_redis]},
+    },
+}
+
+# ---------------------------------------------------------------------------
+# Celery
+# ---------------------------------------------------------------------------
+CELERY_BROKER_URL = env("CELERY_BROKER_URL") or env("REDIS_URL")
+CELERY_RESULT_BACKEND = env("CELERY_RESULT_BACKEND") or env("REDIS_URL")
+CELERY_TIMEZONE = "Asia/Tashkent"
+CELERY_TASK_TRACK_STARTED = True
+CELERY_TASK_TIME_LIMIT = 30 * 60
+CELERY_TASK_SOFT_TIME_LIMIT = 25 * 60
+CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
+# tenant-schemas-celery: every task auto-activates the right tenant schema.
+CELERY_TASK_CLS = "tenant_schemas_celery.task:TenantTask"
+
+# ---------------------------------------------------------------------------
+# Cache (Redis)
+# ---------------------------------------------------------------------------
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.redis.RedisCache",
+        "LOCATION": env("REDIS_URL"),
+    },
+}
+
+# ---------------------------------------------------------------------------
+# Storage (S3-compatible: AWS S3 in prod, MinIO in dev)
+# ---------------------------------------------------------------------------
+STORAGES = {
+    "default": {
+        "BACKEND": "storages.backends.s3.S3Storage",
+        "OPTIONS": {
+            "bucket_name": env("AWS_STORAGE_BUCKET_NAME"),
+            "endpoint_url": env("AWS_S3_ENDPOINT_URL") or None,
+            "access_key": env("AWS_S3_ACCESS_KEY_ID"),
+            "secret_key": env("AWS_S3_SECRET_ACCESS_KEY"),
+            "region_name": env("AWS_S3_REGION_NAME"),
+            "addressing_style": "path",
+            "signature_version": "s3v4",
+            "file_overwrite": False,
+        },
+    },
+    "staticfiles": {
+        "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+    },
+}
+
+# ---------------------------------------------------------------------------
+# CORS / CSRF
+# ---------------------------------------------------------------------------
+CORS_ALLOWED_ORIGINS = env("CORS_ALLOWED_ORIGINS")
+CORS_ALLOW_CREDENTIALS = True
+CSRF_TRUSTED_ORIGINS = env("CSRF_TRUSTED_ORIGINS")
+
+# ---------------------------------------------------------------------------
+# I18N / locale (uz primary, en secondary, ru tertiary)
+# ---------------------------------------------------------------------------
+LANGUAGE_CODE = "uz"
+LANGUAGES = [
+    ("uz", "O‘zbekcha"),
+    ("en", "English"),
+    ("ru", "Русский"),
+]
+LOCALE_PATHS = [BASE_DIR / "locale"]
+TIME_ZONE = "Asia/Tashkent"
+USE_I18N = True
+USE_TZ = True
+
+# ---------------------------------------------------------------------------
+# Static / media
+# ---------------------------------------------------------------------------
+STATIC_URL = "static/"
+STATIC_ROOT = BASE_DIR / "staticfiles"
+STATICFILES_DIRS = [BASE_DIR / "static"]
+MEDIA_URL = "media/"
+MEDIA_ROOT = BASE_DIR / "media"
+
+# ---------------------------------------------------------------------------
+# Email
+# ---------------------------------------------------------------------------
+DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL")
+EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+EMAIL_HOST = env("EMAIL_HOST")
+EMAIL_PORT = env("EMAIL_PORT")
+EMAIL_HOST_USER = env("EMAIL_HOST_USER")
+EMAIL_HOST_PASSWORD = env("EMAIL_HOST_PASSWORD")
+EMAIL_USE_TLS = env("EMAIL_USE_TLS")
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "verbose": {
+            "format": "{asctime} {levelname} {name} [tenant={schema}] {message}",
+            "style": "{",
+        },
+        "simple": {
+            "format": "{levelname} {name} {message}",
+            "style": "{",
+        },
+    },
+    "filters": {
+        "tenant": {"()": "core.logging_filters.TenantSchemaFilter"},
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "filters": ["tenant"],
+            "formatter": "verbose",
+        },
+    },
+    "loggers": {
+        "": {"handlers": ["console"], "level": "INFO"},
+        "django.db.backends": {"level": "WARNING"},
+        "starforge": {"handlers": ["console"], "level": "DEBUG", "propagate": False},
+    },
+}
+
+# ---------------------------------------------------------------------------
+# 3rd-party integration config
+# ---------------------------------------------------------------------------
+ESKIZ_API_URL = env("ESKIZ_API_URL")
+ESKIZ_EMAIL = env("ESKIZ_EMAIL")
+ESKIZ_PASSWORD = env("ESKIZ_PASSWORD")
+ESKIZ_USE_MOCK = env("ESKIZ_USE_MOCK")
+
+ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY")
+ANTHROPIC_DEFAULT_MODEL = "claude-sonnet-4-6"
+ANTHROPIC_PROMPT_CACHE_TTL_SECONDS = 60 * 60 * 24  # 24h
+
+# Per-tenant AI budget defaults (override per-tenant via TenantAIBudget rows).
+AI_DEFAULT_DAILY_TOKENS = 100_000
+AI_DEFAULT_MONTHLY_TOKENS = 2_000_000
+
+# OTP config (consumed by apps.auth)
+OTP_LENGTH = 6
+OTP_TTL_SECONDS = 5 * 60
+OTP_MAX_ATTEMPTS = 5

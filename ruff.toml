@@ -1,0 +1,33 @@
+target-version = "py313"
+line-length = 110
+extend-exclude = ["*/migrations/*"]
+
+[lint]
+select = [
+    "E", "F", "W",       # pycodestyle / pyflakes
+    "I",                  # isort
+    "B",                  # bugbear
+    "UP",                 # pyupgrade
+    "N",                  # pep8 naming
+    "DJ",                 # django
+    "PT",                 # pytest
+    "SIM",                # simplify
+    "RUF",                # ruff-specific
+]
+ignore = [
+    "E501",    # line too long (formatter handles it)
+    "B008",    # function call in default arg (DRF / Django patterns rely on this)
+    "DJ001",   # nullable charfield (we use it intentionally for phone/email)
+    "DJ008",   # __str__ on every model (placeholder models don't need one)
+    "RUF012",  # mutable class defaults — DRF / Django base-class convention
+    "N806",    # Tenant = get_tenant_model() — django convention to name model classes PascalCase
+    "PT009",   # use of unittest-style assertions — fine in Django tests
+    "N818",    # Exception suffix — our domain errors use "Exception" intentionally
+    "RUF001",  # ambiguous unicode characters in strings (uz/ru text contains them)
+]
+
+[lint.isort]
+known-first-party = ["apps", "core", "infrastructure", "celery_tasks", "config"]
+
+[format]
+quote-style = "double"

@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "0.11.x"
+      - run: uv sync --all-groups --frozen
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "0.11.x"
+      - run: uv sync --all-groups --frozen
+      - run: uv run mypy apps core infrastructure config
+
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: starforge
+          POSTGRES_USER: starforge
+          POSTGRES_PASSWORD: starforge
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U starforge"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+    env:
+      DJANGO_SETTINGS_MODULE: config.settings.test
+      DATABASE_URL: postgres://starforge:starforge@localhost:5432/starforge
+      REDIS_URL: redis://localhost:6379/0
+      SECRET_KEY: "ci-only-not-secret"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "0.11.x"
+      - run: uv sync --all-groups --frozen
+      - run: uv run python manage.py check
+      - run: uv run pytest -q
+
+  schema:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "0.11.x"
+      - run: uv sync --all-groups --frozen
+      - name: Generate OpenAPI schema
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings.test
+          SECRET_KEY: "ci-only-not-secret"
+          DATABASE_URL: "postgres://x:x@localhost:5432/x"
+          REDIS_URL: "redis://localhost:6379/0"
+        run: uv run python manage.py spectacular --file openapi.yaml --validate
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openapi
+          path: openapi.yaml
