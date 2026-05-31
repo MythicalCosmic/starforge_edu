@@ -26,6 +26,14 @@ ignore = [
     "RUF001",  # ambiguous unicode characters in strings (uz/ru text contains them)
 ]
 
+[lint.per-file-ignores]
+# Tests are unittest-style Django TestCase classes (django-tenants requires it),
+# so several pytest-flavored lints are false positives here:
+#   PT018 — compound asserts read fine in these tests
+#   PT019 — @patch injects a mock arg, not a pytest fixture
+#   PT027 — self.assertRaises is correct in a unittest TestCase
+"**/tests/**" = ["PT018", "PT019", "PT027"]
+
 [lint.isort]
 known-first-party = ["apps", "core", "infrastructure", "celery_tasks", "config"]
 

@@ -7,8 +7,14 @@ on demo.localhost:8000). Idempotent.
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
 
 import django
+
+# Allow running as a bare script (`python scripts/seed_dev.py`): put the repo
+# root on sys.path so `config` / `apps` import cleanly.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings.development")
 django.setup()

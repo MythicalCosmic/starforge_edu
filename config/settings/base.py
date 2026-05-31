@@ -65,7 +65,12 @@ SHARED_APPS = [
     "apps.tenancy.apps.TenancyConfig",  # Center + Domain only (the tenant model)
     "django.contrib.contenttypes",
     "django.contrib.auth",
-    "django.contrib.admin",
+    # NOTE: django.contrib.admin is intentionally NOT shared. Its LogEntry FKs
+    # to AUTH_USER_MODEL (users.User), which is a tenant-only app — so building
+    # admin in the public schema fails ("relation users_user does not exist")
+    # and breaks `migrate_schemas --shared` on a fresh DB. Admin lives in
+    # TENANT_APPS, so it works per-Center (where staff actually log in).
+    # A platform/apex admin (post-v1) needs a shared user model — see TASKS §2.
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
@@ -180,7 +185,8 @@ AUTH_PASSWORD_VALIDATORS = [
 # ---------------------------------------------------------------------------
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "rest_framework_simplejwt.authentication.JWTAuthentication",
+        # Tenant-bound: rejects a JWT replayed against a different Center.
+        "apps.auth.authentication.TenantBoundJWTAuthentication",
         "rest_framework.authentication.SessionAuthentication",
     ],
     "DEFAULT_PERMISSION_CLASSES": [

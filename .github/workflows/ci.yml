@@ -62,7 +62,13 @@ jobs:
           version: "0.11.x"
       - run: uv sync --all-groups --frozen
       - run: uv run python manage.py check
-      - run: uv run pytest -q
+        # Coverage is gated on the packages that hold real logic. Extend the
+        # --cov list as each domain app gets real models + tests (Days 2-5),
+        # ratcheting toward 70%+ repo-wide for v1.
+      - run: >-
+          uv run pytest -q
+          --cov=apps.auth --cov=apps.tenancy --cov=apps.users --cov=core
+          --cov-report=term-missing --cov-fail-under=75
 
   schema:
     runs-on: ubuntu-latest
