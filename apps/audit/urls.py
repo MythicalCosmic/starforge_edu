@@ -1,8 +1,8 @@
 from rest_framework.routers import DefaultRouter
 
-from .views import AuditItemViewSet
+from .views import AuditLogViewSet
 
 router = DefaultRouter()
-router.register(r"", AuditItemViewSet, basename="audit")
+router.register(r"", AuditLogViewSet, basename="audit")
 
 urlpatterns = router.urls

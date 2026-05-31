@@ -25,3 +25,9 @@ class TenantSafeModelViewSet(viewsets.ModelViewSet):
         schema = getattr(connection, "schema_name", None)
         if not schema or schema == getattr(connection, "get_public_schema_name", lambda: "public")():
             raise TenantContextMissing("This endpoint requires a tenant subdomain.")
+        # Authentication has now run, so request.user is resolved — publish it
+        # for audit attribution (middleware only sees it pre-DRF-auth).
+        if getattr(request.user, "is_authenticated", False):
+            from apps.audit.context import set_actor_user
+
+            set_actor_user(request.user)

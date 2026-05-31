@@ -50,3 +50,23 @@ class Department(models.Model):
 
     def __str__(self) -> str:  # pragma: no cover
         return f"{self.branch.name}/{self.name}"
+
+
+class Room(models.Model):
+    """A bookable room inside a Branch (used by Schedule for conflict checks)."""
+
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="rooms")
+    name = models.CharField(max_length=120)
+    capacity = models.PositiveIntegerField(default=0)
+    equipment = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = (("branch", "name"),)
+        ordering = ("branch", "name")
+
+    def __str__(self) -> str:  # pragma: no cover
+        return f"{self.branch.name}/{self.name}"

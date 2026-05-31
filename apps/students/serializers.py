@@ -1,10 +1,29 @@
 from rest_framework import serializers
 
-from .models import StudentItem
+from .models import StudentProfile
 
 
-class StudentItemSerializer(serializers.ModelSerializer):
+class StudentProfileSerializer(serializers.ModelSerializer):
+    full_name = serializers.SerializerMethodField()
+
     class Meta:
-        model = StudentItem
-        fields = ("id", "name", "notes", "is_active", "created_at", "updated_at")
-        read_only_fields = ("created_at", "updated_at")
+        model = StudentProfile
+        fields = (
+            "id",
+            "user",
+            "full_name",
+            "branch",
+            "student_id",
+            "status",
+            "enrollment_date",
+            "academic_level",
+            "medical_notes",
+            "emergency_contacts",
+            "notes",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("student_id", "created_at", "updated_at")
+
+    def get_full_name(self, obj: StudentProfile) -> str:
+        return obj.user.get_full_name()

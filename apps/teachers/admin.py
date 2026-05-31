@@ -1,10 +1,11 @@
 from django.contrib import admin
 
-from .models import TeacherItem
+from .models import TeacherProfile
 
 
-@admin.register(TeacherItem)
-class TeacherItemAdmin(admin.ModelAdmin):
-    list_display = ("name", "is_active", "created_at")
-    list_filter = ("is_active",)
-    search_fields = ("name",)
+@admin.register(TeacherProfile)
+class TeacherProfileAdmin(admin.ModelAdmin):
+    list_display = ("user", "department", "employment_type", "payout_percent", "is_active")
+    list_filter = ("employment_type", "is_active", "department")
+    search_fields = ("user__phone", "user__email", "user__first_name", "user__last_name")
+    raw_id_fields = ("user",)

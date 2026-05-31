@@ -67,7 +67,9 @@ jobs:
         # ratcheting toward 70%+ repo-wide for v1.
       - run: >-
           uv run pytest -q
-          --cov=apps.auth --cov=apps.tenancy --cov=apps.users --cov=core
+          --cov=apps.auth --cov=apps.tenancy --cov=apps.users
+          --cov=apps.students --cov=apps.parents --cov=apps.teachers
+          --cov=apps.org --cov=apps.audit --cov=core
           --cov-report=term-missing --cov-fail-under=75
 
   schema:

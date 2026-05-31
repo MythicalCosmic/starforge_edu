@@ -56,7 +56,9 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
     Role.HEAD_OF_DEPT: {
         "users:read",
         "students:*",
-        "teachers:read",
+        "parents:*",
+        "teachers:*",
+        "org:read",
         "cohorts:*",
         "attendance:*",
         "academics:*",
@@ -93,8 +95,8 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
     Role.CASHIER: {"finance:read", "payments:write"},
     Role.LIBRARIAN: {"content:*", "students:read", "cohorts:read"},
     Role.SECURITY: {"attendance:write", "users:read"},
-    Role.IT: {"users:read", "audit:read"},
-    Role.REGISTRAR: {"students:*", "users:write", "cohorts:*"},
+    Role.IT: {"users:read", "audit:read", "org:*"},
+    Role.REGISTRAR: {"students:*", "parents:*", "teachers:read", "users:write", "cohorts:*", "org:read"},
     Role.SUPPORT: {"users:read", "audit:read"},
 }
 
