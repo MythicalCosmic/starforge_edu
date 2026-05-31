@@ -136,6 +136,52 @@
 
 ---
 
+## 14. Team events + transparent cost-splitting
+- A place to handle money for **team events** (e.g. the team goes somewhere to
+  relax, paid by the center).
+- **Configurable who pays**, set by a permission-holder: split evenly among
+  attendees, fully covered by the center, or a mix — "some are greedy, some are
+  generous; every center is different."
+- **Event announcement + RSVP:** a fun notification to all staff — e.g.
+  "[Center] we're going to X to relax — want to come? [Join]". One button to RSVP.
+- **Full fair detail shown up front:** how much *you'll* be charged, how much
+  you're expected to bring, what food there'll be, when we leave, when we're back.
+  Accept or reject.
+
+## 15. Procurement / purchase requests (automate "ask the manager for money")
+- Today a worker who wants something (e.g. the media team wants a new camera)
+  waits for the manager to show up, discuss, and release cash.
+- Automate it: submit a **request for an item** → manager approves → **cashier is
+  auto-notified to ready the money** (cashier can delay if the till is empty) →
+  done.
+- **[challenge — Claude's key insight]** This is the SAME shape as payment-delay
+  requests, discount requests, salary preparation, book-sale cash logging, and
+  event cost-splitting: **request → approve(s) → cashier disburses → notify →
+  ledger entry.** Build ONE generic Approvals + Money-movement (ledger) engine and
+  every one of these becomes a configured instance. This is probably the single
+  biggest architectural simplification in the whole product. (See themes below.)
+
+## 16. HR / hiring pipeline + Telegram bots
+- HR bots on **Telegram** and in-app.
+- **Customized application questions** in the app for new candidates.
+- Candidates can be **accepted, scheduled for an interview** on a date, and
+  **talk with the manager or HR/audit** inside the app. Calling supported.
+- (Telegram is dominant in UZ — also a strong channel for the "extreme
+  notifications" idea.)
+
+## 17. Call recording + AI call analysis ("Meta AI")
+- When staff call someone, route it through a recording/analysis layer that
+  **records everything** and reports to the manager (or whoever has access): how
+  the staff member talked to the customer, quality, etc. Call QA / analytics.
+- **[challenge — highest legal/technical risk in the whole vision]** Recording
+  calls implicates consent + personal-data-protection law (UZ has a personal-data
+  localization law) and needs telephony integration + Uzbek/Russian transcription.
+  Validate legality in the research pass; an MVP is likely call *logging* + manual
+  notes + opt-in recording with disclosure, not blanket recording.
+- Clarified: **"Meta AI" is genuinely Meta's AI** (founder saw "Meta sell AI") —
+  likely WhatsApp Business / Meta Business AI for handling & summarizing calls/
+  chats. Integration path + legality both need the research pass.
+
 ## Themes Claude sees across the dump (to discuss)
 1. **Accountability & anti-fraud** runs through everything (cash logging, live
    permission checks, paper accounting, fair payouts, audit). This is arguably the
@@ -144,6 +190,54 @@
    requests, discount requests — all in-app, no in-person asking).
 3. **Paper elimination** is the measurable promise — consider a per-center
    "paper/money saved" dashboard as a retention + sales hook.
+4. **One Approvals + Ledger engine underlies most "money" features.** Payment
+   delay, discounts, partial pay, salary prep, procurement, event cost-split,
+   cash book sales — all are `request → N approvals → cashier disburses → notify
+   → immutable ledger entry`. Build it once (generic, configurable approval
+   chains + a money-movement ledger that ties to the audit trail) and the rest are
+   configuration. Biggest leverage point in the codebase. Pair it with the
+   accountability theme (#1): the ledger is what makes "money can't disappear" true.
+
+## Claude's own ideas (founder asked to hear them — react to these)
+
+**Top 3 (highest leverage):**
+1. **Make the Ledger the product.** Every som is a double-entry row: tuition in,
+   cashier float, salary out, book sale, event split, procurement, refund. A live
+   "where is the money right now" view, auto-reconciled against Click/Payme/Uzum
+   payouts. Anti-fraud by construction — this is the moat, and it's what makes
+   "money can't disappear" literally true (ties to themes #1, #4).
+2. **Telegram-first for parents/students; the app is for staff.** In UZ everyone
+   lives in Telegram. Don't force parents to install an app — deliver attendance
+   pings, payment reminders + pay-links, RSVPs, and report cards through a Telegram
+   bot. Massively lower adoption friction; the polished app is the staff surface.
+3. **Lead → trial → enrolled CRM funnel.** Centers live or die on enrollment, and
+   most UZ "o'quv markazi" software is CRM-first, not LMS. A light sales funnel
+   (lead capture → trial lesson → follow-up via Telegram → enroll) is probably the
+   highest *commercial* ROI module. Reception/attendance/payments keep them; the
+   funnel is what wins the sale.
+
+**Strong supporting ideas:**
+4. **Payment "trust score" (dignity, automated).** Reliable payers auto-earn larger
+   delays/installments without asking a human — removes shame entirely and rewards
+   good behavior. Managers set policy, not case-by-case approvals.
+5. **Attendance kills the paper sheet, concretely.** One-tap roster / QR check-in;
+   auto-absence → Telegram to parent; attendance feeds payroll (pay-per-lesson) and
+   the fairness engine. Directly retires the founder's exact pain.
+6. **"Paper & money saved" dashboard = the renewal hook.** "This month: saved N
+   reams of paper, caught M missed payments, logged X cash sales." Makes the value
+   undeniable at renewal and in sales demos.
+7. **Print-cost attribution + quotas.** Every print job tagged to teacher/cohort/
+   purpose with per-cohort quotas → the printing wedge becomes a cost-savings story.
+8. **Offline-first attendance & cash logging.** Smaller-city internet is flaky;
+   capture offline, sync later. Quietly differentiating.
+9. **Substitute-teacher auto-coverage.** Teacher can't come → system finds a
+   qualified sub from the pool, notifies, and adjusts payroll automatically.
+10. **Onboarding templates by center type.** Pick "language / exam-prep / tutoring"
+    → get sane default roles, permissions, and starter library; still fully
+    customizable (honors the dynamic-permission rule). Fast time-to-value.
+11. **Reframe call QA as consent-first.** Click-to-call with logged outcomes + AI
+    summaries only on consented recordings (auto consent preamble). Manager gets QA
+    without the legal landmine of blanket recording.
 
 ## Next step the founder requested
 - Deep research on how Uzbek education centers actually operate (payments, payroll
