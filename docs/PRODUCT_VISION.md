@@ -373,6 +373,25 @@ discipline above so the dream survives a P&L.
 - **Verdict:** KEEP — but as a **later engagement-layer feature**, not a launch item
   (the 3 waiting centers pay for ops/payments/camera first). Build it safe-by-design.
 
+## Batch 9 — supervised in-app communication: the governed Telegram alternative (2026-06-02)
+- Today centers run on **Telegram** (student/parent groups) → zero oversight, strangers
+  can join, no record. Starforge moves **group chats + all communication INTO the app,
+  fully supervised.** This turns the child-safety risk (Batch 8) into the **value prop**:
+  the **governed alternative to Telegram** — control for the owner, safety for the parent.
+- **Center-provisioned logins (no open signup) → no strangers can log in.** Aligns with
+  the existing auth model (center creates users, OTP login, no public registration).
+- **Weekly high audit of all groups** → ties to the audit log/feed. Make it scalable with
+  **AI moderation**: cheap model (Haiku) scans for profanity/bullying/concern → escalate
+  flagged items to a human/manager (don't make someone read everything).
+- **Profanity ban:** wordlist filter + AI for context (bullying without swear words).
+  **Must cover Uzbek + Russian + English**, not just English.
+- **Co-watch refined (resolves Batch 8 catches):** only **short, approved English
+  LEARNING clips fetched/embedded from YouTube** — "not long horror movies lol." This
+  sidesteps licensing (embed, short, educational) AND safety/attention at once.
+- **Strategy nuance vs "Telegram-first for parents":** not contradictory — **notify via
+  Telegram (reach), but keep supervised group chat in-app (control).** Bonus: in-app
+  comms keeps the data in the center's system (oversight + lock-in + less leakage).
+
 ## Themes Claude sees across the dump (to discuss)
 1. **Accountability & anti-fraud** runs through everything (cash logging, live
    permission checks, paper accounting, fair payouts, audit). This is arguably the
