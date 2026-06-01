@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "P=/home/cosmic/Projects/starforge_edu; printf \"%s\\n\" \"📋 ACTIVE PROJECT: starforge_edu — 14-day production build. READ PLAN_14DAY.md (the full plan).\" \"Completed day-commits so far:\"; (git -C \"$P\" log --oneline 2>/dev/null | grep -oiE \"\\(Day [0-9]+\\)\" | sort -u) || true; printf \"%s\\n\" \"→ RESUME from the next incomplete day. Verify progress with TaskList + the dayN-*.md memory files. End every day green: ruff + mypy + pytest + manage.py check.\"",
+            "timeout": 10,
+            "statusMessage": "Loading 14-day plan"
+          }
+        ]
+      }
+    ]
+  }
+}
