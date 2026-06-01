@@ -448,8 +448,10 @@ the ledger + approvals.)
   **substitute pool**; a cross-center marketplace is a later network-effect play.
 - **Equipment tracking:** who holds which laptop/camera/etc. Simple asset registry;
   same anti-fraud DNA as the ledger ("equipment can't disappear"). Easy win.
-- **Reputation dashboard:** AMBIGUOUS — internal center-health score (aggregate of the
-  metrics above) vs public reviews/ratings (gameable, risky). Clarify which.
+- **Reputation dashboard: BOTH** (founder confirmed) — an **internal** center-health
+  score (aggregate of the metrics above, for the owner) AND **public reviews/ratings**.
+  Public reviews need anti-gaming + moderation (verified students only, no anonymous
+  brigading, center can respond) — treat like the supervised-comms safety model.
 
 ## Themes Claude sees across the dump (to discuss)
 1. **Accountability & anti-fraud** runs through everything (cash logging, live
