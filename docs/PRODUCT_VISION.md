@@ -298,6 +298,39 @@ accordingly (owner-paid ops first, student delight layer as the retention flywhe
   for the lesson's target phrases/structures; AI suggests the search terms. v1 =
   topic/keyword + caption match (precise "uses this grammar" is approximate).
 
+## Batch 6 — the joy layer: student rewards + the living yearbook (2026-06-02 night)
+
+### Student rewards program (company-funded generosity)
+- Top students at **every branch of every center** get real rewards:
+  - **Digital subscriptions** gifted instantly through the app (enter email → granted):
+    **Spotify**, **Netflix** (cap ~5 students), **Crunchyroll** (anime).
+  - **Physical rewards** the company hosts: budget-but-high-perceived-value hardware —
+    e.g. **CMF Buds** (noise-cancelling earbuds). Founder's insight: students have
+    never owned/known noise-cancelling headphones; cheap for us, life-changing for
+    them. "Give them everything."
+- Purpose: this is **marketing + retention + word-of-mouth in one** — a rewarded
+  student evangelizes to everyone; parents see it; near-zero CAC. On-brand with the
+  founder's generosity. "Not a CRM to compete — something else entirely. Not just
+  data — the FUN we'll have while learning."
+- **⚠️ Business guardrail (Claude):** company-funded rewards across every branch is an
+  **unbounded cost that grows with success** — must be made PREDICTABLE, not a vibe:
+  - Fixed/capped reward pool per branch/term; points→catalog redemption with a monthly cap.
+  - **Co-fund with the center** (it's their retention win) and/or land **sponsor deals**
+    (Spotify/local brands love education tie-ins); bulk-buy hardware at cost.
+  - The CMF instinct (max perceived value per dollar) is exactly right — systematize it.
+  - **Every reward is a money-movement → log it in the ledger** (accountability/audit).
+
+### Living yearbook (the group-photo journey)
+- Teachers attach the **group photo** periodically (e.g. daily); over a term/year the
+  cohort sees its **growth/journey** on the app — a living yearbook. Cheap to build,
+  high emotion: belonging + memory + retention glue. Ties to the Cohort model.
+- Consent for minors; visibility scoped to the cohort.
+
+### Theme: the JOY layer is the un-copyable soul
+Incumbents are accountants of education; this adds a generosity/joy/belonging layer
+they will never build. It's the soul of the product — pair the soul with the budget
+discipline above so the dream survives a P&L.
+
 ## Themes Claude sees across the dump (to discuss)
 1. **Accountability & anti-fraud** runs through everything (cash logging, live
    permission checks, paper accounting, fair payouts, audit). This is arguably the
