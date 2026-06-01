@@ -55,7 +55,6 @@
   education center is different. Create custom roles (e.g. "assistant"), define
   their permissions, assign to one or many users.
 - **HARD REQUIREMENT — backend checks live permissions on every request.**
-  Horror story from the founder's old workplace: permissions were stored in
   **localStorage and checked only on the frontend**; logging in as a normal
   teacher, he had full admin control in **under a minute**. The backend never
   verified. This must never happen here: the server is the sole authority, checks
@@ -72,7 +71,6 @@
   ask in person.
 - **Discount requests:** a teacher can request a discount for a specific student
   from the manager; on approval it applies — **percentage or fixed amount.**
-  (Founder studied hard while barely affording it; managers gave discounts.)
 - **Partial / "pay what you can" online payments:** pay any portion (half, some
   %), not just the full amount. Attach a **note explaining your situation** to the
   manager/cashier. They review, accept, and **assign a pay-by date.**
@@ -85,8 +83,7 @@
 
 ## 7. Fair salary / revenue-share engine (founder wants FULL fairness)
 - **Configurable payout rules in-app.** Example: a teacher earns X% of the
-  payments from their own students. Founder earned 15% while others got 25% and
-  wants transparent, fair, auditable rules — no opaque favoritism.
+  payments from their own students. NOt favoritism
 - **Salary-preparation workflow:** a teacher can ask an assigned **cashier to
   prepare their salary**; the cashier can **accept or reject** (sometimes there's
   literally no money in the till — that case must be representable).
@@ -181,6 +178,34 @@
 - Clarified: **"Meta AI" is genuinely Meta's AI** (founder saw "Meta sell AI") —
   likely WhatsApp Business / Meta Business AI for handling & summarizing calls/
   chats. Integration path + legality both need the research pass.
+
+## Batch 3 — business model + the camera differentiator (2026-06-02)
+This reframes the pricing/positioning challenge from the research: Starforge is
+**NOT** a commodity shared-SaaS CRM. It's a **premium, managed, AI-heavy, dedicated-
+infrastructure** product that "brings the education center to life."
+
+- **Real demand, now:** 3 education centers ready to buy, combined **5,000+ students,
+  ~10+ branches.** Founder has used the 3 big incumbents' demos — confirms they're
+  slow/buggy. (Concentration risk: 3 logos — see notes.)
+- **Dedicated server per center**, paid for out of the subscription. Want more
+  programs / capacity? A server is granted. This is the premium justification — and
+  it's why the "$79–225 is 2–5× too high" finding is **largely answered**: it's a
+  different category (managed/dedicated/AI), not the commodity CRM price axis.
+- **Premium AI tiering** (not "cheap shitty AI"): **Claude Opus 4.8 (high-effort)**
+  for heavy reasoning, **Sonnet** for basic, **Haiku** for fast tasks. Cost control
+  matters (Opus high-effort is real money — meter per-center, see TASKS §18 budgets).
+- **AI camera system built in** — the product "looks into cameras." Headline
+  differentiator; founder is confident no competitor has it. (This is the concrete
+  form of the earlier "keep an eye" idea, §13.) Likely uses: presence/attendance,
+  safety/monitoring, behavior insights.
+  - **Architecture win:** camera/face = **biometric data**, which by UZ law MUST stay
+    on **domestic servers** (see uz-market-research). The dedicated **in-country**
+    server-per-center model handles this *perfectly* — the premium model and the law
+    line up. Still need **consent + signage**; keep biometric/video data on the
+    center's own server, never in foreign cloud.
+  - django-tenants (schema-per-tenant) deploys cleanly onto a dedicated per-center
+    server (one/few tenants per box) — **no architectural rework needed**; the same
+    codebase is the managed deployment.
 
 ## Themes Claude sees across the dump (to discuss)
 1. **Accountability & anti-fraud** runs through everything (cash logging, live
