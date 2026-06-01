@@ -331,6 +331,26 @@ Incumbents are accountants of education; this adds a generosity/joy/belonging la
 they will never build. It's the soul of the product — pair the soul with the budget
 discipline above so the dream survives a P&L.
 
+## Batch 7 — points economy + redemption store (2026-06-02 night)
+- **Known brands only** for hardware rewards: **Apple AirPods, Nothing Ear / CMF buds,
+  Samsung Buds.** Quality/trust/aspiration over cheap — "money isn't the most important
+  part." A knockoff reward would cheapen the whole program.
+- **Points economy:** students **earn points from studying** (attendance, scores,
+  improvement, game wins — maybe on-time payment) and **spend them in an in-app store**
+  on a **tiered catalog**:
+  - cheap/frequent: pens, notebooks, accessories (easy to build, low cost);
+  - aspirational/rare: branded earbuds at the top (drives months of grinding even if
+    few redeem — the top prize is the *engine*, not the cost).
+- **This is the disciplined form of Batch 6's generosity:** you control the **earn rate**
+  and the **catalog prices**, so total cost is predictable/capped by design.
+- **Economy discipline:** balance earn vs burn (don't over-issue → inflation/raids),
+  tie earning to real achievement. Points are an **issued currency → track issuance +
+  redemption in the ledger** (auditable, same spine as tuition/salary/rewards).
+- **Unify with the earlier in-app book/material market (Batch 1):** ONE marketplace,
+  TWO currencies — **UZS** for books/materials, **points** for rewards. Reuse the build.
+- Fulfillment: the branch operator hands out physical items + marks it in the app
+  (inventory + accountability; ties to the branch/operator model).
+
 ## Themes Claude sees across the dump (to discuss)
 1. **Accountability & anti-fraud** runs through everything (cash logging, live
    permission checks, paper accounting, fair payouts, audit). This is arguably the
