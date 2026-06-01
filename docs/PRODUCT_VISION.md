@@ -207,6 +207,68 @@ infrastructure** product that "brings the education center to life."
     server (one/few tenants per box) — **no architectural rework needed**; the same
     codebase is the managed deployment.
 
+## Batch 4 — camera design, exams, and the student engagement layer (2026-06-02 night)
+
+### AI camera analysis — design
+- **Edge box in the center** (e.g. i5 7th-gen + GPU) or the center's own server; **data
+  never leaves the building** (satisfies biometric-localization law + huge trust line).
+- Replaces today's ritual where a manager/auditor drags a teacher into a room and
+  watches camera footage together for ~2h/week → slow, resentment-breeding.
+- **Pipeline reality:** "Llama" is a TEXT model — it can't watch video. Real stack =
+  CV (YOLO-type detection/presence) + **ASR (Whisper) on lesson audio** → local LLM
+  (Llama/Qwen) writes the analysis. **Lead with audio→transcript analysis** (cheap,
+  covers "was the teacher on time / did they teach / cover material / tone") + light
+  presence detection; add deep video understanding later.
+- **Batch at end of lesson** (non-real-time) to survive a modest GPU; mind queue
+  spikes when many classes end at once. Hardware floor is really **VRAM** — a used
+  RTX 3060 12GB (~$250) beats a GTX 1650 4GB by a lot.
+- **Who sees the analysis: DYNAMIC — let each center's teachers vote, then configure.**
+  Teacher sees their OWN report (= fairness/self-improvement), not just the manager
+  (= surveillance). Same data, opposite soul. Consent + signage + short retention.
+
+### Mock exams
+- Centers currently BUY mock exams (recurring cost). Starforge provides them:
+  **AI-generated (Opus)** + **government-licensed official sets** (bought by us,
+  distributed to centers as a recurring promise, monthly / quarterly).
+- **The real gold = AI auto-scoring + feedback** on writing/speaking (band score +
+  criterion feedback in seconds; teacher reviews/overrides). Removes the slow,
+  subjective weekend work; makes students feel measurably better.
+- **AI-generated content dodges the copyright landmine** (your own content, not
+  Cambridge/BC). Keep a quality bar early (human glance before students see a mock).
+
+### Typing + computer-based-test (CBT) experience
+- IELTS (and more) is now **computer-based**; many UZ students can't navigate the
+  test UI / type fast → lose bands on mechanics, not English.
+- Build a **faithful CBT simulator** (real timer, listening-plays-once, highlighter,
+  word counter, navigation) + typing practice. Nobody in center-software does this.
+  Open question: flagship for IELTS exam-prep centers vs universal digital-literacy
+  on-ramp for every center.
+
+### Voting / polls primitive
+- Generic poll/vote in the platform (decide analysis visibility, rule-book changes,
+  event adoption). A center that runs on **consent, not decree** — founder's DNA.
+
+### Student engagement layer (the "daily attention" surface)
+- **In-app podcasts** for students — clean UI, listening practice. (Use TTS-generated
+  or licensed audio to stay copyright-clean; control difficulty.)
+- **Focus / study board** — timer + calm widgets (Forest/Pomodoro-style) to study
+  inside the app.
+- **Gamified competition (Blooket/Kahoot/Gimkit-style)** — vocab/translation games
+  ("pull a fish → find the translation → score"), live leaderboards, prizes. These
+  tools are huge globally but **unknown/unadopted in UZ** → real gap. Founder is
+  intensely competitive and wants study + games + social in ONE app.
+  - AI can **generate the game content** from the lesson (vocab quizzes) → ties Opus
+    back in. Digitize the "chocolate prize" into a **points/rewards + badges** system;
+    the teacher can still hand out the real chocolate.
+
+### Theme this batch crystallizes: TWO surfaces, one app
+Starforge is becoming **(a) the ops platform the center OWNER pays for** (payments,
+camera, attendance, payroll, accountability) **AND (b) the daily-attention surface the
+STUDENT opens every day** (games, podcasts, focus, mocks, CBT). Owning the student's
+daily attention is what makes the product **un-rip-out-able** — the ops tool wins the
+sale, the engagement layer wins retention. Different build tracks + audiences; sequence
+accordingly (owner-paid ops first, student delight layer as the retention flywheel).
+
 ## Themes Claude sees across the dump (to discuss)
 1. **Accountability & anti-fraud** runs through everything (cash logging, live
    permission checks, paper accounting, fair payouts, audit). This is arguably the
