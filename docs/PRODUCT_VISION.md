@@ -269,6 +269,35 @@ daily attention is what makes the product **un-rip-out-able** — the ops tool w
 sale, the engagement layer wins retention. Different build tracks + audiences; sequence
 accordingly (owner-paid ops first, student delight layer as the retention flywheel).
 
+## Batch 5 — AI speaking partner + lesson media (2026-06-02 night)
+
+### AI speaking partner / IELTS speaking simulator  ⭐ (flagship candidate)
+- Founder had no one to practice IELTS speaking with in his town → practiced **with
+  AI**. Put that in the app: **you talk to the AI, it runs an actual IELTS speaking
+  test (3 parts: interview / cue-card long turn / discussion), and scores you
+  instantly.** Nobody in the market has this.
+- Stack: **ASR (Whisper)** → **LLM examiner (Opus)** for questions + band scoring →
+  **TTS** for the examiner's voice. 24/7, infinitely patient, no social anxiety
+  (ties to the dignity/shame-reduction theme — shy learners, scarce partners).
+- **Honesty flag:** fluency/coherence, lexical, grammar score well from transcript;
+  **pronunciation is the genuinely hard band** (needs phoneme-level analysis).
+  Approximate it early, label it clearly, improve later — do NOT overpromise a
+  precise pronunciation score.
+
+### Progress tracking
+- Save **voice recordings**; show an **improvement graph by date** + **approximate
+  band trajectory**. The "I can see myself getting better" dopamine = motivation for
+  the student, ROI proof for the parent, retention proof for the center. (Secure/
+  local storage + consent — these are often minors.)
+
+### YouTube lesson-linked clips (teacher time-saver)
+- Founder's teacher used to pull YouTube clips (movies/cartoons) that used **exactly
+  the grammar/vocab from the lesson**. Provide this in-app for the teacher.
+- **Tech/legal:** use the **YouTube API to search + EMBED** the official player —
+  never download/rip (ToS + copyright). Clever matching: search video **captions**
+  for the lesson's target phrases/structures; AI suggests the search terms. v1 =
+  topic/keyword + caption match (precise "uses this grammar" is approximate).
+
 ## Themes Claude sees across the dump (to discuss)
 1. **Accountability & anti-fraud** runs through everything (cash logging, live
    permission checks, paper accounting, fair payouts, audit). This is arguably the
