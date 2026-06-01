@@ -392,6 +392,65 @@ discipline above so the dream survives a P&L.
   Telegram (reach), but keep supervised group chat in-app (control).** Bonus: in-app
   comms keeps the data in the center's system (oversight + lock-in + less leakage).
 
+## Batch 10 — the Intelligence layer + growth/ops (2026-06-02)
+
+**KEY INSIGHT (Claude):** most of this batch is ONE thing — an **Intelligence /
+analytics layer** computed from data Days 2–4 already collect (attendance, grades,
+submissions, payments). Risk flags, family health, branch ranking, teacher
+leaderboards, reputation are all *views/scores* on the same metric pipeline. Build
+the pipeline once; these become configured readouts. (Same "one engine" pattern as
+the ledger + approvals.)
+
+### Student risk prediction ⭐ (killer + easy to start)
+- Flag at-risk students from signals already captured: **attendance dropping,
+  homework not submitted, scores declining, tuition delayed.** Staff see it instantly
+  → call the parent → save the student. **Dropout = the center's #1 revenue leak,** so
+  this is probably the highest-ROI metric feature.
+- **Start as transparent RULES** (attendance <X%, N missed HW, negative score trend,
+  overdue payment), NOT a black-box "AI prediction." Explainable, cheap, shippable
+  now; add ML later. (Don't ship International-style "AI" vapor — ship the real simple thing.)
+
+### Family health / relationship scores
+- Per-student/family scores: attendance, payment reliability, parent responsiveness,
+  performance trend. Manager sees "happy / needs-attention / at-risk" families.
+- **Caution (Claude):** avoid a visible "problem families" label — frame as
+  **"needs attention"** (neutral, action-oriented), keep internal/permissioned. Same
+  data, kinder framing (dignity DNA).
+
+### Teacher performance intelligence  ⚠️ (double-edged)
+- Teachers earn points/rankings; "you're #1 of 20 teachers" messages.
+- **Caution (Claude):** naive leaderboards breed toxicity + gaming + recreate the
+  unfairness the founder hated (teachers with pre-strong students always "win").
+  Measure **value-added / improvement**, not raw scores; teacher sees their own first;
+  reuse the camera-analysis decision (teachers vote on visibility). Fairness DNA.
+
+### Branch ranking
+- Compare branches within a center (and across, for chains). A view on the same metrics.
+
+### Classroom-IQ QR dashboard
+- Teacher scans a QR on entry → instantly sees attendance, homework status, lesson
+  plan, materials for that class. Fast, paperless lesson cockpit.
+
+### Smart group formation / matching
+- Auto-suggest student placement + schedule matching + teacher matching by **level +
+  availability.** **Reuses the schedule conflict/availability engine (Day 3).** v1 =
+  simple suggestions (group by level + matching free windows); real optimization later.
+
+### Student journey timeline (parent-facing)
+- Parent opens the app: "joined 2024 · passed 20 exams · earned a scholarship · won
+  Best Student." A visual portfolio/life-story. Ties to living yearbook + progress
+  graph + rewards/badges. Cheap (a view on existing data), huge emotion + retention.
+
+### Growth & ops
+- **Referral system:** student invites a friend → more students. Pair with the
+  **points/rewards economy** (refer → points). Classic, cheap growth loop.
+- **Teacher marketplace:** a teacher's sick → get a substitute. v1 = within-center
+  **substitute pool**; a cross-center marketplace is a later network-effect play.
+- **Equipment tracking:** who holds which laptop/camera/etc. Simple asset registry;
+  same anti-fraud DNA as the ledger ("equipment can't disappear"). Easy win.
+- **Reputation dashboard:** AMBIGUOUS — internal center-health score (aggregate of the
+  metrics above) vs public reviews/ratings (gameable, risky). Clarify which.
+
 ## Themes Claude sees across the dump (to discuss)
 1. **Accountability & anti-fraud** runs through everything (cash logging, live
    permission checks, paper accounting, fair payouts, audit). This is arguably the
