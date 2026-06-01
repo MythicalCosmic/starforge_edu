@@ -351,6 +351,28 @@ discipline above so the dream survives a P&L.
 - Fulfillment: the branch operator hands out physical items + marks it in the app
   (inventory + accountability; ties to the branch/operator model).
 
+## Batch 8 — "watch together" co-watch social learning (2026-06-02 night)
+- Concept: you're home on your bed, I'm home on mine; I open the app, see you
+  **online**, **request to watch a movie together** (English-only, content set by the
+  center). We watch **synced**, **chat** about the film, learn new words, enjoy each
+  other's company digitally. (Founder unsure whether to include — Claude verdict below.)
+- **Why it's good:** deeply on-brand (joy + companionship + "fun while learning"),
+  co-presence kills the loneliness of self-study, and co-watching + discussing English
+  film is genuinely effective input + speaking practice. Strong daily-engagement /
+  retention driver. Reuses the spine: presence + in-app chat + realtime (Channels is
+  already in the stack) + vocab games from the film.
+- **⚠️ Catch 1 — licensing:** do NOT host/stream copyrighted movies. Use the
+  **Teleparty model: never host video — sync the timeline + chat over each user's own
+  legal playback**, or embed YouTube/public-domain/CC English films. Same "embed/sync,
+  never host/rip" rule as the YouTube clips + podcasts.
+- **⚠️ Catch 2 — child safety (these are minors):** this is a social network for kids.
+  Must be **cohort/center-scoped only (no strangers)**, **center-approved English
+  content only**, **chat moderated + logged to audit**, parent/center-visible. Frame it
+  as **"study together,"** not "social app." A co-watch + chat between minors the center
+  can't see = liability.
+- **Verdict:** KEEP — but as a **later engagement-layer feature**, not a launch item
+  (the 3 waiting centers pay for ops/payments/camera first). Build it safe-by-design.
+
 ## Themes Claude sees across the dump (to discuss)
 1. **Accountability & anti-fraud** runs through everything (cash logging, live
    permission checks, paper accounting, fair payouts, audit). This is arguably the
