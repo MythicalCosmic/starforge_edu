@@ -15,7 +15,11 @@ case "${1:-web}" in
     exec celery -A config beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
     ;;
   migrate)
-    exec python manage.py migrate_schemas --shared
+    # Migrate the public schema (shared apps) AND every tenant schema. Bare
+    # migrate_schemas does both; running --shared first surfaces shared-app
+    # failures with a clearer error before tenant migrations fan out (TD-17).
+    python manage.py migrate_schemas --shared
+    exec python manage.py migrate_schemas --tenant
     ;;
   shell)
     exec /bin/bash

@@ -6,3 +6,6 @@ class CohortsConfig(AppConfig):
     name = "apps.cohorts"
     label = "cohorts"
     verbose_name = "Cohorts (class groups)"
+
+    def ready(self) -> None:
+        from . import receivers  # noqa: F401

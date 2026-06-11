@@ -8,15 +8,20 @@ direct operations: presigned URLs, multipart uploads, bucket admin.
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Any
 
 import boto3
 from botocore.client import Config
 from django.conf import settings
 
 
+def _storage_options() -> dict[str, Any]:
+    return settings.STORAGES["default"]["OPTIONS"]  # type: ignore[index]
+
+
 @lru_cache(maxsize=1)
 def get_s3_client():
-    opts = settings.STORAGES["default"]["OPTIONS"]
+    opts = _storage_options()
     return boto3.client(
         "s3",
         endpoint_url=opts.get("endpoint_url") or None,
@@ -34,7 +39,7 @@ def presign_upload(key: str, *, expires_in: int = 600, content_type: str = "appl
     return get_s3_client().generate_presigned_url(
         "put_object",
         Params={
-            "Bucket": settings.STORAGES["default"]["OPTIONS"]["bucket_name"],
+            "Bucket": _storage_options()["bucket_name"],
             "Key": key,
             "ContentType": content_type,
         },
@@ -46,7 +51,7 @@ def presign_download(key: str, *, expires_in: int = 600) -> str:
     return get_s3_client().generate_presigned_url(
         "get_object",
         Params={
-            "Bucket": settings.STORAGES["default"]["OPTIONS"]["bucket_name"],
+            "Bucket": _storage_options()["bucket_name"],
             "Key": key,
         },
         ExpiresIn=expires_in,

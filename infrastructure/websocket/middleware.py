@@ -32,7 +32,7 @@ def _resolve_tenant_by_hostname(hostname: str):
 @database_sync_to_async
 def _user_from_token(raw_token: str):
     try:
-        validated = UntypedToken(raw_token)
+        validated = UntypedToken(raw_token)  # type: ignore[arg-type]
     except (InvalidToken, TokenError):
         return AnonymousUser()
     try:
@@ -55,9 +55,9 @@ class TenantAwareJWTAuthMiddleware(BaseMiddleware):
 
         tenant = await _resolve_tenant_by_hostname(host) if host else None
         if tenant is not None:
-            connection.set_tenant(tenant)
+            connection.set_tenant(tenant)  # type: ignore[attr-defined]
         else:
-            connection.set_schema_to_public()
+            connection.set_schema_to_public()  # type: ignore[attr-defined]
 
         token = self._extract_token(scope)
         scope["user"] = await _user_from_token(token) if token else AnonymousUser()

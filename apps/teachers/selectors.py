@@ -1,7 +1,11 @@
-"""Teachers read-side selectors."""
+"""Teacher read selectors."""
 
-from .models import TeacherItem
+from __future__ import annotations
+
+from django.db.models import QuerySet
+
+from apps.teachers.models import TeacherProfile
 
 
-def list_active():
-    return TeacherItem.objects.filter(is_active=True)
+def list_teachers() -> QuerySet[TeacherProfile]:
+    return TeacherProfile.objects.select_related("user", "branch", "department")

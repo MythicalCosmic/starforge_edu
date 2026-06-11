@@ -7,4 +7,4 @@ from .serializers import ReportItemSerializer
 class ReportItemViewSet(TenantSafeModelViewSet):
     queryset = ReportItem.objects.all()
     serializer_class = ReportItemSerializer
-    required_perm = "reports:read"
+    resource = "reports"

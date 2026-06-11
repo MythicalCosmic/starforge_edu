@@ -1,7 +1,7 @@
 """Anthropic Claude client wrapper.
 
 Defaults:
-- Model: `claude-opus-4-7` (most capable as of 2026-05).
+- Model: `settings.ANTHROPIC_DEFAULT_MODEL` (one source of truth; `claude-sonnet-4-6`).
 - Adaptive thinking with effort tunable per call.
 - Top-level prompt caching (`cache_control: {"type": "ephemeral"}`)
   enabled by default — caches `tools` + `system` automatically.
@@ -30,9 +30,25 @@ def get_client() -> anthropic.Anthropic:
     return anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
 
 
-def _cache_key(*, model: str, system: str | None, messages: Iterable[dict[str, Any]]) -> str:
+def _cache_key(
+    *,
+    model: str,
+    system: str | None,
+    messages: Iterable[dict[str, Any]],
+    max_tokens: int,
+    effort: str,
+) -> str:
+    # max_tokens and effort change the response, so they MUST be part of the
+    # cache key — otherwise two calls that differ only in those parameters
+    # would collide and serve a wrong cached response (TD-17).
     payload = json.dumps(
-        {"model": model, "system": system, "messages": list(messages)},
+        {
+            "model": model,
+            "system": system,
+            "messages": list(messages),
+            "max_tokens": max_tokens,
+            "effort": effort,
+        },
         sort_keys=True,
     )
     return f"anthropic:resp:{stable_hash(payload)}"
@@ -56,7 +72,13 @@ def complete(
     """
 
     model = model or settings.ANTHROPIC_DEFAULT_MODEL
-    redis_key = _cache_key(model=model, system=system, messages=messages)
+    redis_key = _cache_key(
+        model=model,
+        system=system,
+        messages=messages,
+        max_tokens=max_tokens,
+        effort=effort,
+    )
 
     if use_response_cache:
         cached = cache.get(redis_key)

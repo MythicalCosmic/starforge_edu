@@ -8,3 +8,6 @@ class AuthAppConfig(AppConfig):
     name = "apps.auth"
     label = "auth_app"
     verbose_name = "Auth (OTP + JWT)"
+
+    def ready(self) -> None:
+        from . import receivers  # noqa: F401

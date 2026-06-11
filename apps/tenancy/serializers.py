@@ -6,7 +6,12 @@ from .models import Center, Domain
 class DomainSerializer(serializers.ModelSerializer):
     class Meta:
         model = Domain
-        fields = ("domain", "is_primary")
+        fields = ("id", "domain", "is_primary")
+
+
+class DomainCreateSerializer(serializers.Serializer):
+    domain = serializers.CharField(max_length=253)
+    is_primary = serializers.BooleanField(default=False)
 
 
 class CenterSerializer(serializers.ModelSerializer):
@@ -25,7 +30,8 @@ class CenterSerializer(serializers.ModelSerializer):
             "is_active",
             "on_trial",
             "trial_ends_at",
+            "archived_at",
             "created_at",
             "domains",
         )
-        read_only_fields = ("schema_name", "created_at")
+        read_only_fields = ("schema_name", "archived_at", "created_at")

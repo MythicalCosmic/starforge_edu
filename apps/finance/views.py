@@ -7,4 +7,4 @@ from .serializers import FinanceItemSerializer
 class FinanceItemViewSet(TenantSafeModelViewSet):
     queryset = FinanceItem.objects.all()
     serializer_class = FinanceItemSerializer
-    required_perm = "finance:read"
+    resource = "finance"

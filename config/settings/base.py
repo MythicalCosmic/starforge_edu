@@ -35,8 +35,10 @@ env = environ.Env(
     ESKIZ_API_URL=(str, "https://notify.eskiz.uz/api"),
     ESKIZ_EMAIL=(str, ""),
     ESKIZ_PASSWORD=(str, ""),
+    ESKIZ_FROM=(str, "4546"),  # TD-17: approved sender nick; 4546 is Eskiz's test sender
     ESKIZ_USE_MOCK=(bool, True),
     ANTHROPIC_API_KEY=(str, ""),
+    FIELD_ENCRYPTION_KEY=(str, ""),  # TD-11 Fernet key (O-11); dev/test override locally
     DEFAULT_FROM_EMAIL=(str, "noreply@starforge.uz"),
     EMAIL_HOST=(str, "localhost"),
     EMAIL_PORT=(int, 25),
@@ -69,6 +71,12 @@ SHARED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
+    # TD-3 / ADR-007: identity also lives in the public schema so platform staff
+    # can log into the apex /admin/ and IsAdminUser works on the platform API.
+    # These stay in TENANT_APPS too (a table per tenant schema as well).
+    "apps.users.apps.UsersConfig",
+    "apps.auth.apps.AuthAppConfig",
+    "rest_framework_simplejwt.token_blacklist",
     "django_celery_beat",
     "channels",
     "corsheaders",
@@ -115,7 +123,15 @@ PUBLIC_SCHEMA_URLCONF = "config.urls_public"
 # Middleware (TenantMainMiddleware MUST be first)
 # ---------------------------------------------------------------------------
 MIDDLEWARE = [
+    # Outermost: stamps every request/response with an X-Request-ID and exposes
+    # it to log records — must wrap everything, including the health probes.
+    "core.middleware.RequestIDMiddleware",
+    # Liveness/readiness probes answer on ANY Host header and must bypass tenant
+    # resolution, so this sits before TenantMainMiddleware (D1-LA-8).
+    "core.middleware.HealthCheckMiddleware",
     "django_tenants.middleware.main.TenantMainMiddleware",
+    # A resolved-but-inactive tenant returns 503 (Lane B, after tenant resolution).
+    "core.middleware.InactiveTenantMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -180,7 +196,8 @@ AUTH_PASSWORD_VALIDATORS = [
 # ---------------------------------------------------------------------------
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "rest_framework_simplejwt.authentication.JWTAuthentication",
+        # TD-1: tenant-bound JWT (rejects cross-tenant + stale-tv tokens).
+        "core.authentication.TenantAwareJWTAuthentication",
         "rest_framework.authentication.SessionAuthentication",
     ],
     "DEFAULT_PERMISSION_CLASSES": [
@@ -189,7 +206,11 @@ REST_FRAMEWORK = {
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     "DEFAULT_PAGINATION_CLASS": "core.pagination.DefaultPagination",
     "PAGE_SIZE": 25,
-    "DEFAULT_FILTER_BACKENDS": ["django_filters.rest_framework.DjangoFilterBackend"],
+    "DEFAULT_FILTER_BACKENDS": [
+        "django_filters.rest_framework.DjangoFilterBackend",
+        "rest_framework.filters.SearchFilter",
+        "rest_framework.filters.OrderingFilter",
+    ],
     "DEFAULT_THROTTLE_CLASSES": [
         "rest_framework.throttling.AnonRateThrottle",
         "rest_framework.throttling.UserRateThrottle",
@@ -248,6 +269,19 @@ CELERY_TASK_SOFT_TIME_LIMIT = 25 * 60
 CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 # tenant-schemas-celery: every task auto-activates the right tenant schema.
 CELERY_TASK_CLS = "tenant_schemas_celery.task:TenantTask"
+
+# Beat schedule (DatabaseScheduler ingests this; D4-F consolidates and makes
+# purge_expired_otps iterate tenants).
+CELERY_BEAT_SCHEDULE = {
+    "deactivate-expired-trials": {
+        "task": "celery_tasks.tenancy_tasks.deactivate_expired_trials",
+        "schedule": 60 * 60,  # hourly
+    },
+    "purge-expired-otps": {
+        "task": "celery_tasks.cleanup_tasks.purge_expired_otps",
+        "schedule": 60 * 60 * 24,  # daily
+    },
+}
 
 # ---------------------------------------------------------------------------
 # Cache (Redis)
@@ -330,7 +364,7 @@ LOGGING = {
     "disable_existing_loggers": False,
     "formatters": {
         "verbose": {
-            "format": "{asctime} {levelname} {name} [tenant={schema}] {message}",
+            "format": "{asctime} {levelname} {name} [tenant={schema} req={request_id}] {message}",
             "style": "{",
         },
         "simple": {
@@ -340,11 +374,12 @@ LOGGING = {
     },
     "filters": {
         "tenant": {"()": "core.logging_filters.TenantSchemaFilter"},
+        "request_id": {"()": "core.logging_filters.RequestIDFilter"},
     },
     "handlers": {
         "console": {
             "class": "logging.StreamHandler",
-            "filters": ["tenant"],
+            "filters": ["tenant", "request_id"],
             "formatter": "verbose",
         },
     },
@@ -361,10 +396,15 @@ LOGGING = {
 ESKIZ_API_URL = env("ESKIZ_API_URL")
 ESKIZ_EMAIL = env("ESKIZ_EMAIL")
 ESKIZ_PASSWORD = env("ESKIZ_PASSWORD")
+ESKIZ_FROM = env("ESKIZ_FROM")  # TD-17: sender ID (was hardcoded "4546")
 ESKIZ_USE_MOCK = env("ESKIZ_USE_MOCK")
 
 ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY")
 ANTHROPIC_DEFAULT_MODEL = "claude-sonnet-4-6"
+
+# TD-11 field encryption (O-11). Empty by default; dev/test set a deterministic
+# throwaway key, prod REQUIRES a real one (core.fields raises without it).
+FIELD_ENCRYPTION_KEY = env("FIELD_ENCRYPTION_KEY")
 ANTHROPIC_PROMPT_CACHE_TTL_SECONDS = 60 * 60 * 24  # 24h
 
 # Per-tenant AI budget defaults (override per-tenant via TenantAIBudget rows).
@@ -375,3 +415,12 @@ AI_DEFAULT_MONTHLY_TOKENS = 2_000_000
 OTP_LENGTH = 6
 OTP_TTL_SECONDS = 5 * 60
 OTP_MAX_ATTEMPTS = 5
+# Resend cooldown + per-IP enumeration cap (Lane C; CenterSettings overrides the
+# cooldown once Lane B's accessor lands — these are the platform fallbacks).
+OTP_COOLDOWN_SECONDS = 60
+OTP_IP_DISTINCT_IDENTIFIER_CAP = 5
+
+# TD-17: OTP verify must NOT auto-create users by default. Staff pre-create
+# accounts; a Center opts into self-serve via CenterSettings.open_registration
+# (Lane B rewires apps.auth.services._registration_open to read that flag).
+OPEN_REGISTRATION_DEFAULT = False

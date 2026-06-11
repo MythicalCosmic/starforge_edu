@@ -1,8 +1,9 @@
-"""Periodic cleanup tasks. Wired via django-celery-beat in admin."""
+"""Periodic cleanup tasks. Wired via django-celery-beat / CELERY_BEAT_SCHEDULE."""
 
 from __future__ import annotations
 
 from django.utils import timezone
+from django_tenants.utils import get_public_schema_name, get_tenant_model, schema_context
 
 from apps.users.models import OTP
 from config.celery import app
@@ -10,5 +11,17 @@ from config.celery import app
 
 @app.task
 def purge_expired_otps() -> int:
-    deleted, _ = OTP.objects.filter(expires_at__lt=timezone.now()).delete()
-    return deleted
+    """Purge expired OTP rows from the public schema AND every tenant schema.
+
+    `users_otp` exists in all schemas (apps.users is SHARED + TENANT, TD-3), so a
+    single public-schema delete would leak every tenant's expired rows. Iterate
+    explicitly. (D4-F may convert this to a true per-tenant fan-out at scale.)
+    """
+    total = 0
+    Tenant = get_tenant_model()
+    schemas = [get_public_schema_name(), *Tenant.objects.values_list("schema_name", flat=True)]
+    for schema in schemas:
+        with schema_context(schema):
+            deleted, _ = OTP.objects.filter(expires_at__lt=timezone.now()).delete()
+            total += deleted
+    return total

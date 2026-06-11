@@ -7,4 +7,4 @@ from .serializers import ContentItemSerializer
 class ContentItemViewSet(TenantSafeModelViewSet):
     queryset = ContentItem.objects.all()
     serializer_class = ContentItemSerializer
-    required_perm = "content:read"
+    resource = "content"

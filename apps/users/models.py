@@ -10,15 +10,27 @@ so RoleMembership only exists on tenant schemas.
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin
 from django.db import models
 from django.db.models import CheckConstraint, Q
 from django.utils import timezone
+from django.utils.translation import gettext_lazy as _
 
 from .managers import UserManager
 
 
 class User(AbstractBaseUser, PermissionsMixin):
+    class Gender(models.TextChoices):
+        MALE = "m", _("Male")
+        FEMALE = "f", _("Female")
+
+    class Language(models.TextChoices):
+        UZBEK = "uz", _("Uzbek")
+        RUSSIAN = "ru", _("Russian")
+        ENGLISH = "en", _("English")
+
     phone = models.CharField(max_length=32, unique=True, null=True, blank=True)
     email = models.EmailField(unique=True, null=True, blank=True)
 
@@ -26,8 +38,17 @@ class User(AbstractBaseUser, PermissionsMixin):
     last_name = models.CharField(max_length=150, blank=True)
     middle_name = models.CharField(max_length=150, blank=True)
 
+    birthdate = models.DateField(null=True, blank=True)
+    gender = models.CharField(max_length=8, choices=Gender.choices, blank=True)
+    preferred_language = models.CharField(max_length=8, choices=Language.choices, default=Language.UZBEK)
+
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
+
+    # Bumped (F-expression) on password change, role grant/revoke, and
+    # logout-everywhere. The JWT carries it as `tv`; a mismatch invalidates
+    # every live access token (TD-1).
+    token_version = models.PositiveIntegerField(default=1)
 
     date_joined = models.DateTimeField(default=timezone.now)
     last_seen_at = models.DateTimeField(null=True, blank=True)
@@ -35,7 +56,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     objects = UserManager()
 
     USERNAME_FIELD = "phone"
-    REQUIRED_FIELDS: list[str] = []  # createsuperuser will prompt for phone+password
+    REQUIRED_FIELDS: ClassVar[list[str]] = []  # createsuperuser prompts phone+password
 
     class Meta:
         constraints = [
@@ -117,18 +138,29 @@ class Device(models.Model):
 class RoleMembership(models.Model):
     """Assignment of a Role to a User scoped by Branch (and optionally Department).
 
-    Branch and Department live in apps.org. Stored as integer FKs to avoid
-    a circular dependency at model-import time.
+    Branch and Department live in apps.org (TENANT_APPS only). Because the
+    `users` app is SHARED (TD-3 — public-schema platform staff), this model also
+    gets a table in the public schema, where `org_*` tables do NOT exist. The
+    `db_constraint=False` on the org FKs lets the public table be created without
+    a dangling DB-level reference; tenant schemas keep referential integrity at
+    the ORM/service layer (platform staff never hold RoleMemberships). See
+    ADR-007.
     """
 
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="role_memberships")
-    branch = models.ForeignKey("org.Branch", on_delete=models.CASCADE, related_name="role_memberships")
+    branch = models.ForeignKey(
+        "org.Branch",
+        on_delete=models.CASCADE,
+        related_name="role_memberships",
+        db_constraint=False,
+    )
     department = models.ForeignKey(
         "org.Department",
         on_delete=models.CASCADE,
         related_name="role_memberships",
         null=True,
         blank=True,
+        db_constraint=False,
     )
     role = models.CharField(max_length=32)
 

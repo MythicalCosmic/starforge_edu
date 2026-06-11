@@ -6,3 +6,6 @@ class OrgConfig(AppConfig):
     name = "apps.org"
     label = "org"
     verbose_name = "Organization"
+
+    def ready(self) -> None:
+        from . import receivers  # noqa: F401

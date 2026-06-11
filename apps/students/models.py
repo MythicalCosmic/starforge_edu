@@ -1,23 +1,85 @@
-"""Students models — v1 scaffold.
+"""Student domain models (TASKS sections 5-6)."""
 
-Stub models live here only to prove the app loads + migrates. Replace with
-real domain models per feature ticket.
-"""
+from __future__ import annotations
 
 from django.db import models
+from django.utils.translation import gettext_lazy as _
+
+from core.fields import EncryptedTextField
 
 
-class StudentItem(models.Model):
-    """Placeholder so the app has at least one migrated model."""
+class StudentProfile(models.Model):
+    class Status(models.TextChoices):
+        LEAD = "lead", _("Lead")
+        APPLICATION = "application", _("Application")
+        ACCEPTED = "accepted", _("Accepted")
+        ENROLLED = "enrolled", _("Enrolled")
+        ACTIVE = "active", _("Active")
+        GRADUATED = "graduated", _("Graduated")
+        WITHDRAWN = "withdrawn", _("Withdrawn")
 
-    name = models.CharField(max_length=200)
-    notes = models.TextField(blank=True)
-    is_active = models.BooleanField(default=True)
+    user = models.OneToOneField("users.User", on_delete=models.CASCADE, related_name="student_profile")
+    student_id = models.CharField(max_length=32, unique=True)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.LEAD, db_index=True)
+    branch = models.ForeignKey("org.Branch", on_delete=models.PROTECT, related_name="students")
+    current_cohort = models.ForeignKey(
+        "cohorts.Cohort",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="current_students",
+    )
+    enrollment_date = models.DateField(null=True, blank=True)
+    academic_level = models.CharField(max_length=64, blank=True)
+    medical_notes = EncryptedTextField(blank=True)
+    emergency_contacts = models.JSONField(default=list, blank=True)
+    photo = models.ImageField(upload_to="students/photos/", blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        app_label = "students"
+        ordering = ("-created_at",)
+        indexes = [models.Index(fields=("status", "branch"))]
 
     def __str__(self) -> str:  # pragma: no cover
-        return self.name
+        return self.student_id
+
+
+class EnrollmentEvent(models.Model):
+    class ReasonCode(models.TextChoices):
+        COMPLETED = "completed", _("Completed")
+        MOVED_CITY = "moved_city", _("Moved city")
+        FINANCIAL = "financial", _("Financial")
+        BEHAVIOR = "behavior", _("Behavior")
+        SCHEDULE_CONFLICT = "schedule_conflict", _("Schedule conflict")
+        OTHER = "other", _("Other")
+
+    student = models.ForeignKey(StudentProfile, on_delete=models.CASCADE, related_name="enrollment_events")
+    from_status = models.CharField(max_length=16)
+    to_status = models.CharField(max_length=16)
+    reason_code = models.CharField(max_length=32, choices=ReasonCode.choices, blank=True)
+    note = models.TextField(blank=True)
+    actor = models.ForeignKey(
+        "users.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+
+    def __str__(self) -> str:  # pragma: no cover
+        return f"{self.student_id}:{self.from_status}->{self.to_status}"
+
+
+class StudentIdCounter(models.Model):
+    """Per-year monotonic counter for generated student IDs (locked on use)."""
+
+    year = models.PositiveSmallIntegerField(unique=True)
+    last_value = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ("-year",)
+
+    def __str__(self) -> str:  # pragma: no cover
+        return f"{self.year}:{self.last_value}"

@@ -7,4 +7,4 @@ from .serializers import AssignmentItemSerializer
 class AssignmentItemViewSet(TenantSafeModelViewSet):
     queryset = AssignmentItem.objects.all()
     serializer_class = AssignmentItemSerializer
-    required_perm = "assignments:read"
+    resource = "assignments"

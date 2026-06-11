@@ -62,7 +62,9 @@ jobs:
           version: "0.11.x"
       - run: uv sync --all-groups --frozen
       - run: uv run python manage.py check
-      - run: uv run pytest -q
+      # TD-20 coverage floor: 70 after Day 1 → 80 after Day 3 → 85 after Day 5.
+      # Raising this number is the EOD duty of D1-A / D3-F / D5-B respectively.
+      - run: uv run pytest -q --cov=apps --cov=core --cov-fail-under=70
 
   schema:
     runs-on: ubuntu-latest

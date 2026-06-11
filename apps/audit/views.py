@@ -7,4 +7,4 @@ from .serializers import AuditItemSerializer
 class AuditItemViewSet(TenantSafeModelViewSet):
     queryset = AuditItem.objects.all()
     serializer_class = AuditItemSerializer
-    required_perm = "audit:read"
+    resource = "audit"

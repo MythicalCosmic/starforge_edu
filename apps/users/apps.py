@@ -7,6 +7,5 @@ class UsersConfig(AppConfig):
     label = "users"
     verbose_name = "Users"
 
-    def ready(self) -> None:  # pragma: no cover
-        # signal wiring goes here when needed
-        return None
+    def ready(self) -> None:
+        from . import receivers  # noqa: F401

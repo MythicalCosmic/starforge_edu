@@ -28,6 +28,7 @@ class Center(TenantMixin):
     is_active = models.BooleanField(default=True)
     on_trial = models.BooleanField(default=True)
     trial_ends_at = models.DateTimeField(null=True, blank=True)
+    archived_at = models.DateTimeField(null=True, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

@@ -7,7 +7,7 @@ Multi-tenant Django backend for an Uzbek education platform.
 - django-tenants (schema-per-tenant) with subdomain routing
 - Channels + Redis (realtime); Celery + tenant-schemas-celery (background)
 - Postgres 16, S3-compatible storage (MinIO in dev / AWS S3 in prod)
-- Anthropic Claude (`claude-opus-4-7`) with prompt caching
+- Anthropic Claude (`claude-sonnet-4-6`) with prompt caching
 - Eskiz SMS (real client + dev mock)
 - uv for dependency management; ruff + mypy + pytest
 

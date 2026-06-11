@@ -7,4 +7,4 @@ from .serializers import AcademicItemSerializer
 class AcademicItemViewSet(TenantSafeModelViewSet):
     queryset = AcademicItem.objects.all()
     serializer_class = AcademicItemSerializer
-    required_perm = "academics:read"
+    resource = "academics"

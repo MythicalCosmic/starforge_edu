@@ -1,10 +1,15 @@
 """Test settings — fast, deterministic, no external services."""
 
+import base64
+
 from .base import *  # noqa: F403
 
 DEBUG = False
 SECRET_KEY = "test-only-not-secret"
 ALLOWED_HOSTS = ["*"]
+
+# Deterministic field-encryption key (TD-11) so encrypted round-trips are stable.
+FIELD_ENCRYPTION_KEY = base64.urlsafe_b64encode(b"starforge-dev-fieldenc-key-32byt").decode()
 
 # Synchronous Celery in tests.
 CELERY_TASK_ALWAYS_EAGER = True

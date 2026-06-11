@@ -1,8 +1,8 @@
 from rest_framework.routers import DefaultRouter
 
-from .views import CohortItemViewSet
+from .views import CohortViewSet
 
 router = DefaultRouter()
-router.register(r"", CohortItemViewSet, basename="cohorts")
+router.register(r"", CohortViewSet, basename="cohorts")
 
 urlpatterns = router.urls

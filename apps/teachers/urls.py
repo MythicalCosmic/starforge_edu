@@ -1,8 +1,8 @@
 from rest_framework.routers import DefaultRouter
 
-from .views import TeacherItemViewSet
+from .views import TeacherViewSet
 
 router = DefaultRouter()
-router.register(r"", TeacherItemViewSet, basename="teachers")
+router.register(r"", TeacherViewSet, basename="teachers")
 
 urlpatterns = router.urls

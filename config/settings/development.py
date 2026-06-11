@@ -1,10 +1,15 @@
 """Development settings — verbose, permissive, hot-reloadable."""
 
+import base64
+
 from .base import *  # noqa: F403
 from .base import env
 
 DEBUG = True
 ALLOWED_HOSTS = ["*"]
+
+# Deterministic throwaway field-encryption key (TD-11) — dev only, never prod.
+FIELD_ENCRYPTION_KEY = base64.urlsafe_b64encode(b"starforge-dev-fieldenc-key-32byt").decode()
 
 # Allow *.localhost for django-tenants subdomain routing in dev.
 INTERNAL_IPS = ["127.0.0.1"]

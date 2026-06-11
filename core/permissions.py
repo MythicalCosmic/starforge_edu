@@ -1,13 +1,16 @@
 """Role / permission matrix and DRF permission classes.
 
 Single source of truth: ROLE_PERMISSION_MATRIX maps role -> set of action codes
-(`'<resource>:<verb>'`). The RolePermission DRF class consults this matrix on
-each request; ObjectScopedPermission additionally checks branch/department
-scoping when a view declares `object_scope = "branch" | "department"`.
+(`'<resource>:<verb>'`).
 
-Real role assignments live on RoleMembership(user, branch, department, role)
-in apps.users.models. v1 permissions are intentionally coarse — refine per
-feature when the workflow is actually built.
+TD-4 — fail-closed: a view that declares neither `required_perms[action]` nor a
+`resource` from which to derive one is **denied** (never silently allowed).
+TD-5 — per-action: views declare `resource = "<name>"` (CRUD verbs derived via
+`default_perms`) plus `required_perms = {"<custom_action>": "<resource>:<verb>"}`
+for every `@action`.
+TD-13 — the active RoleMemberships are fetched once per request and memoized on
+`request._role_memberships_cache`, so RolePermission + ObjectScopedPermission
+never issue more than one membership query.
 """
 
 from __future__ import annotations
@@ -49,8 +52,8 @@ class Role:
     )
 
 
-# Stub matrix — director sees everything, others see their own resource
-# group only. Refine per-feature when wiring the actual ViewSets.
+# Matrix — director sees everything; others see their own resource group. Lanes
+# append real per-feature codes as each domain lands (additive edits only).
 ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
     Role.DIRECTOR: {"*:*"},
     Role.HEAD_OF_DEPT: {
@@ -93,10 +96,29 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
     Role.CASHIER: {"finance:read", "payments:write"},
     Role.LIBRARIAN: {"content:*", "students:read", "cohorts:read"},
     Role.SECURITY: {"attendance:write", "users:read"},
-    Role.IT: {"users:read", "audit:read"},
-    Role.REGISTRAR: {"students:*", "users:write", "cohorts:*"},
+    Role.IT: {"users:read", "audit:read", "org:*"},
+    Role.REGISTRAR: {"students:*", "users:write", "cohorts:*", "parents:*", "teachers:read"},
     Role.SUPPORT: {"users:read", "audit:read"},
 }
+
+
+DEFAULT_VERB_FOR_ACTION: dict[str, str] = {
+    "list": "read",
+    "retrieve": "read",
+    "create": "write",
+    "update": "write",
+    "partial_update": "write",
+    "destroy": "write",
+}
+
+
+def default_perms(resource: str) -> dict[str, str]:
+    """Standard CRUD permission map for a resource (TD-5).
+
+    Spread into a viewset's `required_perms` and add custom `@action` codes:
+    `required_perms = {**default_perms("students"), "transition": "students:write"}`.
+    """
+    return {action: f"{resource}:{verb}" for action, verb in DEFAULT_VERB_FOR_ACTION.items()}
 
 
 def has_permission_code(roles: Iterable[str], code: str) -> bool:
@@ -112,8 +134,26 @@ def has_permission_code(roles: Iterable[str], code: str) -> bool:
     return False
 
 
+def get_role_memberships(request: Request) -> list:
+    """Active RoleMemberships for the request user, fetched once and memoized."""
+    cached = getattr(request, "_role_memberships_cache", None)
+    if cached is not None:
+        return cached
+    user = getattr(request, "user", None)
+    if not user or not user.is_authenticated:
+        memberships: list = []
+    else:
+        memberships = list(user.role_memberships.filter(revoked_at__isnull=True))
+    request._role_memberships_cache = memberships  # type: ignore[attr-defined]
+    return memberships
+
+
+def get_user_roles(request: Request) -> set[str]:
+    return {m.role for m in get_role_memberships(request)}
+
+
 class RolePermission(BasePermission):
-    """Per-action permission. Views declare `required_perm = 'resource:verb'`."""
+    """TD-5 per-action; TD-4 fail-closed: no declaration => deny."""
 
     def has_permission(self, request: Request, view: APIView) -> bool:
         user = request.user
@@ -121,43 +161,38 @@ class RolePermission(BasePermission):
             return False
         if user.is_superuser:
             return True
-        required = getattr(view, "required_perm", None)
+        action = getattr(view, "action", None) or (request.method or "").lower()
+        required = (getattr(view, "required_perms", None) or {}).get(action)
         if required is None:
-            return True  # view didn't declare; falls back to IsAuthenticated default
-        roles = _user_roles(user)
-        return has_permission_code(roles, required)
+            resource = getattr(view, "resource", None)
+            verb = DEFAULT_VERB_FOR_ACTION.get(action)
+            if resource is None or verb is None:
+                return False  # TD-4: deny, never fall through to permissive default
+            required = f"{resource}:{verb}"
+        return has_permission_code(get_user_roles(request), required)
 
 
 class ObjectScopedPermission(BasePermission):
     """Object-level scoping by branch/department.
 
-    Views set `object_scope = "branch" | "department"`. The object is expected
-    to expose `branch_id` and/or `department_id`. Director and superuser bypass.
+    Views set `object_scope = "branch" | "department"`; the object exposes
+    `branch_id` and/or `department_id`. Director and superuser bypass.
     """
 
     def has_object_permission(self, request: Request, view: APIView, obj: object) -> bool:
         user = request.user
         if user.is_superuser:
             return True
-        if Role.DIRECTOR in _user_roles(user):
+        memberships = get_role_memberships(request)
+        if any(m.role == Role.DIRECTOR for m in memberships):
             return True
         scope = getattr(view, "object_scope", None)
         if scope is None:
             return True
-        memberships = getattr(user, "role_memberships", None)
-        if memberships is None:
-            return False
         if scope == "branch":
-            allowed = {m.branch_id for m in memberships.all()}
+            allowed = {m.branch_id for m in memberships}
             return getattr(obj, "branch_id", None) in allowed
         if scope == "department":
-            allowed = {m.department_id for m in memberships.all() if m.department_id}
+            allowed = {m.department_id for m in memberships if m.department_id}
             return getattr(obj, "department_id", None) in allowed
         return False
-
-
-def _user_roles(user: object) -> set[str]:
-    memberships = getattr(user, "role_memberships", None)
-    if memberships is None:
-        return set()
-    return {m.role for m in memberships.all()}

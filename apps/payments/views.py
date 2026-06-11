@@ -7,4 +7,4 @@ from .serializers import PaymentItemSerializer
 class PaymentItemViewSet(TenantSafeModelViewSet):
     queryset = PaymentItem.objects.all()
     serializer_class = PaymentItemSerializer
-    required_perm = "payments:read"
+    resource = "payments"

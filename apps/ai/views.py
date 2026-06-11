@@ -7,4 +7,4 @@ from .serializers import AiItemSerializer
 class AiItemViewSet(TenantSafeModelViewSet):
     queryset = AiItem.objects.all()
     serializer_class = AiItemSerializer
-    required_perm = "ai_app:read"
+    resource = "ai_app"

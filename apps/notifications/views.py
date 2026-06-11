@@ -7,4 +7,4 @@ from .serializers import NotificationItemSerializer
 class NotificationItemViewSet(TenantSafeModelViewSet):
     queryset = NotificationItem.objects.all()
     serializer_class = NotificationItemSerializer
-    required_perm = "notifications:read"
+    resource = "notifications"

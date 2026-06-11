@@ -1,10 +1,16 @@
 """Production settings."""
 
+from django.core.exceptions import ImproperlyConfigured
+
 from .base import *  # noqa: F403
-from .base import env
+from .base import FIELD_ENCRYPTION_KEY, env
 
 DEBUG = False
 ALLOWED_HOSTS = env("ALLOWED_HOSTS")
+
+# TD-11 / O-11: encrypted fields are unreadable without this — fail fast.
+if not FIELD_ENCRYPTION_KEY:
+    raise ImproperlyConfigured("FIELD_ENCRYPTION_KEY must be set in production (TD-11).")
 
 SECURE_SSL_REDIRECT = True
 SECURE_HSTS_SECONDS = 60 * 60 * 24 * 365
@@ -18,8 +24,29 @@ X_FRAME_OPTIONS = "DENY"
 # Never mock real SMS in prod.
 ESKIZ_USE_MOCK = False
 
+# Structured JSON logging in production only (D1-LA-10) — dev/test stay human.
+LOGGING["formatters"]["json"] = {  # type: ignore[index]  # noqa: F405
+    "()": "core.logging_filters.JsonFormatter",
+}
+LOGGING["handlers"]["console"]["formatter"] = "json"  # type: ignore[index]  # noqa: F405
+
+# Sentry — config-only (D1-LA-13 / O-10). No effect unless SENTRY_DSN is set,
+# so dev/test/CI never need the dependency installed.
+SENTRY_DSN = env("SENTRY_DSN", default="")
+if SENTRY_DSN:
+    import sentry_sdk
+    from sentry_sdk.integrations.django import DjangoIntegration
+
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        integrations=[DjangoIntegration()],
+        traces_sample_rate=env.float("SENTRY_TRACES_SAMPLE_RATE", default=0.0),
+        send_default_pii=False,
+        environment=env("SENTRY_ENVIRONMENT", default="production"),
+    )
+
 # Static files served via S3 in prod.
-STORAGES["staticfiles"] = {  # type: ignore[name-defined]  # noqa: F405
+STORAGES["staticfiles"] = {  # noqa: F405
     "BACKEND": "storages.backends.s3.S3Storage",
     "OPTIONS": {
         "bucket_name": env("AWS_STATIC_BUCKET_NAME", default=env("AWS_STORAGE_BUCKET_NAME")),
