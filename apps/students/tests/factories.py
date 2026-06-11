@@ -12,7 +12,7 @@ from apps.students.models import StudentProfile
 from apps.users.tests.factories import UserFactory
 
 
-class StudentProfileFactory(factory.django.DjangoModelFactory):
+class StudentProfileFactory(factory.django.DjangoModelFactory[StudentProfile]):
     class Meta:
         model = StudentProfile
 

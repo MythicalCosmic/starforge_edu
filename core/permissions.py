@@ -71,6 +71,9 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
     Role.TEACHER: {
         "students:read",
         "cohorts:read",
+        # D1-LB-3 / D1-LF-8 acceptance: teachers read org structure (branches,
+        # rooms, working hours, settings knobs) — never write it.
+        "org:read",
         "attendance:*",
         "academics:write",
         "assignments:*",
@@ -78,6 +81,9 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "content:*",
     },
     Role.STUDENT: {
+        # students:read is row-scoped to self by apps/students/selectors.py
+        # (read_self semantics live in selectors, not the gate — TD-5).
+        "students:read",
         "schedule:read",
         "attendance:read_self",
         "academics:read_self",
@@ -85,6 +91,10 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "content:read",
     },
     Role.PARENT: {
+        # Row-scoped by selectors: students -> guardian-linked children only,
+        # parents -> own profile only (TD-5 read_own_children semantics).
+        "students:read",
+        "parents:read",
         "students:read_own_children",
         "attendance:read_own_children",
         "academics:read_own_children",

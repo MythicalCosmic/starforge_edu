@@ -48,4 +48,13 @@ class Center(TenantMixin):
 class Domain(DomainMixin):
     """Hostname → Center mapping. One Center can have multiple Domains."""
 
-    pass
+    class Meta:
+        constraints = [
+            # DB-level backstop for the one-primary invariant that
+            # services.set_primary_domain maintains under row locks.
+            models.UniqueConstraint(
+                fields=["tenant"],
+                condition=models.Q(is_primary=True),
+                name="one_primary_domain_per_tenant",
+            ),
+        ]

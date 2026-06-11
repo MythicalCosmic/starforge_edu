@@ -31,22 +31,57 @@ def _student_profile_model():
         return None
 
 
+def validate_department_head(user) -> None:
+    """Raise unless `user` may head a department (must have a TeacherProfile).
+
+    Single source of truth for D1-LF-4 / D1-LD-10 — shared by the service and
+    DepartmentSerializer.validate_head. Once `teachers.TeacherProfile` exists
+    the user must have one; until then the check is skipped."""
+    if user is None:
+        return
+    TeacherProfile = _teacher_profile_model()
+    if TeacherProfile is not None and not TeacherProfile.objects.filter(user=user).exists():
+        raise ValidationException(_("Department head must be a teacher."), code="head_not_teacher")
+
+
 def set_department_head(department: Department, user) -> Department:
-    """Assign a department head. Once `teachers.TeacherProfile` exists the user
-    must have one; until then the check is skipped (D1-LF-4 / D1-LD-10)."""
-    if user is not None:
-        TeacherProfile = _teacher_profile_model()
-        if TeacherProfile is not None and not TeacherProfile.objects.filter(user=user).exists():
-            raise ValidationException(_("Department head must be a teacher."), code="head_not_teacher")
+    """Assign a department head (validated: head must be a teacher)."""
+    validate_department_head(user)
     department.head = user
     department.save(update_fields=["head", "updated_at"])
     return department
 
 
+def validate_student_id_pattern(pattern: str, *, center_code: str = "") -> None:
+    """Guard `CenterSettings.student_id_pattern` (D1-LD-4): it must contain
+    {NNNNN} (otherwise generated IDs collide → IntegrityError 500) and a
+    rendered sample must fit the 32-char `student_id` column. {YYYY} is
+    recommended so the per-year counter reset never collides; its absence is
+    not an error (the counter is year-scoped but historic IDs may overlap)."""
+    if "{NNNNN}" not in pattern:
+        raise ValidationException(
+            _("student_id_pattern must contain the {NNNNN} counter placeholder."),
+            code="invalid_id_pattern",
+        )
+    sample = (
+        pattern.replace("{CODE}", center_code or "X" * 16)
+        .replace("{YYYY}", "2026")
+        .replace("{NNNNN}", "00000")
+    )
+    if len(sample) > 32:  # StudentProfile.student_id max_length
+        raise ValidationException(
+            _("student_id_pattern renders longer than 32 characters."),
+            code="invalid_id_pattern",
+        )
+
+
 @transaction.atomic
 def replace_working_hours(branch: Branch, rows: list[dict[str, Any]]) -> list[BranchWorkingHours]:
     """Replace a branch's weekday rows wholesale (D1-LF-2). Validates that open
-    times precede close times on non-closed days."""
+    times precede close times on non-closed days and that no weekday repeats."""
+    weekdays = [row["weekday"] for row in rows]
+    if len(weekdays) != len(set(weekdays)):
+        raise ValidationException(_("Each weekday may appear at most once."), code="invalid_working_hours")
     for row in rows:
         if not row.get("is_closed", False) and row["opens_at"] >= row["closes_at"]:
             raise ValidationException(_("opens_at must be before closes_at."), code="invalid_working_hours")

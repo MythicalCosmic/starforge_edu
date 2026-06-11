@@ -1,11 +1,12 @@
 from django.shortcuts import get_object_or_404
+from django.utils.translation import gettext_lazy as _
 from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from core.exceptions import PermissionException
+from core.exceptions import ConflictException, PermissionException
 from core.permissions import get_user_roles, has_permission_code
 from core.viewsets import TenantSafeAPIView, TenantSafeModelViewSet
 
@@ -88,6 +89,14 @@ class BranchViewSet(TenantSafeModelViewSet):
             _require_org_write(request)
             serializer = HolidayWriteSerializer(data=request.data)
             serializer.is_valid(raise_exception=True)
+            # Pre-check the (branch, date) unique constraint so a duplicate is a
+            # clean 409 envelope, not an IntegrityError 500 (D1-LF-3). The DB
+            # constraint remains the backstop for the TOCTOU window.
+            if branch.holidays.filter(date=serializer.validated_data["date"]).exists():
+                raise ConflictException(
+                    _("This branch already has a holiday on that date."),
+                    code="holiday_exists",
+                )
             holiday = branch.holidays.create(**serializer.validated_data)
             return Response(HolidaySerializer(holiday).data, status=status.HTTP_201_CREATED)
         return Response(HolidaySerializer(branch.holidays.all(), many=True).data)

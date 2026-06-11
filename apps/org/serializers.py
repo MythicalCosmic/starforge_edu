@@ -10,6 +10,7 @@ from .models import (
     Department,
     Room,
 )
+from .services import validate_department_head, validate_student_id_pattern
 
 
 class DepartmentSerializer(serializers.ModelSerializer):
@@ -27,6 +28,12 @@ class DepartmentSerializer(serializers.ModelSerializer):
             "created_at",
         )
         read_only_fields = ("created_at",)
+
+    def validate_head(self, user):
+        # Raises core ValidationException (400 head_not_teacher envelope) on
+        # both create and update — D1-LF-4's only write surface.
+        validate_department_head(user)
+        return user
 
 
 class WorkingHoursSerializer(serializers.ModelSerializer):
@@ -138,6 +145,11 @@ class CenterSettingsSerializer(serializers.ModelSerializer):
     """Explicit fields (TD-13 — never `__all__`); every knob is editable by a
     director, internal timestamps are read-only."""
 
+    # TD-13 JSON shape guards: Day-2 consumers (upload checks, OTP channel
+    # selection) rely on these shapes — malformed values must 400 at write time.
+    allowed_file_types = serializers.ListField(child=serializers.SlugField(), required=False)
+    otp_channel_prefs = serializers.DictField(child=serializers.BooleanField(), required=False)
+
     class Meta:
         model = CenterSettings
         fields = (
@@ -160,3 +172,18 @@ class CenterSettingsSerializer(serializers.ModelSerializer):
             "updated_at",
         )
         read_only_fields = ("updated_at",)
+
+    def validate_otp_channel_prefs(self, prefs: dict) -> dict:
+        unknown = set(prefs) - {"sms", "email"}
+        if unknown:
+            raise serializers.ValidationError(f"Unknown OTP channels: {sorted(unknown)}.")
+        return prefs
+
+    def validate(self, attrs):
+        # Cross-field: the rendered pattern length depends on center_code, so
+        # validate the (pattern, code) pair as it will exist after this write.
+        pattern = attrs.get("student_id_pattern", getattr(self.instance, "student_id_pattern", None))
+        if pattern is not None:
+            code = attrs.get("center_code", getattr(self.instance, "center_code", "") or "")
+            validate_student_id_pattern(pattern, center_code=code)
+        return attrs

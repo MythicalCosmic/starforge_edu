@@ -4,9 +4,14 @@ Declarative MATRIX_CASES — Day-2+ lanes append one tuple per case. Drives the
 fail-closed (TD-4) per-action (TD-5) permission system against real endpoints.
 """
 
-import pytest
+from types import SimpleNamespace
 
-from core.permissions import Role
+import pytest
+from rest_framework.request import Request
+from rest_framework.test import APIRequestFactory
+from rest_framework.views import APIView
+
+from core.permissions import Role, RolePermission
 
 pytestmark = pytest.mark.django_db
 
@@ -16,18 +21,21 @@ MATRIX_CASES = [
     (Role.DIRECTOR, "get", "/api/v1/users/", True),
     (Role.IT, "get", "/api/v1/users/", True),
     (Role.STUDENT, "get", "/api/v1/users/", False),
-    # org branches (org:read / org:write)
+    # org branches (org:read / org:write) — teacher GET 200 per D1-LF-8.
     (Role.DIRECTOR, "get", "/api/v1/org/branches/", True),
     (Role.IT, "get", "/api/v1/org/branches/", True),
-    (Role.TEACHER, "get", "/api/v1/org/branches/", False),
+    (Role.TEACHER, "get", "/api/v1/org/branches/", True),
     (Role.TEACHER, "post", "/api/v1/org/branches/", False),
-    # org settings singleton (org:read)
+    # org settings singleton (org:read) — teacher GET 200 per D1-LB-3.
     (Role.DIRECTOR, "get", "/api/v1/org/settings/", True),
-    (Role.TEACHER, "get", "/api/v1/org/settings/", False),
-    # students (students:read)
+    (Role.TEACHER, "get", "/api/v1/org/settings/", True),
+    # students (students:read) — parent/student self-service reads are scoped
+    # by selectors (TD-5); the gate must let them through.
     (Role.DIRECTOR, "get", "/api/v1/students/", True),
     (Role.REGISTRAR, "get", "/api/v1/students/", True),
     (Role.TEACHER, "get", "/api/v1/students/", True),
+    (Role.PARENT, "get", "/api/v1/students/", True),
+    (Role.STUDENT, "get", "/api/v1/students/", True),
     (Role.CASHIER, "get", "/api/v1/students/", False),
     # cohorts (cohorts:read)
     (Role.DIRECTOR, "get", "/api/v1/cohorts/", True),
@@ -37,9 +45,10 @@ MATRIX_CASES = [
     (Role.DIRECTOR, "get", "/api/v1/teachers/", True),
     (Role.REGISTRAR, "get", "/api/v1/teachers/", True),
     (Role.STUDENT, "get", "/api/v1/teachers/", False),
-    # parents (parents:read)
+    # parents (parents:read) — parent reads own profile via selector scoping.
     (Role.DIRECTOR, "get", "/api/v1/parents/", True),
     (Role.REGISTRAR, "get", "/api/v1/parents/", True),
+    (Role.PARENT, "get", "/api/v1/parents/", True),
     (Role.TEACHER, "get", "/api/v1/parents/", False),
 ]
 
@@ -55,7 +64,30 @@ def test_permission_matrix(as_role, role, method, url, allowed):
         assert resp.json()["error"]["code"] == "forbidden"
 
 
-def test_unmapped_action_is_fail_closed(as_role):
-    """A role with no matching matrix entry is denied (TD-4)."""
+def test_role_without_code_denied(as_role):
+    """A role lacking the required permission code is denied (ordinary matrix
+    denial). The true TD-4 fail-closed cases are the unit tests below."""
     client, _ = as_role(Role.SECURITY)
     assert client.get("/api/v1/parents/").status_code == 403
+
+
+def _authed_request(method="get"):
+    req = Request(getattr(APIRequestFactory(), method)("/synthetic/"))
+    req.user = SimpleNamespace(is_authenticated=True, is_superuser=False)  # type: ignore[assignment]
+    return req
+
+
+def test_fail_closed_no_mapping_403():
+    """TD-4 (DAY-1 Lane C): a view declaring neither `resource` nor
+    `required_perms` denies every authenticated non-superuser."""
+    view = APIView()  # action falls back to "get" -> no verb, no resource
+    assert RolePermission().has_permission(_authed_request(), view) is False
+
+
+def test_fail_closed_unmapped_custom_action():
+    """TD-4: a custom @action missing from required_perms and
+    DEFAULT_VERB_FOR_ACTION is denied even when `resource` is set."""
+    view = APIView()
+    view.resource = "students"  # type: ignore[attr-defined]
+    view.action = "frobnicate"  # type: ignore[attr-defined]
+    assert RolePermission().has_permission(_authed_request("post"), view) is False

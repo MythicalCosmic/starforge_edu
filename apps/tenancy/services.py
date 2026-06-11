@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import re
 
-from django.db import connection, transaction
+from django.db import IntegrityError, connection, transaction
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from django_tenants.utils import schema_context
 
-from core.exceptions import ConflictException, ValidationException
+from core.exceptions import NotFoundException, ValidationException
 
 from .models import Center, Domain
 
@@ -84,35 +84,51 @@ def archive_center(center: Center) -> Center:
 
     Uses raw `ALTER SCHEMA RENAME` (no ORM equivalent; the schema name is
     slug-validated so it is injection-safe — WORKLOG justification)."""
+    if center.archived_at is not None:
+        raise ValidationException(_("Center is already archived."), code="already_archived")
     now = timezone.now()
     old_schema = center.schema_name
-    new_schema = f"_archived_{old_schema}_{now:%Y%m%d}"
-    with connection.cursor() as cursor:
-        cursor.execute(f'ALTER SCHEMA "{old_schema}" RENAME TO "{new_schema}"')
-    center.schema_name = new_schema
-    center.is_active = False
-    center.archived_at = now
-    center.save(update_fields=["schema_name", "is_active", "archived_at"])
+    prefix, suffix = "_archived_", f"_{now:%Y%m%d}"
+    # Postgres identifiers max out at 63 bytes; truncate the slug portion so the
+    # rename target and the varchar(63) schema_name column stay in sync.
+    new_schema = f"{prefix}{old_schema[: 63 - len(prefix) - len(suffix)]}{suffix}"
+    assert len(new_schema) <= 63
+    with transaction.atomic():
+        with connection.cursor() as cursor:
+            cursor.execute(f'ALTER SCHEMA "{old_schema}" RENAME TO "{new_schema}"')
+        center.schema_name = new_schema
+        center.is_active = False
+        center.archived_at = now
+        center.save(update_fields=["schema_name", "is_active", "archived_at"])
     return center
 
 
 @transaction.atomic
 def set_primary_domain(center: Center, domain_id: int) -> Domain:
     """Make exactly one Domain primary for a Center, atomically."""
-    domain = Domain.objects.select_for_update().filter(tenant=center, pk=domain_id).first()
+    # Lock the whole domain set: locking only the target row lets two concurrent
+    # promotions each demote a snapshot that misses the other's new primary.
+    # The one_primary_domain_per_tenant constraint is the DB-level backstop.
+    domains = {d.pk: d for d in Domain.objects.select_for_update().filter(tenant=center)}
+    domain = domains.get(domain_id)
     if domain is None:
-        raise ConflictException(_("Domain does not belong to this center."), code="not_found")
+        raise NotFoundException(_("Domain does not belong to this center."))
     Domain.objects.filter(tenant=center, is_primary=True).exclude(pk=domain.pk).update(is_primary=False)
     domain.is_primary = True
     domain.save(update_fields=["is_primary"])
     return domain
 
 
+@transaction.atomic
 def add_domain(center: Center, *, domain: str, is_primary: bool = False) -> Domain:
     """Attach a hostname to a Center (TXT ownership check stubbed — O-8)."""
     if Domain.objects.filter(domain=domain).exists():
         raise ValidationException(_("That domain is already registered."), code="domain_taken")
-    row = Domain.objects.create(domain=domain, tenant=center, is_primary=False)
+    try:
+        row = Domain.objects.create(domain=domain, tenant=center, is_primary=False)
+    except IntegrityError as exc:
+        # Unique race: a concurrent insert won between the pre-check and ours.
+        raise ValidationException(_("That domain is already registered."), code="domain_taken") from exc
     if is_primary:
         set_primary_domain(center, row.pk)
         row.refresh_from_db()

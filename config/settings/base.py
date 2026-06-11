@@ -37,6 +37,7 @@ env = environ.Env(
     ESKIZ_PASSWORD=(str, ""),
     ESKIZ_FROM=(str, "4546"),  # TD-17: approved sender nick; 4546 is Eskiz's test sender
     ESKIZ_USE_MOCK=(bool, True),
+    NUM_PROXIES=(int, 0),  # trusted reverse-proxy hops for X-Forwarded-For (0 = trust REMOTE_ADDR only)
     ANTHROPIC_API_KEY=(str, ""),
     FIELD_ENCRYPTION_KEY=(str, ""),  # TD-11 Fernet key (O-11); dev/test override locally
     DEFAULT_FROM_EMAIL=(str, "noreply@starforge.uz"),
@@ -218,12 +219,21 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         "anon": "60/min",
         "user": "1000/min",
+        "login_user": "5/min",
+        "login_ip": "10/min",
         "otp_phone": "3/min",
+        "otp_verify": "10/min",
         "otp_ip": "10/min",
         "otp_global": "1000/hour",
     },
+    # Trusted-proxy depth for DRF's get_ident (IP throttles); mirrors
+    # core.utils.client_ip so all IP-keyed controls share one source.
+    # 0 = trust REMOTE_ADDR only (None would mean "trust raw XFF" — unsafe).
+    "NUM_PROXIES": env("NUM_PROXIES"),
     "EXCEPTION_HANDLER": "core.exceptions.drf_exception_handler",
 }
+
+NUM_PROXIES = env("NUM_PROXIES")
 
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=15),
@@ -270,8 +280,10 @@ CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 # tenant-schemas-celery: every task auto-activates the right tenant schema.
 CELERY_TASK_CLS = "tenant_schemas_celery.task:TenantTask"
 
-# Beat schedule (DatabaseScheduler ingests this; D4-F consolidates and makes
-# purge_expired_otps iterate tenants).
+# Beat schedule (DatabaseScheduler ingests this at beat startup; tasks register
+# with workers via celery_tasks/tasks.py — see tests/test_celery_registration.py.
+# purge_expired_otps already iterates public + tenant schemas; D4-F only
+# consolidates schedule registration).
 CELERY_BEAT_SCHEDULE = {
     "deactivate-expired-trials": {
         "task": "celery_tasks.tenancy_tasks.deactivate_expired_trials",
@@ -412,15 +424,12 @@ AI_DEFAULT_DAILY_TOKENS = 100_000
 AI_DEFAULT_MONTHLY_TOKENS = 2_000_000
 
 # OTP config (consumed by apps.auth)
+# OTP codes serve password reset / contact verification only — login is
+# username+password (owner decision 2026-06-11; see apps/auth/services.py).
 OTP_LENGTH = 6
 OTP_TTL_SECONDS = 5 * 60
 OTP_MAX_ATTEMPTS = 5
-# Resend cooldown + per-IP enumeration cap (Lane C; CenterSettings overrides the
-# cooldown once Lane B's accessor lands — these are the platform fallbacks).
+# Resend cooldown + per-IP enumeration cap (CenterSettings overrides the
+# cooldown per tenant — these are the platform fallbacks).
 OTP_COOLDOWN_SECONDS = 60
 OTP_IP_DISTINCT_IDENTIFIER_CAP = 5
-
-# TD-17: OTP verify must NOT auto-create users by default. Staff pre-create
-# accounts; a Center opts into self-serve via CenterSettings.open_registration
-# (Lane B rewires apps.auth.services._registration_open to read that flag).
-OPEN_REGISTRATION_DEFAULT = False

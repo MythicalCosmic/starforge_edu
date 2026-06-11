@@ -62,7 +62,25 @@ def tenant_b(db):
 
 @pytest.fixture
 def api_client():
-    return APIClient()  # host = "testserver" → public schema; tenant views 400
+    # NOTE: bare APIClient() uses host "testserver", which django-tenants 404s
+    # unless the public_tenant fixture has mapped it to the public schema.
+    return APIClient()
+
+
+@pytest.fixture
+def public_tenant(db):
+    """Map host "testserver" to the public schema so tests can hit the platform
+    surface (apex /admin/, /api/v1/platform/)."""
+    from django_tenants.utils import get_public_schema_name
+
+    from apps.tenancy.models import Center, Domain
+
+    center, _ = Center.objects.get_or_create(
+        schema_name=get_public_schema_name(),
+        defaults={"name": "Platform", "slug": "platform"},
+    )
+    Domain.objects.get_or_create(domain="testserver", tenant=center, defaults={"is_primary": True})
+    return center
 
 
 @pytest.fixture

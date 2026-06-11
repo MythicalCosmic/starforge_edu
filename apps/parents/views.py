@@ -4,7 +4,6 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from apps.parents import selectors, services
-from apps.parents.models import PickupAuthorization
 from apps.parents.serializers import (
     GuardianReadSerializer,
     GuardianWriteSerializer,
@@ -90,7 +89,9 @@ class GuardianViewSet(TenantSafeModelViewSet):
 
 class PickupAuthorizationViewSet(TenantSafeModelViewSet):
     resource = "parents"
-    queryset = PickupAuthorization.objects.select_related("student__user")
     serializer_class = PickupAuthorizationSerializer
     filterset_fields = ("student", "is_active")
     ordering_fields = ("created_at",)
+
+    def get_queryset(self):
+        return selectors.scoped_pickups(user=self.request.user, roles=get_user_roles(self.request))

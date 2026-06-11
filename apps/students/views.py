@@ -5,8 +5,10 @@ from rest_framework.response import Response
 
 from apps.students import selectors, services
 from apps.students.serializers import (
+    BirthdayQuerySerializer,
     EnrollmentEventSerializer,
     StudentCreateSerializer,
+    StudentDetailSerializer,
     StudentImportSerializer,
     StudentReadSerializer,
     StudentUpdateSerializer,
@@ -38,6 +40,9 @@ class StudentViewSet(TenantSafeModelViewSet):
             return StudentCreateSerializer
         if self.action in ("update", "partial_update"):
             return StudentUpdateSerializer
+        if self.action == "retrieve":
+            # Role-gated medical_notes; get_serializer() supplies request context.
+            return StudentDetailSerializer
         return StudentReadSerializer
 
     @extend_schema(
@@ -91,15 +96,13 @@ class StudentViewSet(TenantSafeModelViewSet):
     )
     @action(detail=False, methods=["get"])
     def birthdays(self, request):
-        try:
-            days = int(request.query_params.get("days", 7))
-        except (TypeError, ValueError):
-            days = 7
+        params = BirthdayQuerySerializer(data=request.query_params)
+        params.is_valid(raise_exception=True)
         queryset = selectors.students_with_upcoming_birthdays(
             base=selectors.scoped_students(user=request.user, roles=get_user_roles(request)),
-            days=days,
-            branch=request.query_params.get("branch"),
-            cohort=request.query_params.get("cohort"),
+            days=params.validated_data["days"],
+            branch=params.validated_data.get("branch"),
+            cohort=params.validated_data.get("cohort"),
         )
         page = self.paginate_queryset(queryset)
         if page is not None:

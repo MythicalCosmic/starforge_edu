@@ -1,0 +1,133 @@
+"""Cohort membership invariants (D1-LD-9): moves keep history, archived
+cohorts are read-only, and DELETE can never cascade history away."""
+
+from __future__ import annotations
+
+import pytest
+from django.utils import timezone
+from django_tenants.utils import schema_context
+
+from apps.cohorts.models import Cohort, CohortMembership
+from apps.cohorts.services import enroll_student_in_cohort
+from apps.cohorts.tests.factories import CohortFactory
+from apps.org.tests.factories import BranchFactory
+from apps.students.tests.factories import StudentProfileFactory
+from core.permissions import Role
+
+pytestmark = pytest.mark.django_db
+
+
+@pytest.fixture
+def director(as_role):
+    return as_role(Role.DIRECTOR)[0]
+
+
+def test_cohort_move_keeps_history(director, tenant_a):
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory.create()
+        cohort_a = CohortFactory.create(branch=branch)
+        cohort_b = CohortFactory.create(branch=branch)
+        student = StudentProfileFactory.create(branch=branch)
+        old = enroll_student_in_cohort(cohort=cohort_a, student=student)
+
+    resp = director.post(
+        f"/api/v1/cohorts/{cohort_b.id}/move-student/",
+        {"student": student.id, "reason": "schedule_conflict"},
+        format="json",
+    )
+    assert resp.status_code == 200
+    assert resp.json()["over_capacity"] is False
+
+    with schema_context(tenant_a.schema_name):
+        old.refresh_from_db()  # end-dated, never deleted
+        assert old.end_date == timezone.now().date()
+        assert old.moved_reason == "schedule_conflict"
+        active = CohortMembership.objects.get(student=student, end_date__isnull=True)
+        assert active.cohort_id == cohort_b.id
+        student.refresh_from_db()
+        assert student.current_cohort_id == cohort_b.id
+        assert CohortMembership.objects.filter(student=student).count() == 2
+
+
+def test_archived_cohort_write_400(director, tenant_a):
+    with schema_context(tenant_a.schema_name):
+        cohort = CohortFactory.create(is_archived=True)
+
+    resp = director.patch(f"/api/v1/cohorts/{cohort.id}/", {"name": "Renamed"}, format="json")
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "cohort_archived"
+
+    with schema_context(tenant_a.schema_name):
+        student = StudentProfileFactory.create(branch=cohort.branch)
+    resp = director.post(f"/api/v1/cohorts/{cohort.id}/enroll/", {"student": student.id}, format="json")
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "cohort_archived"
+
+
+def test_destroy_archived_cohort_400(director, tenant_a):
+    with schema_context(tenant_a.schema_name):
+        cohort = CohortFactory.create(is_archived=True)
+    resp = director.delete(f"/api/v1/cohorts/{cohort.id}/")
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "cohort_archived"
+    with schema_context(tenant_a.schema_name):
+        assert Cohort.objects.filter(pk=cohort.id).exists()
+
+
+def test_destroy_cohort_with_history_409(director, tenant_a):
+    with schema_context(tenant_a.schema_name):
+        cohort = CohortFactory.create()
+        student = StudentProfileFactory.create(branch=cohort.branch)
+        membership = enroll_student_in_cohort(cohort=cohort, student=student)
+
+    resp = director.delete(f"/api/v1/cohorts/{cohort.id}/")
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "cohort_has_history"
+    with schema_context(tenant_a.schema_name):
+        assert CohortMembership.objects.filter(pk=membership.id).exists()  # history intact
+
+
+def test_destroy_empty_cohort_204(director, tenant_a):
+    with schema_context(tenant_a.schema_name):
+        cohort = CohortFactory.create()
+    assert director.delete(f"/api/v1/cohorts/{cohort.id}/").status_code == 204
+    with schema_context(tenant_a.schema_name):
+        assert not Cohort.objects.filter(pk=cohort.id).exists()
+
+
+def test_unarchive_makes_cohort_writable_again(director, tenant_a):
+    with schema_context(tenant_a.schema_name):
+        cohort = CohortFactory.create(is_archived=True)
+
+    resp = director.post(f"/api/v1/cohorts/{cohort.id}/unarchive/")
+    assert resp.status_code == 200
+    assert resp.json()["is_archived"] is False
+
+    resp = director.patch(f"/api/v1/cohorts/{cohort.id}/", {"name": "Back in service"}, format="json")
+    assert resp.status_code == 200
+
+
+def test_student_patch_cannot_rewrite_cohort_or_branch(director, tenant_a):
+    """PATCH /students/{id}/ must not bypass the move service (membership
+    history) or the D2 branch-transfer service: both fields are non-writable."""
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory.create()
+        other_branch = BranchFactory.create()
+        cohort_a = CohortFactory.create(branch=branch)
+        cohort_b = CohortFactory.create(branch=branch)
+        student = StudentProfileFactory.create(branch=branch)
+        enroll_student_in_cohort(cohort=cohort_a, student=student)
+
+    resp = director.patch(
+        f"/api/v1/students/{student.id}/",
+        {"current_cohort": cohort_b.id, "branch": other_branch.id, "academic_level": "B2"},
+        format="json",
+    )
+    assert resp.status_code == 200
+
+    with schema_context(tenant_a.schema_name):
+        student.refresh_from_db()
+        assert student.current_cohort_id == cohort_a.id  # unchanged
+        assert student.branch_id == branch.id  # unchanged
+        assert student.academic_level == "B2"  # writable field applied
+        assert CohortMembership.objects.filter(student=student).count() == 1

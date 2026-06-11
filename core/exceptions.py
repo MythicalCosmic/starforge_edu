@@ -69,9 +69,22 @@ class NotFoundException(StarforgeError):
 
 
 class ThrottledException(StarforgeError):
+    """429 with an optional ``wait`` (seconds) surfaced as a Retry-After header,
+    matching DRF's own Throttled behavior so clients can branch uniformly."""
+
     code = "throttled"
     status_code = status.HTTP_429_TOO_MANY_REQUESTS
     default_detail = _("Too many requests.")
+
+    def __init__(
+        self,
+        detail: StrOrPromise | None = None,
+        *,
+        code: str | None = None,
+        wait: float | None = None,
+    ) -> None:
+        self.wait = wait
+        super().__init__(detail, code=code)
 
 
 class ConflictException(StarforgeError):
@@ -108,9 +121,14 @@ def drf_exception_handler(exc: Exception, context: dict[str, Any]) -> Response |
     from rest_framework.views import exception_handler as drf_default_handler
 
     if isinstance(exc, StarforgeError):
+        headers: dict[str, str] = {}
+        wait = getattr(exc, "wait", None)
+        if wait is not None:
+            headers["Retry-After"] = str(int(wait))
         return Response(
             {"error": {"code": exc.code, "detail": exc.detail}},
             status=exc.status_code,
+            headers=headers or None,
         )
 
     if isinstance(exc, PermissionDenied):

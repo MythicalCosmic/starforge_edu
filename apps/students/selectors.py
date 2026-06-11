@@ -37,7 +37,11 @@ def students_with_upcoming_birthdays(
     *, base: QuerySet[StudentProfile] | None = None, days: int = 7, branch=None, cohort=None
 ) -> QuerySet[StudentProfile]:
     today = timezone.now().date()
-    month_days = {(today + timedelta(days=offset)).timetuple()[1:3] for offset in range(max(days, 0) + 1)}
+    # Clamp defensively: the (month, day) set is exhaustive at 366 days anyway,
+    # so capping is semantically lossless and protects future callers.
+    month_days = {
+        (today + timedelta(days=offset)).timetuple()[1:3] for offset in range(min(max(days, 0), 366) + 1)
+    }
     window = Q()
     for month, day in month_days:
         window |= Q(user__birthdate__month=month, user__birthdate__day=day)

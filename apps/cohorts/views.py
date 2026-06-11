@@ -12,7 +12,7 @@ from apps.cohorts.serializers import (
     EnrollSerializer,
     MoveStudentSerializer,
 )
-from core.exceptions import ValidationException
+from core.exceptions import ConflictException, ValidationException
 from core.permissions import default_perms
 from core.viewsets import TenantSafeModelViewSet
 
@@ -25,6 +25,7 @@ class CohortViewSet(TenantSafeModelViewSet):
         "enroll": "cohorts:write",
         "move_student": "cohorts:write",
         "members": "cohorts:read",
+        "unarchive": "cohorts:write",
     }
     filterset_fields = ("branch", "department", "is_archived")
     search_fields = ("name", "level")
@@ -42,6 +43,31 @@ class CohortViewSet(TenantSafeModelViewSet):
         if self.get_object().is_archived:
             raise ValidationException(_("Cohort is archived."), code="cohort_archived")
         return super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        """Hard delete only for empty, unarchived cohorts — membership history is
+        never cascaded away (D1-LD-9); archived cohorts are read-only."""
+        cohort = self.get_object()
+        if cohort.is_archived:
+            raise ValidationException(_("Cohort is archived."), code="cohort_archived")
+        if cohort.memberships.exists():
+            raise ConflictException(
+                _("Cohort has membership history; archive it instead of deleting."),
+                code="cohort_has_history",
+            )
+        return super().destroy(request, *args, **kwargs)
+
+    @extend_schema(
+        summary="Unarchive a cohort (archive is reversible via API)",
+        responses={200: CohortReadSerializer},
+        tags=["cohorts"],
+    )
+    @action(detail=True, methods=["post"])
+    def unarchive(self, request, pk=None):
+        cohort = self.get_object()
+        cohort.is_archived = False
+        cohort.save(update_fields=["is_archived", "updated_at"])
+        return Response(CohortReadSerializer(cohort).data)
 
     @extend_schema(
         summary="Enroll a student into this cohort",

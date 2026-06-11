@@ -50,7 +50,8 @@ class CenterViewSet(viewsets.ReadOnlyModelViewSet):
     @action(
         detail=True,
         methods=["post"],
-        url_path=r"domains/(?P<domain_id>[^/.]+)/set-primary",
+        # \d+ so non-numeric ids 404 at routing instead of ValueError → 500.
+        url_path=r"domains/(?P<domain_id>\d+)/set-primary",
     )
     def set_primary(self, request, pk=None, domain_id=None):
         center = self.get_object()

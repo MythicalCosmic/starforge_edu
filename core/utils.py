@@ -6,6 +6,7 @@ import hashlib
 import secrets
 from typing import TYPE_CHECKING
 
+from django.conf import settings
 from django.db import connection
 
 if TYPE_CHECKING:
@@ -18,11 +19,21 @@ def current_schema() -> str:
 
 
 def client_ip(request: Request) -> str:
-    """Best-effort client IP, honoring a single X-Forwarded-For proxy hop."""
+    """Client IP with rightmost-trusted-hop semantics.
+
+    ``X-Forwarded-For`` is honored only for the configured ``NUM_PROXIES``
+    trusted hops, counted from the right (each trusted proxy appends exactly
+    one address). With the default of 0 only ``REMOTE_ADDR`` is trusted, so a
+    client-supplied header can never spoof the IP used by the OTP per-IP cap
+    or audit logs.
+    """
+    remote_addr = request.META.get("REMOTE_ADDR", "") or ""
+    num_proxies = int(getattr(settings, "NUM_PROXIES", 0) or 0)
     forwarded = request.META.get("HTTP_X_FORWARDED_FOR")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.META.get("REMOTE_ADDR", "") or ""
+    if num_proxies > 0 and forwarded:
+        addrs = forwarded.split(",")
+        return addrs[-min(num_proxies, len(addrs))].strip()
+    return remote_addr
 
 
 def user_agent(request: Request) -> str:

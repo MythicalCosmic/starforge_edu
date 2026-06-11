@@ -3,6 +3,7 @@
 from datetime import timedelta
 
 import pytest
+from asgiref.sync import sync_to_async
 from channels.testing import WebsocketCommunicator
 from django.utils import timezone
 from django_tenants.utils import schema_context
@@ -10,6 +11,7 @@ from django_tenants.utils import schema_context
 from config.asgi import application
 
 HOST_HEADERS = [(b"host", b"a.localhost")]
+HOST_HEADERS_B = [(b"host", b"b.localhost")]
 
 
 @pytest.mark.channels
@@ -20,6 +22,75 @@ async def test_ws_anonymous_rejected(tenant_a):
     connected, close_code = await comm.connect()
     assert not connected
     assert close_code == 4401  # PingConsumer rejects anonymous
+
+
+@pytest.mark.channels
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_ws_authed_connect_accepted(tenant_a, user_in):
+    """D1-LE-6 acceptance: a JWT-authed connect is accepted and greeted.
+
+    Pins the middleware doing the user lookup under the tenant schema on the
+    database_sync_to_async worker thread (the loop-thread set_tenant bug)."""
+    from apps.auth.services import issue_token_pair
+
+    @sync_to_async
+    def _mint():
+        user = user_in(tenant_a)  # creates the user inside tenant_a's schema
+        with schema_context(tenant_a.schema_name):
+            return user.pk, issue_token_pair(user)["access"]
+
+    user_pk, token = await _mint()
+    comm = WebsocketCommunicator(application, f"/ws/ping/?token={token}", headers=HOST_HEADERS)
+    connected, _ = await comm.connect()
+    assert connected
+    assert await comm.receive_json_from() == {"type": "hello", "user_id": user_pk}
+    await comm.disconnect()
+
+
+@pytest.mark.channels
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_ws_cross_tenant_token_rejected(tenant_a, tenant_b, user_in):
+    """TD-1 over Channels: a tenant_a token presented on tenant_b's host must
+    NOT authenticate (schema claim != resolved tenant -> AnonymousUser -> 4401)."""
+    from apps.auth.services import issue_token_pair
+
+    @sync_to_async
+    def _mint():
+        user = user_in(tenant_a)
+        with schema_context(tenant_a.schema_name):
+            return issue_token_pair(user)["access"]
+
+    token = await _mint()
+    comm = WebsocketCommunicator(application, f"/ws/ping/?token={token}", headers=HOST_HEADERS_B)
+    connected, close_code = await comm.connect()
+    assert not connected
+    assert close_code == 4401
+
+
+@pytest.mark.channels
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_ws_stale_tv_rejected(tenant_a, user_in):
+    """TD-1 tv claim over Channels: bumping token_version (logout-everywhere /
+    role change) invalidates already-minted access tokens for websockets too."""
+    from apps.auth.services import issue_token_pair
+    from apps.users.services import bump_token_version
+
+    @sync_to_async
+    def _mint_and_bump():
+        user = user_in(tenant_a)
+        with schema_context(tenant_a.schema_name):
+            token = issue_token_pair(user)["access"]
+            bump_token_version(user.pk)
+        return token
+
+    token = await _mint_and_bump()
+    comm = WebsocketCommunicator(application, f"/ws/ping/?token={token}", headers=HOST_HEADERS)
+    connected, close_code = await comm.connect()
+    assert not connected
+    assert close_code == 4401
 
 
 @pytest.mark.django_db

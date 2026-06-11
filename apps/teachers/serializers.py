@@ -66,3 +66,14 @@ class TeacherUpdateSerializer(serializers.ModelSerializer):
             "rate",
             "is_substitute",
         )
+
+    def validate(self, attrs):
+        # Instance-merged cross-field check: covers PATCH and PUT, and both the
+        # department-change and branch-change directions (mirrors create_teacher).
+        branch = attrs.get("branch", getattr(self.instance, "branch", None))
+        department = attrs.get("department", getattr(self.instance, "department", None))
+        if department is not None and branch is not None and department.branch_id != branch.id:
+            raise serializers.ValidationError(
+                {"department": "Department must belong to the teacher's branch."}
+            )
+        return attrs

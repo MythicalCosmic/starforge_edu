@@ -1,7 +1,19 @@
 """Channels middleware: resolve tenant from hostname + authenticate via JWT.
 
-Order: TenantResolver wraps the inner middleware so the User lookup runs
-inside the tenant's schema (otherwise auth.User isn't there).
+TD-1 for websockets: the token must be an *access* token, its ``schema`` claim
+must match the host-resolved tenant, and its ``tv`` claim must equal the
+user's current ``token_version`` (and the user must be active). Any failure
+yields ``AnonymousUser`` — consumers (e.g. ``PingConsumer``) close 4401.
+
+Schema handling: the user lookup runs via ``database_sync_to_async`` on
+asgiref's thread-sensitive executor thread, whose thread-local DB connection
+is independent of the event loop's. The schema switch therefore happens
+*inside* ``_user_from_token`` via ``schema_context`` — setting the tenant on
+the event-loop thread would never reach the thread that runs the query.
+
+NOTE for Day-4 consumers: ``scope["tenant"]`` is plain scope state, it does
+NOT set the connection schema. Any consumer doing DB work must wrap it in
+``schema_context(scope["tenant"].schema_name)`` itself.
 """
 
 from __future__ import annotations
@@ -12,10 +24,9 @@ from channels.db import database_sync_to_async
 from channels.middleware import BaseMiddleware
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
-from django.db import connection
-from django_tenants.utils import get_public_schema_name, get_tenant_model
+from django_tenants.utils import get_public_schema_name, get_tenant_model, schema_context
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
-from rest_framework_simplejwt.tokens import UntypedToken
+from rest_framework_simplejwt.tokens import AccessToken
 
 User = get_user_model()
 
@@ -30,15 +41,31 @@ def _resolve_tenant_by_hostname(hostname: str):
 
 
 @database_sync_to_async
-def _user_from_token(raw_token: str):
+def _user_from_token(raw_token: str, tenant):
     try:
-        validated = UntypedToken(raw_token)  # type: ignore[arg-type]
+        # AccessToken enforces token_type == "access" — a refresh token must
+        # not authenticate a socket.
+        validated = AccessToken(raw_token)  # type: ignore[arg-type]
     except (InvalidToken, TokenError):
         return AnonymousUser()
-    try:
-        return User.objects.get(pk=validated["user_id"])
-    except User.DoesNotExist:
+
+    expected_schema = tenant.schema_name if tenant is not None else get_public_schema_name()
+    if validated.get("schema") != expected_schema:
+        # TD-1: the token is bound to the tenant that minted it; a tenant-A
+        # token presented on tenant B's host is a cross-tenant replay.
         return AnonymousUser()
+
+    # Switch schema on THIS thread — database_sync_to_async runs on asgiref's
+    # thread-sensitive executor whose connection the event loop never touched.
+    with schema_context(expected_schema):
+        try:
+            user = User.objects.get(pk=validated["user_id"])
+        except User.DoesNotExist:
+            return AnonymousUser()
+        if not user.is_active or validated.get("tv") != getattr(user, "token_version", None):
+            # Logout-everywhere / role-change invalidation (TD-1 `tv` claim).
+            return AnonymousUser()
+        return user
 
 
 class TenantAwareJWTAuthMiddleware(BaseMiddleware):
@@ -54,13 +81,9 @@ class TenantAwareJWTAuthMiddleware(BaseMiddleware):
                 break
 
         tenant = await _resolve_tenant_by_hostname(host) if host else None
-        if tenant is not None:
-            connection.set_tenant(tenant)  # type: ignore[attr-defined]
-        else:
-            connection.set_schema_to_public()  # type: ignore[attr-defined]
 
         token = self._extract_token(scope)
-        scope["user"] = await _user_from_token(token) if token else AnonymousUser()
+        scope["user"] = await _user_from_token(token, tenant) if token else AnonymousUser()
         scope["tenant"] = tenant
         return await super().__call__(scope, receive, send)
 

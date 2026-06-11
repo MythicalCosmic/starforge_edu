@@ -11,6 +11,7 @@ Three concerns, ordered in `config.settings.base.MIDDLEWARE`:
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Callable
 
@@ -22,19 +23,26 @@ from core.logging_filters import request_id_var
 
 REQUEST_ID_HEADER = "X-Request-ID"
 
+# Inbound ids are attacker-controlled and end up in log lines (`req={request_id}`)
+# and the response header — restrict to a safe charset and a sane length so a
+# crafted value cannot forge/split log records or trigger BadHeaderError.
+REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
 GetResponse = Callable[[HttpRequest], HttpResponse]
 
 
 class RequestIDMiddleware:
-    """Honor an inbound ``X-Request-ID`` (verbatim) or mint a uuid4, expose it to
-    the logging filters for the life of the request, and echo it on the response.
+    """Honor a well-formed inbound ``X-Request-ID`` (charset/length validated) or
+    mint a uuid4, expose it to the logging filters for the life of the request,
+    and echo it on the response.
     """
 
     def __init__(self, get_response: GetResponse) -> None:
         self.get_response = get_response
 
     def __call__(self, request: HttpRequest) -> HttpResponse:
-        request_id = request.headers.get(REQUEST_ID_HEADER) or uuid.uuid4().hex
+        inbound = request.headers.get(REQUEST_ID_HEADER, "")
+        request_id = inbound if REQUEST_ID_RE.fullmatch(inbound) else uuid.uuid4().hex
         request.request_id = request_id  # type: ignore[attr-defined]
         token = request_id_var.set(request_id)
         try:

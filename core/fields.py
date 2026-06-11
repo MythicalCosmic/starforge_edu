@@ -11,6 +11,7 @@ store into a TEXT column; `max_length` still validates the *plaintext*.
 
 from __future__ import annotations
 
+import logging
 from functools import lru_cache
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -18,7 +19,13 @@ from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.db import models
 
+logger = logging.getLogger("starforge.crypto")
 
+
+# CAVEAT: lru_cache pins the Fernet built from the FIRST key read. Rotating
+# FIELD_ENCRYPTION_KEY (or override_settings in tests) does NOT take effect
+# until a process restart or an explicit `_fernet.cache_clear()` — the
+# rotation runbook must include the restart step.
 @lru_cache(maxsize=1)
 def _fernet() -> Fernet:
     key = getattr(settings, "FIELD_ENCRYPTION_KEY", "")
@@ -41,7 +48,18 @@ class _EncryptedMixin:
             return _fernet().decrypt(value.encode()).decode()
         except InvalidToken:
             # Pre-existing plaintext or a key mismatch — surface the raw value
-            # rather than crashing reads (rotation runbook handles migration).
+            # rather than crashing reads (documented rotation passthrough; the
+            # rotation runbook handles migration). Log it so tampering or a
+            # wrong/rotated FIELD_ENCRYPTION_KEY is observable instead of
+            # silently serving ciphertext.
+            model = getattr(self, "model", None)
+            logger.warning(
+                "EncryptedField decrypt failed (InvalidToken) on %s.%s — returning the "
+                "raw stored value (rotation passthrough). Check FIELD_ENCRYPTION_KEY "
+                "and the rotation runbook.",
+                model.__name__ if model is not None else "<unbound>",
+                getattr(self, "name", None) or "<unknown>",
+            )
             return value
 
     def to_python(self, value):
