@@ -35,27 +35,20 @@ def resolve_or_create_user(
         lookup = {"email": email.lower().strip()}
     else:
         raise ValidationException(_("phone or email is required."), code="identifier_required")
-    user, created = User.objects.get_or_create(
-        **lookup,
-        defaults={"first_name": first_name, "last_name": last_name, "middle_name": middle_name},
-    )
-    if created:
+    user = User.objects.filter(**lookup).first()
+    if user is None:
+        user = User.objects.create(
+            username=User.objects.generate_username(
+                email or "", (phone or "").lstrip("+"), f"{first_name}.{last_name}"
+            ),
+            first_name=first_name,
+            last_name=last_name,
+            middle_name=middle_name,
+            **lookup,
+        )
         user.set_unusable_password()
         user.save(update_fields=["password"])
     return user
-
-
-def get_or_create_by_identifier(identifier: str) -> tuple[User, bool]:
-    """Look up a user by phone or email, creating a passwordless one if absent."""
-
-    if "@" in identifier:
-        user, created = User.objects.get_or_create(email=identifier.lower())
-    else:
-        user, created = User.objects.get_or_create(phone=normalize_phone(identifier))
-    if created:
-        user.set_unusable_password()
-        user.save(update_fields=["password"])
-    return user, created
 
 
 def bump_token_version(user_id: int) -> None:
@@ -64,10 +57,15 @@ def bump_token_version(user_id: int) -> None:
 
 
 def set_user_password(user: User, raw_password: str) -> None:
-    """Set a password and invalidate existing sessions (D1-LC-7 hook)."""
+    """Set a password and end EVERY existing session: all outstanding refresh
+    tokens are blacklisted and `tv` is bumped so live access tokens die too.
+    (Review fix: a tv bump alone left stolen refreshes valid for 14 days.)"""
     user.set_password(raw_password)
     user.save(update_fields=["password"])
-    bump_token_version(user.pk)
+    # Lazy import: apps.auth.services imports from this module (circular otherwise).
+    from apps.auth.services import logout_everywhere
+
+    logout_everywhere(user)
 
 
 def register_device(

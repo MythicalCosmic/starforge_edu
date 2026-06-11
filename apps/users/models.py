@@ -1,7 +1,9 @@
 """Identity models: User, Device, OTP, RoleMembership.
 
-Login is by phone OR email — both are unique when set, both are nullable,
-and a check constraint guarantees at least one of them is populated.
+Login is username + password (owner decision, 2026-06-11 — supersedes the
+original OTP-as-login design). ``username`` is the unique identity; phone and
+email are optional contact/verification channels. OTP codes now serve password
+reset and contact verification only (see apps.auth).
 
 Roles are assigned via RoleMembership(user, branch, department, role).
 The Branch and Department FK targets live in apps.org (TENANT_APPS only),
@@ -13,8 +15,8 @@ from __future__ import annotations
 from typing import ClassVar
 
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin
+from django.contrib.auth.validators import UnicodeUsernameValidator
 from django.db import models
-from django.db.models import CheckConstraint, Q
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
@@ -31,6 +33,12 @@ class User(AbstractBaseUser, PermissionsMixin):
         RUSSIAN = "ru", _("Russian")
         ENGLISH = "en", _("English")
 
+    username = models.CharField(
+        max_length=150,
+        unique=True,
+        validators=[UnicodeUsernameValidator()],
+        help_text=_("Login identifier. Auto-generated when staff create accounts."),
+    )
     phone = models.CharField(max_length=32, unique=True, null=True, blank=True)
     email = models.EmailField(unique=True, null=True, blank=True)
 
@@ -55,26 +63,18 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     objects = UserManager()
 
-    USERNAME_FIELD = "phone"
-    REQUIRED_FIELDS: ClassVar[list[str]] = []  # createsuperuser prompts phone+password
-
-    class Meta:
-        constraints = [
-            CheckConstraint(
-                condition=Q(phone__isnull=False) | Q(email__isnull=False),
-                name="user_phone_or_email_required",
-            ),
-        ]
+    USERNAME_FIELD = "username"
+    REQUIRED_FIELDS: ClassVar[list[str]] = []  # createsuperuser prompts username+password
 
     def __str__(self) -> str:  # pragma: no cover
-        return self.phone or self.email or f"user#{self.pk}"
+        return self.username
 
     def get_full_name(self) -> str:
         parts = [self.first_name, self.middle_name, self.last_name]
         return " ".join(p for p in parts if p)
 
     def get_short_name(self) -> str:
-        return self.first_name or self.phone or self.email or ""
+        return self.first_name or self.username
 
 
 class OTP(models.Model):
@@ -84,11 +84,9 @@ class OTP(models.Model):
     verify attempts to prevent brute force; consume() marks it used.
     """
 
-    PURPOSE_LOGIN = "login"
     PURPOSE_VERIFY = "verify"
     PURPOSE_RESET = "reset"
     PURPOSE_CHOICES = [
-        (PURPOSE_LOGIN, "Login"),
         (PURPOSE_VERIFY, "Verify"),
         (PURPOSE_RESET, "Password reset"),
     ]
@@ -99,7 +97,7 @@ class OTP(models.Model):
 
     identifier = models.CharField(max_length=255, db_index=True)  # phone or email
     channel = models.CharField(max_length=8, choices=CHANNEL_CHOICES)
-    purpose = models.CharField(max_length=16, choices=PURPOSE_CHOICES, default=PURPOSE_LOGIN)
+    purpose = models.CharField(max_length=16, choices=PURPOSE_CHOICES, default=PURPOSE_VERIFY)
     code_hash = models.CharField(max_length=128)
     attempts = models.PositiveSmallIntegerField(default=0)
     consumed_at = models.DateTimeField(null=True, blank=True)

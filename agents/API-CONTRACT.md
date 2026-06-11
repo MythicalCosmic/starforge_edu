@@ -50,39 +50,56 @@ Cache `base_url`/`ws_url` in app storage; ALL subsequent calls go to that host. 
 
 ## 3. Auth lifecycle
 
-All endpoints in `apps/auth/urls.py` under `/api/v1/auth/`. Identifier is phone (E.164, `+998...`) **or** email — same field (`apps/auth/serializers.py`).
+All endpoints in `apps/auth/urls.py` under `/api/v1/auth/`. **Login is username + password** (owner decision 2026-06-11). OTP codes exist only for **password reset** (sent to the phone/email on file). Accounts are created by staff; the generated username + initial password are handed to the user.
 
-### 3.1 OTP request — `POST /api/v1/auth/otp/request/` (D0)
-
-```http
-POST /api/v1/auth/otp/request/
-{"identifier": "+998901234567"}
-
-202 (empty body)            # OTP sent via SMS (Eskiz) or email; mock prints to stdout in dev
-```
-
-Throttles (`apps/auth/throttles.py`, rates in `REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]`): `otp_phone` 3/min per identifier, `otp_ip` 10/min, `otp_global` 1000/hour. Plus a 60 s resend cooldown per identifier (TASKS §3, D1-C). Over limit:
+### 3.1 Login — `POST /api/v1/auth/login/` (D1)
 
 ```http
-429 {"error": {"code": "throttled", "detail": "Too many requests."}}
-Retry-After: 42
-```
-
-Client behavior: disable the resend button for `Retry-After` seconds (fall back to 60 s if the header is absent). OTP is 6 digits, valid 5 min, max 5 wrong attempts (`OTP_LENGTH`/`OTP_TTL_SECONDS`/`OTP_MAX_ATTEMPTS` in settings).
-
-### 3.2 OTP verify — `POST /api/v1/auth/otp/verify/` (D0; `device_id` D1-C)
-
-```http
-POST /api/v1/auth/otp/verify/
-{"identifier": "+998901234567", "code": "123456",
- "device_id": "a1b2c3-stable-uuid", "platform": "android"}     # device fields D1-C
+POST /api/v1/auth/login/
+{"username": "aziz.karimov", "password": "<password>",
+ "device_id": "a1b2c3-stable-uuid", "platform": "android"}     # device fields optional
 
 200 {"access": "<jwt>", "refresh": "<jwt>"}
 ```
 
-Errors: 400 `validation_error` ("Invalid code." / "Code expired or never issued."), 429 `throttled` after 5 wrong attempts. Note: self-registration on verify is **off by default** (`CenterSettings.open_registration`, TD-17) — unknown identifiers fail unless the Center enables it; staff pre-create users.
+Failures are deliberately indistinguishable — unknown username, wrong password, and deactivated account all return:
 
-`device_id` is a client-generated stable UUID (keep it in app storage); the server upserts a `Device` row and binds the refresh token to it (TASKS §3 device-bound refresh, D1-C).
+```http
+401 {"error": {"code": "invalid_credentials", "detail": "Invalid username or password."}}
+```
+
+Throttles: `login_user` 5/min per username, `login_ip` 10/min per IP → `429 throttled`. `device_id` is a client-generated stable UUID (keep it in app storage); the server upserts a `Device` row (TASKS §3, D1-C).
+
+### 3.2 Password reset — `POST /api/v1/auth/password/reset/{request,confirm}/` (D1)
+
+```http
+POST /api/v1/auth/password/reset/request/
+{"identifier": "+998901234567"}                # phone (E.164) or email ON FILE
+
+202 (empty body)    # ALWAYS 202 — even for unknown identifiers (anti-enumeration).
+                    # A 6-digit code goes out via SMS (Eskiz) or email when an account matches.
+```
+
+```http
+POST /api/v1/auth/password/reset/confirm/
+{"identifier": "+998901234567", "code": "123456", "new_password": "<new>"}
+
+204                 # password set; EVERY session ended — user logs in fresh
+```
+
+Request throttles: `otp_phone` 3/min per identifier + 60 s resend cooldown (`Retry-After` header set — disable the resend button that long), `otp_ip` 10/min, `otp_global` 1000/hour. Confirm: `otp_verify` 10/min; the code dies after 5 wrong attempts (`OTP_MAX_ATTEMPTS`) → `429 throttled`. Weak passwords → `400 weak_password`; wrong code → `400 validation_error`.
+
+### 3.2b Password change — `POST /api/v1/auth/password/change/` (D1, authed)
+
+```http
+POST /api/v1/auth/password/change/
+Authorization: Bearer <access>
+{"old_password": "<old>", "new_password": "<new>"}
+
+200 {"access": "<jwt>", "refresh": "<jwt>"}   # all OTHER sessions ended; store this pair
+```
+
+Errors: `400 wrong_password`, `400 weak_password`.
 
 ### 3.3 Token claims (D1-C, TD-1/TD-5)
 
@@ -105,7 +122,7 @@ POST /api/v1/auth/refresh/
 200 {"access": "<new-access>", "refresh": "<new-refresh>"}
 ```
 
-Rotation is ON (`ROTATE_REFRESH_TOKENS` + `BLACKLIST_AFTER_ROTATION`): the response **always contains a new refresh token; store it immediately — the old one is blacklisted and dead**. Presenting a blacklisted refresh is treated as theft: ALL of that user's refresh tokens are revoked globally (TASKS §3 reuse detection, D1-C). Any 401 from this endpoint → wipe both tokens, route to login. Do not retry.
+Rotation is ON (`ROTATE_REFRESH_TOKENS` + `BLACKLIST_AFTER_ROTATION`): the response **always contains a new refresh token; store it immediately — the old one is blacklisted and dead**. Presenting a blacklisted refresh is treated as theft: ALL of that user's refresh tokens are revoked globally (401 `refresh_reused`). The refresh path is tenant-bound like the access path — a refresh minted on another center's host returns 401 `tenant_mismatch`. Any 401 from this endpoint → wipe both tokens, route to login. Do not retry.
 
 **Recommended client strategy:** decode `exp` from the access token; refresh proactively when < 60 s remain, or reactively on the first 401. Serialize refreshes behind a single-flight mutex (web: shared promise; Flutter: dio `QueuedInterceptor`) so parallel 401s don't double-rotate and trip reuse detection. Persist both tokens atomically.
 
@@ -113,7 +130,7 @@ Rotation is ON (`ROTATE_REFRESH_TOKENS` + `BLACKLIST_AFTER_ROTATION`): the respo
 
 ```http
 POST /api/v1/auth/logout/            {"refresh": "<jwt>"} → 200     # blacklists that refresh (D0)
-POST /api/v1/auth/logout-everywhere/ {} (Bearer auth)     → 200     # blacklists ALL refreshes + bumps tv (D1-C)
+POST /api/v1/auth/logout-all/        {} (Bearer auth)     → 204     # blacklists ALL refreshes + bumps tv (D1-C)
 ```
 
 Access tokens live their remaining ≤15 min after logout; clients must also discard them locally.
@@ -126,12 +143,12 @@ Call once after login (and on app start) to hydrate the session. Shape from `app
 GET /api/v1/users/me/
 Authorization: Bearer <access>
 
-200 {"id": 1, "phone": "+998901234567", "email": null,
+200 {"id": 1, "username": "aziz.karimov", "phone": "+998901234567", "email": null,
      "first_name": "Aziz", "last_name": "Karimov", "middle_name": "",
      "full_name": "Aziz Karimov", "is_active": true, "is_staff": false,
      "date_joined": "2026-06-01T09:00:00+05:00", "last_seen_at": "2026-06-10T14:30:00+05:00",
      "role_memberships": [{"id": 3, "role": "teacher", "branch": 1, "department": 2,
-                           "granted_at": "2026-06-01T09:00:00+05:00"}]}
+                           "granted_at": "2026-06-01T09:00:00+05:00"}]}   # ACTIVE memberships only
 ```
 
 Drive navigation/feature visibility from `role_memberships[].role` (role codes in `core/permissions.py: Role` — `director`, `head_of_dept`, `teacher`, `student`, `parent`, `accountant`, `cashier`, `librarian`, `security`, `it`, `registrar`, `support`). D1 adds `avatar`, `preferred_language`, `birthdate`, `gender` (TASKS §3).
@@ -159,7 +176,7 @@ Platform admins can mint a short-lived, read-only token for a tenant. It carries
 
 | Header | Value | When |
 |---|---|---|
-| `Authorization` | `Bearer <access>` (`SIMPLE_JWT["AUTH_HEADER_TYPES"]`) | Every call except `auth/otp/*`, `auth/refresh/`, `platform/resolve/` |
+| `Authorization` | `Bearer <access>` (`SIMPLE_JWT["AUTH_HEADER_TYPES"]`) | Every call except `auth/login/`, `auth/password/reset/*`, `auth/refresh/`, `platform/resolve/` |
 | `Accept-Language` | `uz` \| `ru` \| `en` | Every call (§4.6) |
 | `Content-Type` | `application/json` | Every request with a body (S3 PUTs excepted, §5) |
 | `Idempotency-Key` | UUIDv4 | Required on payment-adjacent POSTs (§4.7) |
@@ -180,8 +197,13 @@ Every non-2xx response — webhooks included — is:
 |---|---|---|---|
 | 400 | `validation_error` | Bad input; per-field detail in `fields` | D0 |
 | 400 | `tenant_required` | Tenant-scoped code hit without a tenant host | D0 |
+| 400 | `wrong_password` | Password change: `old_password` incorrect | D1 |
+| 400 | `weak_password` | New password fails the validators (min 10 chars, not common/numeric) | D1 |
+| 401 | `invalid_credentials` | Login failed (unknown username / wrong password / inactive — indistinguishable) | D1 |
 | 401 | `authentication_failed` | Missing/expired/invalid access token | D0 |
-| 401 | `tenant_mismatch` | Token's `schema` ≠ this host's tenant, or stale `tv` (TD-1) | D1 |
+| 401 | `tenant_mismatch` | Token's `schema` ≠ this host's tenant (access AND refresh paths) | D1 |
+| 401 | `token_stale` | Token's `tv` ≠ current token_version (password/role change, logout-all) | D1 |
+| 401 | `refresh_reused` | Blacklisted refresh replayed — ALL sessions revoked; full re-login | D1 |
 | 402 | `subscription_required` | Center's subscription suspended/expired (TD-8) — see §10 | D3 |
 | 403 | `forbidden` | Role lacks `resource:verb`, or object out of branch/department scope | D0 |
 | 404 | `not_found` | Missing resource OR cross-tenant ID probe (indistinguishable by design) | D0 |
@@ -337,8 +359,9 @@ Tenant host, prefix `/api/v1/` (`config/urls.py`); platform rows are apex (`conf
 
 | Endpoint | Purpose | Permission | Since |
 |---|---|---|---|
-| `POST auth/otp/request/` · `verify/` · `refresh/` · `logout/` | Auth lifecycle (§3) | public | D0 |
-| `POST auth/logout-everywhere/` | Revoke all sessions | authenticated | D1 |
+| `POST auth/login/` · `refresh/` · `logout/` | Auth lifecycle (§3) | public | D1 |
+| `POST auth/password/change/` · `reset/request/` · `reset/confirm/` | Password management (§3.2) | change: authed; reset: public | D1 |
+| `POST auth/logout-all/` | Revoke all sessions | authenticated | D1 |
 | `GET users/me/` | Current user + role_memberships | authenticated | D0 |
 | `GET users/` · `GET users/{id}/` | User directory | `users:read` | D0 |
 | `GET/POST/DELETE users/devices/` | Devices + push tokens (§3.6) | authenticated (own) | D0/D1 |

@@ -11,8 +11,9 @@ from apps.users.models import RoleMembership, User
 class UserFactory(factory.django.DjangoModelFactory):
     class Meta:
         model = User
-        django_get_or_create = ("phone",)
+        django_get_or_create = ("username",)
 
+    username = factory.Sequence(lambda n: f"user{n:05d}")
     # E.164, must pass core.validators.normalize_phone; never Faker (no uz_UZ).
     phone = factory.Sequence(lambda n: f"+99890{n:07d}")
     first_name = factory.Faker("first_name", locale="ru_RU")

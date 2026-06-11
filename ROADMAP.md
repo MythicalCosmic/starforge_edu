@@ -137,7 +137,7 @@ These are **decided**. Do not re-litigate them mid-build; if one proves wrong, w
 Run on a fresh clone, `docker compose up`, migrate, seed:
 
 1. Provision two Centers; verify a JWT from one is rejected by the other (401 `tenant_mismatch`).
-2. Full OTP login on web subdomain and via mobile-style flow (resolve → request → verify → refresh → logout-everywhere).
+2. Full username+password login on web subdomain and via mobile-style flow (resolve → login → refresh → logout-all), plus the OTP password-reset flow (request → SMS code → confirm → fresh login). *(Owner decision 2026-06-11: login is username+password; OTP is reset/verification only.)*
 3. Enroll a student (state machine), link a parent, assign to cohort, build a recurring schedule with a conflict correctly rejected.
 4. Mark attendance (one absent) → guardian gets a (mock) SMS + in-app notification over a live WebSocket.
 5. Create exam → enter grades → transcript PDF downloads via signed URL.

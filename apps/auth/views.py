@@ -12,63 +12,47 @@ from core.utils import client_ip, user_agent
 
 from . import services
 from .serializers import (
-    OTPRequestSerializer,
-    OTPVerifySerializer,
+    LoginSerializer,
+    PasswordChangeSerializer,
+    PasswordResetConfirmSerializer,
+    PasswordResetRequestSerializer,
     RefreshSerializer,
     TokenPairSerializer,
 )
-from .throttles import OTPGlobalThrottle, OTPIPThrottle, OTPPhoneThrottle
+from .throttles import (
+    LoginIPThrottle,
+    LoginUserThrottle,
+    OTPGlobalThrottle,
+    OTPIdentifierThrottle,
+    OTPIPThrottle,
+    OTPVerifyThrottle,
+)
 
 
-class OTPRequestView(APIView):
-    """POST /api/v1/auth/otp/request/  body: {identifier}"""
+class LoginView(APIView):
+    """POST /api/v1/auth/login/  body: {username, password, device_id?, platform?}"""
 
     permission_classes = [AllowAny]
-    throttle_classes = [OTPPhoneThrottle, OTPIPThrottle, OTPGlobalThrottle]
+    throttle_classes = [LoginUserThrottle, LoginIPThrottle]
 
     @extend_schema(
-        summary="Request a login OTP",
-        request=OTPRequestSerializer,
+        summary="Log in with username and password",
+        request=LoginSerializer,
         responses={
-            202: OpenApiResponse(description="OTP dispatched."),
+            200: TokenPairSerializer,
+            401: OpenApiResponse(description="invalid_credentials envelope"),
             429: OpenApiResponse(description="throttled envelope"),
         },
         tags=["auth"],
     )
     def post(self, request):
-        serializer = OTPRequestSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        services.send_otp(
-            identifier=serializer.validated_data["identifier"],
-            ip=client_ip(request),
-            user_agent=user_agent(request),
-        )
-        return Response(status=status.HTTP_202_ACCEPTED)
-
-
-class OTPVerifyView(APIView):
-    """POST /api/v1/auth/otp/verify/  body: {identifier, code, device_id?, platform?}"""
-
-    permission_classes = [AllowAny]
-    throttle_classes = [OTPPhoneThrottle, OTPIPThrottle]
-
-    @extend_schema(
-        summary="Verify an OTP and receive a JWT pair",
-        request=OTPVerifySerializer,
-        responses={
-            200: TokenPairSerializer,
-            400: OpenApiResponse(description="validation_error / user_not_found envelope"),
-        },
-        tags=["auth"],
-    )
-    def post(self, request):
-        serializer = OTPVerifySerializer(data=request.data)
+        serializer = LoginSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
         ua = user_agent(request)
-        user = services.verify_otp(
-            identifier=data["identifier"],
-            code=data["code"],
+        user = services.login_with_password(
+            username=data["username"],
+            password=data["password"],
             ip=client_ip(request),
             user_agent=ua,
         )
@@ -81,12 +65,105 @@ class OTPVerifyView(APIView):
         return Response(services.issue_token_pair(user))
 
 
+class PasswordChangeView(APIView):
+    """POST /api/v1/auth/password/change/  body: {old_password, new_password}
+
+    Ends every other session (all refreshes blacklisted, `tv` bumped) and
+    returns a fresh pair so THIS device stays logged in.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="Change password (ends all other sessions)",
+        request=PasswordChangeSerializer,
+        responses={
+            200: TokenPairSerializer,
+            400: OpenApiResponse(description="wrong_password / weak_password envelope"),
+        },
+        tags=["auth"],
+    )
+    def post(self, request):
+        serializer = PasswordChangeSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        pair = services.change_password(
+            user=request.user,
+            old_password=serializer.validated_data["old_password"],
+            new_password=serializer.validated_data["new_password"],
+        )
+        return Response(pair)
+
+
+class PasswordResetRequestView(APIView):
+    """POST /api/v1/auth/password/reset/request/  body: {identifier}
+
+    Always 202 — whether or not an account matches (anti-enumeration). The
+    code goes to the phone/email ON FILE for the account.
+    """
+
+    permission_classes = [AllowAny]
+    throttle_classes = [OTPIdentifierThrottle, OTPIPThrottle, OTPGlobalThrottle]
+
+    @extend_schema(
+        summary="Request a password-reset code",
+        request=PasswordResetRequestSerializer,
+        responses={
+            202: OpenApiResponse(description="Reset code dispatched if the account exists."),
+            429: OpenApiResponse(description="throttled envelope (Retry-After set)"),
+        },
+        tags=["auth"],
+    )
+    def post(self, request):
+        serializer = PasswordResetRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        services.request_password_reset(
+            identifier=serializer.validated_data["identifier"],
+            ip=client_ip(request),
+            user_agent=user_agent(request),
+        )
+        return Response(status=status.HTTP_202_ACCEPTED)
+
+
+class PasswordResetConfirmView(APIView):
+    """POST /api/v1/auth/password/reset/confirm/  body: {identifier, code, new_password}
+
+    On success every session is ended; the user logs in fresh.
+    """
+
+    permission_classes = [AllowAny]
+    throttle_classes = [OTPVerifyThrottle, OTPIPThrottle]
+
+    @extend_schema(
+        summary="Confirm a password reset with the received code",
+        request=PasswordResetConfirmSerializer,
+        responses={
+            204: OpenApiResponse(description="Password reset; all sessions ended."),
+            400: OpenApiResponse(description="validation_error / weak_password envelope"),
+            429: OpenApiResponse(description="throttled envelope"),
+        },
+        tags=["auth"],
+    )
+    def post(self, request):
+        serializer = PasswordResetConfirmSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        services.reset_password(
+            identifier=data["identifier"],
+            code=data["code"],
+            new_password=data["new_password"],
+            ip=client_ip(request),
+            user_agent=user_agent(request),
+        )
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
 class JWTRefreshView(APIView):
     """POST /api/v1/auth/refresh/  body: {refresh}  -> {access, refresh}
 
     Rotates the refresh token (the old one is blacklisted) and re-stamps the
-    TD-1 claims onto the new pair. Replaying a blacklisted token revokes all of
-    the user's sessions (401 `refresh_reused`).
+    TD-1 claims onto the new pair. Tenant-bound: a refresh minted on another
+    center returns 401 `tenant_mismatch`. Replaying a blacklisted token revokes
+    all of the user's sessions (401 `refresh_reused`).
     """
 
     permission_classes = [AllowAny]
@@ -96,7 +173,9 @@ class JWTRefreshView(APIView):
         request=RefreshSerializer,
         responses={
             200: TokenPairSerializer,
-            401: OpenApiResponse(description="authentication_failed / refresh_reused envelope"),
+            401: OpenApiResponse(
+                description="authentication_failed / tenant_mismatch / refresh_reused envelope"
+            ),
         },
         tags=["auth"],
     )

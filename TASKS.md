@@ -18,8 +18,8 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 - [~] `uv run python scripts/seed_dev.py` (seed extended: branch/dept/2 teachers/cohort/5 students/2 parents; pending owner DB to run)
 - [~] Verify `http://demo.localhost:8000/admin/` loads and login works (pending owner DB)
 - [~] Verify `http://demo.localhost:8000/api/schema/swagger-ui/` renders (pending owner DB)
-- [~] Hit `POST .../auth/otp/request/` and check stdout for the mock OTP (test written; pending owner DB)
-- [~] Hit `POST /api/v1/auth/otp/verify/`, get `{access, refresh}` back (test written; pending owner DB)
+- [~] Hit `POST /api/v1/auth/login/ {"username","password"}`, get `{access, refresh}` back (AUTH PIVOT 2026-06-11: login = username+password; test written; pending owner DB)
+- [~] Hit `POST .../auth/password/reset/request/` + `confirm/` — OTP now serves password reset only (tests written; pending owner DB)
 - [~] Hit `GET /api/v1/users/me/` with Bearer, get 200 (test written; pending owner DB)
 - [~] Verify tenant isolation: token from `demo` must NOT work against another tenant's hostname (test GREEN-by-construction, TD-1; pending owner DB to run)
 
@@ -80,6 +80,13 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 ---
 
 ## 3. Users + Auth (apps/users + apps/auth)
+
+> **AUTH PIVOT (owner decision, 2026-06-11):** login is **username + password**
+> (`POST /api/v1/auth/login/`); `User.username` is the unique identity
+> (auto-generated for staff-created accounts). OTP items below are repurposed —
+> they now power **password reset** (`/auth/password/reset/{request,confirm}/`)
+> and future contact verification, never login. "Phone OR email login" items
+> apply to `/admin/` sessions only.
 
 ### User model
 

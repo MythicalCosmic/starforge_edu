@@ -12,14 +12,17 @@
 - **Management commands:** wrap with `schema_context("acme"):` or use `tenant_command`.
 
 ## Auth
-- **Tokens:** JWT (simplejwt). Access 15min, refresh 14d, rotation on, blacklist on.
-- **Login flow:** `POST /api/v1/auth/otp/request/` (throttled) → SMS/email OTP → `POST /api/v1/auth/otp/verify/` → `{access, refresh}`.
-- **Identifier:** phone OR email. Custom `PhoneOrEmailBackend` for `/admin/`.
-- **Logout:** `POST /api/v1/auth/logout/  {refresh}` blacklists the refresh.
+- **Tokens:** JWT (simplejwt). Access 15min, refresh 14d, rotation on, blacklist on. Both tokens carry TD-1 claims: `schema` (issuing tenant — enforced on access AND refresh paths, 401 `tenant_mismatch` otherwise) and `tv` (token version — bumped on password change, role change, logout-everywhere).
+- **Login flow:** `POST /api/v1/auth/login/ {username, password}` → `{access, refresh}` (owner decision 2026-06-11; supersedes OTP-as-login).
+- **Password reset:** `POST /api/v1/auth/password/reset/request/ {identifier}` (always 202, anti-enumeration) → SMS/email OTP → `POST /api/v1/auth/password/reset/confirm/ {identifier, code, new_password}` (ends all sessions).
+- **Password change:** `POST /api/v1/auth/password/change/` — ends all other sessions, returns a fresh pair.
+- **Admin:** `/admin/` sessions; staff log in with username (stock backend) or phone/email (`PhoneOrEmailBackend`).
+- **Logout:** `POST /api/v1/auth/logout/ {refresh}` blacklists one refresh; `POST /api/v1/auth/logout-all/` revokes everything.
 
 ## Permissions
 - **Matrix:** `core/permissions.py: ROLE_PERMISSION_MATRIX` — single source of truth.
-- **Action-level:** `RolePermission` reads `view.required_perm = "<resource>:<verb>"`.
+- **Action-level (TD-5):** viewsets declare `resource = "<name>"` (verbs derived per action: list/retrieve → `:read`, create/update/destroy → `:write`) plus `required_perms: dict` for custom actions/overrides. Views with neither mapping are **fail-closed** (denied). The flat `required_perm` attribute is gone.
+- **Row-level:** `read_self` / `read_own_children` verbs are enforced by queryset scoping in `selectors.py` (the gate grants `:read`; the selector narrows rows to self / linked children).
 - **Object-level:** `ObjectScopedPermission` reads `view.object_scope = "branch" | "department"` and checks `RoleMembership(user, branch[, department])`.
 - **Director / superuser:** bypass.
 

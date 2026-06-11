@@ -90,18 +90,35 @@ def _seed_demo_domain(actor: User) -> None:
 
 
 def main() -> None:
+    # Map the apex host to the public schema — without this Domain row,
+    # django-tenants 404s http://localhost:8000/admin/ entirely.
+    from django_tenants.utils import get_public_schema_name
+
+    from apps.tenancy.models import Domain
+
+    public_center, _ = Center.objects.get_or_create(
+        schema_name=get_public_schema_name(),
+        defaults={"name": "Platform", "slug": "platform"},
+    )
+    Domain.objects.get_or_create(domain="localhost", tenant=public_center, defaults={"is_primary": True})
+
     # Platform staff live in the public schema (TD-3 / ADR-007) so the apex
-    # /admin/ and the platform API work.
+    # /admin/ and the platform API work. Login is username+password.
     platform_admin, p_created = User.objects.get_or_create(
-        phone="+998900000000",
-        defaults={"is_staff": True, "is_superuser": True, "is_active": True},
+        username="admin",
+        defaults={
+            "phone": "+998900000000",
+            "is_staff": True,
+            "is_superuser": True,
+            "is_active": True,
+        },
     )
     if p_created or not platform_admin.has_usable_password():
         platform_admin.set_password("starforge-platform")
         platform_admin.is_staff = True
         platform_admin.is_superuser = True
         platform_admin.save()
-        print("created PLATFORM superuser phone=+998900000000 password=starforge-platform")
+        print("created PLATFORM superuser admin / starforge-platform (apex /admin/)")
     else:
         print("platform superuser already exists")
 
@@ -122,15 +139,20 @@ def main() -> None:
 
     with schema_context(slug):
         admin, created = User.objects.get_or_create(
-            phone="+998901234567",
-            defaults={"is_staff": True, "is_superuser": True, "is_active": True},
+            username="admin",
+            defaults={
+                "phone": "+998901234567",
+                "is_staff": True,
+                "is_superuser": True,
+                "is_active": True,
+            },
         )
         if created or not admin.has_usable_password():
             admin.set_password("starforge-dev")
             admin.is_staff = True
             admin.is_superuser = True
             admin.save()
-            print("created superuser phone=+998901234567 password=starforge-dev")
+            print("created tenant superuser admin / starforge-dev (demo.localhost)")
         else:
             print("superuser already exists")
 

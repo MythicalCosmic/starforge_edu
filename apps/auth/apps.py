@@ -7,7 +7,7 @@ class AuthAppConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
     name = "apps.auth"
     label = "auth_app"
-    verbose_name = "Auth (OTP + JWT)"
+    verbose_name = "Auth (password login + JWT, OTP reset)"
 
     def ready(self) -> None:
         from . import receivers  # noqa: F401

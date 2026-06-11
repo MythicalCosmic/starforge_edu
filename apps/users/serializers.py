@@ -12,6 +12,7 @@ class UserBriefSerializer(serializers.ModelSerializer):
         model = User
         fields = (
             "id",
+            "username",
             "phone",
             "email",
             "first_name",
@@ -34,13 +35,14 @@ class RoleMembershipSerializer(serializers.ModelSerializer):
 
 
 class UserSerializer(serializers.ModelSerializer):
-    role_memberships = RoleMembershipSerializer(many=True, read_only=True)
+    role_memberships = serializers.SerializerMethodField()
     full_name = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = (
             "id",
+            "username",
             "phone",
             "email",
             "first_name",
@@ -56,10 +58,16 @@ class UserSerializer(serializers.ModelSerializer):
             "last_seen_at",
             "role_memberships",
         )
-        read_only_fields = ("is_staff", "date_joined", "last_seen_at", "role_memberships")
+        read_only_fields = ("username", "is_staff", "date_joined", "last_seen_at", "role_memberships")
 
     def get_full_name(self, obj: User) -> str:
         return obj.get_full_name()
+
+    def get_role_memberships(self, obj: User) -> list[dict]:
+        # Only ACTIVE memberships — matches what token claims and the permission
+        # gate see, so frontends driving UI from /me never show stale roles.
+        active = obj.role_memberships.filter(revoked_at__isnull=True)
+        return list(RoleMembershipSerializer(active, many=True).data)
 
 
 class DeviceSerializer(serializers.ModelSerializer):
