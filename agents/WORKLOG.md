@@ -29,6 +29,67 @@ Every agent session **must** append an entry here before ending. Never edit or d
 <!-- entries begin below this line -->
 
 ---
+### [DEEP BUG RESEARCH] Whole-project adversarial audit + fixes (Days 1-3) — 2026-06-16
+**Branch:** `day1-build` (on top of Day-3 `ac859a0`). A 93-agent whole-project hunt
+(9 finders across domains + cross-cutting lenses, every serious finding verified by 3
+independent skeptics, majority-keep) found **28 confirmed findings (7 blockers, 20 majors,
+1 minor) + 15 more minors, with ZERO false positives surviving**. All blockers + majors and
+the security/correctness minors are fixed. **Final: 727 passed / 3 skipped / 90% coverage;
+ruff + mypy (348 files) + makemigrations --check all clean.**
+
+These were the bugs the per-day reviews structurally could NOT catch — cross-feature
+interactions and never-run paths. The standouts:
+
+**Blockers (all fixed):**
+1. **Paywall bypass** — `create_student(status="active")` never called `enforce_student_limit()`
+   (only the ENROLLED *transition* did), so a director could POST past the plan cap. Now
+   enforced on the create path too (seed/import opt out via a flag).
+2. **PHI leak** — `medical_notes` (encrypted) was echoed in the student PATCH *response* to any
+   `students:write` role (e.g. head_of_dept), bypassing the retrieve-time DIRECTOR/REGISTRAR
+   gate. update/partial_update now return the role-gated detail serializer.
+3. **Refund ledger corruption** — refunds set Payment=REFUNDED but never reversed
+   `PaymentAllocation` or invoice status, so a refunded invoice stayed PAID with zero balance
+   and could never be re-collected. Added `reverse_allocations_for_payment` called from refund
+   completion; invoice flips back and balance is restored.
+4. **Webhook payment loss** — over-allocation during auto-allocate (duplicate/late charge on an
+   already-PAID invoice) raised through `mark_payment_completed`, rolling back the *entire*
+   completion → the provider took money but no completed Payment existed. Now savepoint-wrapped:
+   the payment completes + signals + fiscalizes; only allocation defers to MANUAL_REVIEW.
+5. **Forgeable production JWTs** — `config/settings/production.py` booted with the public default
+   `SECRET_KEY` (and `ALLOWED_HOSTS=["*"]`) when env was unset. Now fails fast on both.
+6. **Audit crashes platform user management** — audit `post_save` receivers fired on public-schema
+   User/RoleMembership writes, but `audit_auditlog` is tenant-only → ProgrammingError on every
+   platform-staff write. `audit_log()` now no-ops on the public schema.
+
+**Majors (fixed):** ObjectScopedPermission never ran on **create** (branch-scoped roles could
+create rows in any branch) → enforced in `TenantSafeModelViewSet.perform_create`; cohort
+enroll/move accepted cross-branch students; auto-issue invoice only fired on cohort *move*, not
+the primary *enroll*; `bulk_reschedule` never notified; `grade_changed` dedupe suppressed grade
+*corrections*; Assignment/Exam `cohort` unscoped on write; content filename not sanitized into
+the S3 key; Click/Uzum webhooks never verified the signed amount (Payme did); double-refund
+over-credit; invoice-numbering race on the first invoice of a year (now pg advisory lock);
+cashier reconciliation always zero (no cash-intake path — added one); **unscoped shared-Redis
+keys** (login throttle, WS group `user.{id}`, Anthropic cache) → all now schema-prefixed;
+`rotate_refresh_token` ignored `tv` so a role-change/logout never ended the refresh session.
+
+**Minors (fixed):** tenant-bound single-device logout; reset validates password before consuming
+the OTP; `TenantSafeAPIView` now fail-closed by default; CORS headers on 402/503; Payme
+constant-time key compare; RecurrenceRule.is_active now purges; audit before-snapshot keyed by
+schema + self-cleaning; new-device-login no longer fires on every login; Payme idempotent retry
+not mislabeled DUPLICATE; enroll race → clean 409. (Deferred, documented: archive_branch ignoring
+active teachers — low impact, org app.)
+
+**Process note:** fixes ran as 7 parallel app-cluster agents (each verified by 3/3 skeptics
+before fixing) + the orchestrator handling the cross-cutting core/config/auth fixes; full suite
++ gates run centrally. Several "failures" on the central run were test-measurement bugs the
+agents introduced (missing capture_on_commit, cross-branch factory setup) — fixed.
+
+**Lesson for Day 4+:** the recurring root causes were (a) **write paths unscoped while reads are
+scoped** (create endpoints, cohort/assignment/exam targeting), (b) **shared-Redis keys not bound
+to the tenant schema**, and (c) **never-run paths** (public-schema audit, prod settings, refund
+reversal). Apply all three lenses to every new feature.
+
+---
 ### [Day 3 · OWNER BUILD+INTEGRATION+REVIEW] Money, fiscal & messaging — 2026-06-16
 **Branch:** `day1-build`. Day 3 built from scratch (all 6 lanes A–F), integrated, reviewed,
 and fixed in one orchestrated session. **Final state: 674 passed / 3 skipped / 90% coverage

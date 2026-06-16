@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import re
 from typing import cast
 
+from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
 
 from apps.content.models import (
@@ -12,6 +14,34 @@ from apps.content.models import (
     LessonFile,
     Module,
 )
+
+# The client filename flows verbatim into the S3 key ({schema}/tmp/{uuid}/{name}
+# and later {schema}/content/{id}/{name}). A name with '/', '\', '..', NUL or a
+# leading dot/slash produces an ambiguous/dangerous key that can escape the
+# per-upload {uuid}/ isolation (and confuse the extension allowlist check). We
+# REJECT such names outright (not silently rewrite them) so the client gets a
+# clear 400 and only an allowlisted basename ever reaches the key.
+_FILENAME_ALLOWED = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,254}$")
+
+
+def _sanitize_filename(value: str) -> str:
+    """Reject a client filename that is not a safe basename.
+
+    Stricter twin of apps/assignments/services.validate_and_presign_upload:
+    path separators ('/' or '\\'), '..', NUL, a leading dot/slash, or any char
+    outside [A-Za-z0-9._-] raise ValidationError (a 400) instead of being
+    normalized, so the value is always safe to interpolate into an S3 key.
+    """
+    name = (value or "").strip()
+    if not name or name in {".", ".."} or name.startswith("."):
+        raise serializers.ValidationError(
+            _("Filename must be a non-empty basename without path separators or a leading dot.")
+        )
+    if not _FILENAME_ALLOWED.match(name):
+        raise serializers.ValidationError(
+            _("Filename may only contain letters, digits, '.', '_' and '-' (no path separators).")
+        )
+    return name
 
 
 class ContentLibrarySerializer(serializers.ModelSerializer):
@@ -115,6 +145,9 @@ class ContentUploadUrlSerializer(serializers.Serializer):
             lesson_field.queryset = ContentLesson.objects.filter(module__course__library__in=libs)
             folder_field.queryset = Folder.objects.filter(library__in=libs)
 
+    def validate_filename(self, value: str) -> str:
+        return _sanitize_filename(value)
+
     def validate(self, attrs):
         if not attrs.get("lesson") and not attrs.get("folder"):
             raise serializers.ValidationError("A file must be attached to a lesson or a folder.")
@@ -125,3 +158,6 @@ class NewVersionSerializer(serializers.Serializer):
     filename = serializers.CharField(max_length=255)
     content_type = serializers.CharField(max_length=127)
     size_bytes = serializers.IntegerField(min_value=1)
+
+    def validate_filename(self, value: str) -> str:
+        return _sanitize_filename(value)

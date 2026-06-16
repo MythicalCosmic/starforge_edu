@@ -96,6 +96,53 @@ def test_issue_invoice_number_is_sequential_per_year(tenant_a):
         assert n2 == n1 + 1
 
 
+def test_invoice_numbering_takes_advisory_lock_even_for_first_invoice(tenant_a, monkeypatch):
+    """MAJOR fix: a MAX()+1 select_for_update locks NO rows for the first invoice
+    of a year, so two concurrent first issues both compute seq=1. The fix takes a
+    per-(schema, year) transaction advisory lock that exists regardless of row
+    count. Here we assert the lock is actually acquired on the empty-year path
+    (a true concurrency race needs transaction=True; this proves the serialize
+    point is reached) and that the first number is well-formed."""
+    from apps.finance import services as finance_services
+
+    calls: list[str] = []
+
+    with schema_context(tenant_a.schema_name):
+        from django.db import connection
+
+        real_cursor = connection.cursor
+
+        class _RecordingCursor:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def execute(self, sql, params=None):
+                if "pg_advisory_xact_lock" in str(sql):
+                    calls.append(str(sql))
+                return self._inner.execute(sql, params)
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+            def __enter__(self):
+                self._inner.__enter__()
+                return self
+
+            def __exit__(self, *a):
+                return self._inner.__exit__(*a)
+
+        def fake_cursor():
+            return _RecordingCursor(real_cursor())
+
+        monkeypatch.setattr(connection, "cursor", fake_cursor)
+        fs = FeeScheduleFactory()
+        student = StudentProfileFactory()
+        # No invoices yet this year -> the empty-year path must still lock.
+        inv = finance_services.issue_invoice(student_id=student.pk, fee_schedule_id=fs.pk)
+        assert inv.number.endswith("000001")
+        assert calls, "issue_invoice must take a pg_advisory_xact_lock before numbering"
+
+
 def test_issue_invoice_fx_snapshot_manual(tenant_a):
     with schema_context(tenant_a.schema_name):
         cs = _settings(fx_source="manual")
@@ -228,11 +275,15 @@ def test_enrollment_signal_receiver_issues_once(tenant_a, django_capture_on_comm
     """The receiver is wired to cohort_member_moved; firing it issues exactly one
     invoice and a second fire dedupes."""
     from apps.cohorts.services import move_student
+    from apps.org.tests.factories import BranchFactory
 
     with schema_context(tenant_a.schema_name):
-        source = CohortFactory()
-        target = CohortFactory()
-        student = StudentProfileFactory(current_cohort=source)
+        # move_student now enforces student.branch == to_cohort.branch, so pin all
+        # three to one branch (the cross-branch case is a separate negative test).
+        branch = BranchFactory()
+        source = CohortFactory(branch=branch)
+        target = CohortFactory(branch=branch)
+        student = StudentProfileFactory(current_cohort=source, branch=branch)
         CohortMembershipFactory(cohort=source, student=student)
         FeeScheduleFactory(cohort=target, amount_uzs=Decimal("600000.00"))
 
@@ -421,6 +472,75 @@ def test_refund_exceeds_paid_rejected(tenant_a):
         services.allocate_payment(payment_id=22, amount_uzs=Decimal("50000.00"))
         with pytest.raises(ValidationException) as exc:
             services.request_refund(invoice=inv, amount_uzs=Decimal("90000.00"))
+        assert exc.value.code == "refund_exceeds_paid"
+
+
+def test_register_refund_completion_reverses_allocation_and_status(tenant_a):
+    """BLOCKER fix: completing a refund must delete the PaymentAllocation rows and
+    flip the invoice off PAID, restoring the outstanding balance."""
+    with schema_context(tenant_a.schema_name):
+        student = StudentProfileFactory()
+        inv = InvoiceFactory(student=student, total_uzs=Decimal("100000.00"))
+        services.allocate_payment(payment_id=50, invoice_ids=[inv.pk], amount_uzs=Decimal("100000.00"))
+        inv.refresh_from_db()
+        assert inv.status == Invoice.Status.PAID
+        assert selectors.outstanding_balance(student.pk) == Decimal("0.00")
+
+        refund = services.request_refund(invoice=inv, amount_uzs=Decimal("100000.00"), payment_id=50)
+        services.register_refund_completion(refund.pk, payment_id=50)
+
+        inv.refresh_from_db()
+        assert inv.status == Invoice.Status.ISSUED
+        assert PaymentAllocation.objects.filter(payment_id=50).count() == 0
+        assert selectors.outstanding_balance(student.pk) == Decimal("100000.00")
+
+
+def test_partial_refund_reverses_only_refunded_amount(tenant_a):
+    """A partial refund releases only its amount; the invoice drops to
+    PARTIALLY_PAID and the balance reflects the still-paid remainder."""
+    with schema_context(tenant_a.schema_name):
+        student = StudentProfileFactory()
+        inv = InvoiceFactory(student=student, total_uzs=Decimal("100000.00"))
+        services.allocate_payment(payment_id=51, invoice_ids=[inv.pk], amount_uzs=Decimal("100000.00"))
+
+        refund = services.request_refund(invoice=inv, amount_uzs=Decimal("30000.00"), payment_id=51)
+        services.register_refund_completion(refund.pk, payment_id=51)
+
+        inv.refresh_from_db()
+        assert inv.status == Invoice.Status.PARTIALLY_PAID
+        # 30000 released -> 70000 still allocated -> outstanding 30000
+        assert selectors.outstanding_balance(student.pk) == Decimal("30000.00")
+        from django.db.models import Sum
+
+        remaining = PaymentAllocation.objects.filter(payment_id=51).aggregate(s=Sum("amount_uzs"))["s"]
+        assert remaining == Decimal("70000.00")
+
+
+def test_second_refund_after_completion_rejected(tenant_a):
+    """MAJOR fix: once a refund completes (and its allocation is reversed), a
+    second full refund on the same invoice is rejected — the net paid is gone."""
+    with schema_context(tenant_a.schema_name):
+        inv = InvoiceFactory(total_uzs=Decimal("100000.00"))
+        services.allocate_payment(payment_id=52, invoice_ids=[inv.pk], amount_uzs=Decimal("100000.00"))
+
+        refund = services.request_refund(invoice=inv, amount_uzs=Decimal("100000.00"), payment_id=52)
+        services.register_refund_completion(refund.pk, payment_id=52)
+
+        with pytest.raises(ValidationException) as exc:
+            services.request_refund(invoice=inv, amount_uzs=Decimal("100000.00"), payment_id=52)
+        assert exc.value.code == "refund_exceeds_paid"
+
+
+def test_in_flight_refund_blocks_a_second_request(tenant_a):
+    """Two refund REQUESTS (neither completed yet) cannot both pass against the
+    same gross paid amount — the second is rejected as over the net paid."""
+    with schema_context(tenant_a.schema_name):
+        inv = InvoiceFactory(total_uzs=Decimal("100000.00"))
+        services.allocate_payment(payment_id=53, invoice_ids=[inv.pk], amount_uzs=Decimal("100000.00"))
+
+        services.request_refund(invoice=inv, amount_uzs=Decimal("60000.00"), payment_id=53)
+        with pytest.raises(ValidationException) as exc:
+            services.request_refund(invoice=inv, amount_uzs=Decimal("60000.00"), payment_id=53)
         assert exc.value.code == "refund_exceeds_paid"
 
 

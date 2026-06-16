@@ -5,7 +5,6 @@ from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from rest_framework_simplejwt.views import TokenBlacklistView
 
 from apps.users.services import register_device
 from core.utils import client_ip, user_agent
@@ -186,11 +185,29 @@ class JWTRefreshView(APIView):
         return Response(pair)
 
 
-class JWTLogoutView(TokenBlacklistView):
+class JWTLogoutView(APIView):
     """POST /api/v1/auth/logout/  body: {refresh}  -> 200
 
-    Blacklists a single refresh token (this device).
+    Blacklists a single refresh token (this device), tenant-bound: a token from
+    another center is rejected (401 tenant_mismatch) instead of silently failing.
     """
+
+    permission_classes = [AllowAny]
+
+    @extend_schema(
+        summary="Log out this device (blacklist one refresh token)",
+        request=RefreshSerializer,
+        responses={
+            200: OpenApiResponse(description="Refresh token blacklisted."),
+            401: OpenApiResponse(description="authentication_failed / tenant_mismatch envelope"),
+        },
+        tags=["auth"],
+    )
+    def post(self, request):
+        serializer = RefreshSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        services.logout_one(serializer.validated_data["refresh"])
+        return Response(status=status.HTTP_200_OK)
 
 
 class LogoutAllView(APIView):

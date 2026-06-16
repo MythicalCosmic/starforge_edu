@@ -28,6 +28,7 @@ in plaintext (it lives in ``ProviderConfig.payme_key`` via EncryptedCharField).
 from __future__ import annotations
 
 import base64
+import hmac
 from abc import ABC, abstractmethod
 from typing import Any, Protocol
 
@@ -101,7 +102,9 @@ class PaymeClient(ABC):
         except (ValueError, UnicodeDecodeError):
             return False
         login, _, token = raw.partition(":")
-        return login == "Paycom" and bool(key) and token == key
+        # Constant-time compare on the secret to avoid leaking the key byte-by-byte
+        # via response-timing (the login name is not secret, so a plain == is fine).
+        return login == "Paycom" and bool(key) and hmac.compare_digest(token, key)
 
     @abstractmethod
     def handle(

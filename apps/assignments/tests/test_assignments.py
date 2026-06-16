@@ -461,6 +461,55 @@ def test_assignment_create_requires_write(tenant_a, as_role):
     assert resp.status_code == 403
 
 
+def test_teacher_cannot_create_assignment_in_non_taught_cohort(tenant_a, user_in, as_user):
+    """Write-path scoping: a teacher with assignments:write may NOT POST an
+    assignment into a cohort they don't teach (reads were scoped, writes were
+    not). The out-of-scope cohort PK is filtered from the serializer queryset, so
+    it 400s; the teacher's own cohort succeeds (201)."""
+    teacher_user = user_in(tenant_a, roles=["teacher"])
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        teacher_profile = TeacherProfileFactory(user=teacher_user, branch=branch)
+        own_cohort: Any = CohortFactory(branch=branch, primary_teacher=teacher_profile)
+        foreign_cohort: Any = CohortFactory(branch=branch)  # taught by nobody / another teacher
+        own_id, foreign_id = own_cohort.id, foreign_cohort.id
+
+    client = as_user(tenant_a, teacher_user)
+    base = {
+        "title": "Essay",
+        "due_at": (timezone.now() + timedelta(days=3)).isoformat(),
+        "max_score": "100",
+    }
+
+    foreign = client.post("/api/v1/assignments/", {**base, "cohort": foreign_id}, format="json")
+    assert foreign.status_code == 400  # cohort not in the teacher's writable queryset
+
+    ok = client.post("/api/v1/assignments/", {**base, "cohort": own_id}, format="json")
+    assert ok.status_code == 201
+    assert ok.json()["cohort"] == own_id
+
+
+def test_teacher_cannot_repoint_assignment_to_non_taught_cohort(tenant_a, user_in, as_user):
+    """PATCH is scoped too: a teacher cannot move an owned assignment's cohort to a
+    cohort they don't teach."""
+    teacher_user = user_in(tenant_a, roles=["teacher"])
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        teacher_profile = TeacherProfileFactory(user=teacher_user, branch=branch)
+        own_cohort: Any = CohortFactory(branch=branch, primary_teacher=teacher_profile)
+        foreign_cohort: Any = CohortFactory(branch=branch)
+        assignment: Any = AssignmentFactory(cohort=own_cohort, status=Assignment.Status.DRAFT)
+        assignment_id, foreign_id = assignment.id, foreign_cohort.id
+
+    resp = as_user(tenant_a, teacher_user).patch(
+        f"/api/v1/assignments/{assignment_id}/", {"cohort": foreign_id}, format="json"
+    )
+    assert resp.status_code == 400
+    with schema_context(tenant_a.schema_name):
+        assignment.refresh_from_db()
+        assert assignment.cohort_id == own_cohort.id  # unchanged
+
+
 # --------------------------------------------------------------------------- #
 # cross-tenant + query budgets
 # --------------------------------------------------------------------------- #

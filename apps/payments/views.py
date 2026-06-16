@@ -21,6 +21,7 @@ from apps.payments import selectors, services
 from apps.payments.models import Payment, ProviderConfig
 from apps.payments.serializers import (
     AllocateSerializer,
+    CashPaymentSerializer,
     CheckoutSerializer,
     PaymentListSerializer,
     PaymentReadSerializer,
@@ -55,6 +56,7 @@ class PaymentViewSet(TenantSafeModelViewSet):
         "list": "payments:read",
         "retrieve": "payments:read",
         "checkout": "payments:write",
+        "cash": "payments:write",
         "allocate": "payments:write",
         "refund": "payments:write",
         "reconciliation": "payments:read",
@@ -94,6 +96,29 @@ class PaymentViewSet(TenantSafeModelViewSet):
             payer=request.user,
         )
         return Response(result, status=status.HTTP_201_CREATED)
+
+    @extend_schema(
+        summary="Record a cash payment at the cashier drawer",
+        description=(
+            "Creates a COMPLETED cash Payment stamped with the cashier's open "
+            "shift and auto-allocates it against the invoice. The cashier must "
+            "have an open shift (409 otherwise)."
+        ),
+        request=CashPaymentSerializer,
+        responses={201: PaymentReadSerializer},
+        tags=["payments"],
+        examples=[OpenApiExample("Cash for invoice", value={"invoice": 12, "amount_uzs": "150000.00"})],
+    )
+    @action(detail=False, methods=["post"])
+    def cash(self, request):
+        ser = CashPaymentSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        payment = services.create_cash_payment(
+            invoice_id=ser.validated_data["invoice"],
+            cashier=request.user,
+            amount_uzs=ser.validated_data.get("amount_uzs"),
+        )
+        return Response(PaymentReadSerializer(payment).data, status=status.HTTP_201_CREATED)
 
     @extend_schema(
         summary="Manually allocate a completed payment across invoices",

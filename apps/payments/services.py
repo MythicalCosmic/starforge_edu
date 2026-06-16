@@ -12,7 +12,7 @@ before B but is built in parallel) — never at module top.
 
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from django.db import transaction
@@ -194,7 +194,21 @@ def _auto_allocate(payment: Payment) -> None:
         payment.allocation_status = Payment.Allocation.MANUAL_REVIEW
         payment.save(update_fields=["allocation_status", "updated_at"])
         return
-    allocate_payment(payment_id=payment.pk, amount_uzs=payment.amount_uzs, invoice_ids=[int(invoice_id)])
+    # The payment is REAL MONEY regardless of whether finance can auto-match it
+    # to an open invoice. A duplicate/late charge against an already-PAID invoice
+    # (or an over-allocation) makes allocate_payment raise ValidationException;
+    # that must NOT roll back the completion (signal + fiscalization). Wrap the
+    # allocation in a SAVEPOINT so its failure only rolls back the allocation,
+    # and defer to the manual-review endpoint (as the docstring promises).
+    try:
+        with transaction.atomic():
+            allocate_payment(
+                payment_id=payment.pk, amount_uzs=payment.amount_uzs, invoice_ids=[int(invoice_id)]
+            )
+    except ValidationException:
+        payment.allocation_status = Payment.Allocation.MANUAL_REVIEW
+        payment.save(update_fields=["allocation_status", "updated_at"])
+        return
     payment.allocation_status = Payment.Allocation.ALLOCATED
     payment.save(update_fields=["allocation_status", "updated_at"])
 
@@ -215,6 +229,64 @@ def allocate_manual(*, payment_id: int, allocations: list[dict[str, Any]]) -> Pa
         )
     payment.allocation_status = Payment.Allocation.ALLOCATED
     payment.save(update_fields=["allocation_status", "updated_at"])
+    return payment
+
+
+# ---------------------------------------------------------------------------
+# Cash intake (cashier drawer) — stamps the open CashierShift so the shift
+# reconciliation report (_shift_cash_total) reflects real cash taken in.
+# ---------------------------------------------------------------------------
+@transaction.atomic
+def create_cash_payment(
+    *,
+    invoice_id: int,
+    cashier,
+    amount_uzs: Decimal | None = None,
+    idempotency_key: str | None = None,
+) -> Payment:
+    """Record a CASH payment taken at the drawer.
+
+    Creates a COMPLETED ``Payment(provider=CASH)`` stamped with the cashier's
+    currently OPEN ``CashierShift`` (the only write path that sets
+    ``Payment.cashier_shift`` — without it the cashier-shift reconciliation report
+    always read zero cash). Drives the normal completion chokepoint so the payment
+    fiscalizes + auto-allocates against the invoice exactly like a provider
+    payment. Idempotent on ``idempotency_key`` (defaults to a stable per-(schema,
+    invoice, shift) key so a double-submit at the drawer does not double-charge)."""
+    from apps.finance.models import CashierShift, Invoice
+
+    invoice = Invoice.objects.filter(pk=invoice_id).first()
+    if invoice is None:
+        raise UnprocessableEntity(_("Invoice not found."), fields={"invoice": ["not_found"]})
+
+    shift = (
+        CashierShift.objects.filter(cashier=cashier, status=CashierShift.Status.OPEN)
+        .order_by("-opened_at")
+        .first()
+    )
+    if shift is None:
+        raise UnprocessableEntity(
+            _("You must have an open cashier shift to take cash."), code="no_open_shift"
+        )
+
+    amount = Decimal(amount_uzs).quantize(Decimal("0.01")) if amount_uzs is not None else invoice.total_uzs
+    if amount <= Decimal("0"):
+        raise ValidationException(_("Cash amount must be positive."), fields={"amount_uzs": ["invalid"]})
+
+    key = idempotency_key or stable_hash(f"cash:{current_schema()}:{invoice_id}:{shift.pk}")
+    payment, created = get_or_create_payment(
+        idempotency_key=key,
+        provider=Payment.Method.CASH,
+        amount_uzs=amount,
+        account_ref=invoice.number,
+        payer=getattr(invoice.student, "user", None),
+        metadata={"invoice_id": invoice.pk, "student_id": invoice.student_id},
+    )
+    if created or payment.cashier_shift_id is None:
+        payment.cashier_shift = shift
+        payment.save(update_fields=["cashier_shift", "updated_at"])
+    mark_payment_completed(payment_id=payment.pk, provider_txn_id=f"cash:{shift.pk}")
+    payment.refresh_from_db()
     return payment
 
 
@@ -249,7 +321,11 @@ def create_checkout(*, invoice_id: int, provider: str, idempotency_key: str, pay
 
 
 def _build_provider_checkout(*, provider: str, payment: Payment, config, account: dict) -> dict[str, Any]:
-    amount_uzs = int(payment.amount_uzs)
+    # Click/Uzum transmit the order amount in whole soum (UZS). Round half-up to
+    # the nearest soum rather than truncating with int() — a bare int() silently
+    # drops fractional UZS (e.g. 149999.99 -> 149999), short-changing the bill.
+    # Payme uses tiyin (1 UZS = 100 tiyin) so it carries the exact cents.
+    amount_uzs = int(payment.amount_uzs.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
     if provider == Provider.CLICK:
         from infrastructure.payments.click import get_click_client
 
@@ -276,17 +352,30 @@ def _build_provider_checkout(*, provider: str, payment: Payment, config, account
 # ---------------------------------------------------------------------------
 @transaction.atomic
 def record_webhook_event(
-    *, provider: str, event_id: str, payload: dict, remote_ip: str | None, signature_valid: bool
+    *,
+    provider: str,
+    event_id: str,
+    payload: dict,
+    remote_ip: str | None,
+    signature_valid: bool,
+    idempotent_retry: bool = False,
 ) -> tuple[WebhookEvent, bool]:
     """Insert a WebhookEvent. Returns ``(event, is_new)``. A replayed
     ``(provider, event_id)`` returns the existing row marked ``duplicate`` and
-    ``is_new=False`` — the caller must NOT re-run side effects (D3-B-6)."""
+    ``is_new=False`` — the caller must NOT re-run side effects (D3-B-6).
+
+    ``idempotent_retry=True`` is for protocols whose repeat of the same id is an
+    EXPECTED retry rather than a nonce-replay attack: Payme's CreateTransaction is
+    idempotent on ``params.id`` (the client echoes the existing transaction), so a
+    re-send must NOT be flagged ``duplicate`` (that label is the audit signal for a
+    reused nonce). The existing row is returned untouched with ``is_new=False``."""
     existing = WebhookEvent.objects.filter(provider=provider, event_id=event_id).first()
     if existing is not None:
         # P0 fix (D3-F): a replay must be recorded as `duplicate`, not silently
         # returned with its prior status — this is the audit signal that a nonce
-        # was reused, and D3-B-6 / the replay tests assert it.
-        if existing.status != WebhookEvent.Status.DUPLICATE:
+        # was reused, and D3-B-6 / the replay tests assert it. Skip this for an
+        # id-idempotent protocol retry (Payme), which is not a replay attack.
+        if not idempotent_retry and existing.status != WebhookEvent.Status.DUPLICATE:
             existing.status = WebhookEvent.Status.DUPLICATE
             existing.save(update_fields=["status"])
         return existing, False
@@ -306,6 +395,15 @@ def mark_webhook_processed(event: WebhookEvent) -> None:
     event.status = WebhookEvent.Status.PROCESSED
     event.processed_at = timezone.now()
     event.save(update_fields=["status", "processed_at"])
+
+
+def mark_webhook_rejected(event: WebhookEvent) -> None:
+    """Mark an event rejected after side-effect validation fails (e.g. amount
+    mismatch). Distinct from a signature rejection (recorded at intake): the
+    signature was valid but the body was not honoured, and the event must NOT be
+    treated as a successful dedupe winner so the provider's retry is reprocessed."""
+    event.status = WebhookEvent.Status.REJECTED
+    event.save(update_fields=["status"])
 
 
 # ---------------------------------------------------------------------------
@@ -391,7 +489,13 @@ class PaymeDBStore:
         )
         return payment
 
+    @transaction.atomic
     def perform_transaction(self, txn: Payment):
+        # Atomic so the PERFORMED state-save and the completion flip commit/roll
+        # back together (no orphan PERFORMED-without-completion). Allocation
+        # failures are absorbed inside mark_payment_completed's _auto_allocate
+        # savepoint and surface as allocation_status=MANUAL_REVIEW — they never
+        # raise a ValidationException out of here into the JSON-RPC handler.
         now_ms = int(timezone.now().timestamp() * 1000)
         txn.provider_state = STATE_PERFORMED
         txn.metadata = {**txn.metadata, "perform_time_ms": now_ms}
@@ -497,9 +601,42 @@ def refund_payment(*, payment_id: int, amount_uzs: Decimal | None = None, reason
 # ---------------------------------------------------------------------------
 # Click / Uzum webhook processing (D3-B-2, D3-B-4)
 # ---------------------------------------------------------------------------
+def _assert_provider_amount(payload: dict, invoice) -> None:
+    """Reject a provider Complete callback whose reported amount does not match the
+    invoice total. Payme guards this in its client (-31001 ERR_INVALID_AMOUNT);
+    Click/Uzum carry the (signed) amount in the body but the handler never checked
+    it, so a partial/forged-but-validly-signed amount would credit the FULL invoice
+    and auto-allocate the full total. Compare in whole soum (UZS) — both providers
+    transmit the order amount in soum."""
+    raw = payload.get("amount")
+    if raw is None:
+        raise ValidationException(
+            _("Provider callback is missing the payment amount."),
+            code="amount_missing",
+            fields={"amount": ["required"]},
+        )
+    try:
+        reported = int(Decimal(str(raw)))
+    except (ArithmeticError, ValueError) as exc:
+        raise ValidationException(
+            _("Provider callback amount is not a number."),
+            code="amount_invalid",
+            fields={"amount": [str(raw)]},
+        ) from exc
+    expected = int(invoice.total_uzs)
+    if reported != expected:
+        raise ValidationException(
+            _("Provider amount does not match the invoice total."),
+            code="amount_mismatch",
+            fields={"amount": [str(reported)], "expected": [str(expected)]},
+        )
+
+
 @transaction.atomic
 def process_click_complete(*, payload: dict, invoice) -> Payment:
-    """Click action=1 (complete) → completed Payment for the invoice."""
+    """Click action=1 (complete) → completed Payment for the invoice. Rejects a
+    callback whose reported amount != invoice.total_uzs (amount integrity)."""
+    _assert_provider_amount(payload, invoice)
     click_trans_id = str(payload.get("click_trans_id", ""))
     key = f"click:{current_schema()}:{click_trans_id}"
     payment, _created = get_or_create_payment(
@@ -518,6 +655,9 @@ def process_click_complete(*, payload: dict, invoice) -> Payment:
 
 @transaction.atomic
 def process_uzum_payment(*, payload: dict, invoice) -> Payment:
+    """Uzum Complete → completed Payment. Rejects a callback whose reported amount
+    != invoice.total_uzs (amount integrity, mirroring Payme's -31001 guard)."""
+    _assert_provider_amount(payload, invoice)
     txn_id = str(payload.get("transaction_id") or payload.get("event_id") or payload.get("order_id", ""))
     key = f"uzum:{current_schema()}:{txn_id}"
     payment, _created = get_or_create_payment(
@@ -634,6 +774,7 @@ def generate_receipt_pdf_body(payment_id: int) -> str | None:
 __all__ = [
     "PaymeDBStore",
     "allocate_manual",
+    "create_cash_payment",
     "create_checkout",
     "enqueue_receipt_pdf",
     "fiscalize_payment_body",
@@ -642,6 +783,7 @@ __all__ = [
     "mark_fiscal_failed",
     "mark_payment_completed",
     "mark_payment_failed",
+    "mark_webhook_rejected",
     "process_click_complete",
     "process_uzum_payment",
     "record_webhook_event",

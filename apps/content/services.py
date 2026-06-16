@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import uuid
+from pathlib import PurePosixPath
 
 from django.db import transaction
 from django.db.models import F
@@ -52,6 +53,25 @@ _THUMB_MAX_EDGE = 320
 # ---------------------------------------------------------------------------
 
 
+def _safe_basename(filename: str) -> str:
+    """Reduce a filename to a safe basename for S3-key interpolation.
+
+    The serializers (ContentUploadUrlSerializer / NewVersionSerializer) already
+    reject path separators / '..' / leading-dot for the API path; this is the
+    defense-in-depth chokepoint so any direct caller (seed, version chain,
+    future imports) cannot interpolate a traversal segment into the tmp key —
+    and, via _filename_of, into the later final_key.
+    """
+    name = PurePosixPath((filename or "").replace("\\", "/")).name
+    if not name or name in {".", ".."}:
+        raise UnprocessableEntity(
+            _("That filename is not allowed."),
+            code="invalid_filename",
+            fields={"filename": ["Filename must be a non-empty basename."]},
+        )
+    return name
+
+
 def _validate_upload_inputs(*, filename: str, content_type: str, size_bytes: int, settings) -> None:
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     if ext not in {e.lower() for e in settings.allowed_file_types}:
@@ -90,6 +110,10 @@ def request_upload(
     """Validate against the knobs and create a `pending` LessonFile with a tmp
     key + presigned PUT URL. `previous` links a new version."""
     settings = get_center_settings()
+    # Sanitize to a basename before the key is built (defense in depth behind the
+    # serializer): a name with '/', '\' or '..' would otherwise escape the
+    # per-upload {uuid}/ isolation and taint the later {schema}/content key too.
+    filename = _safe_basename(filename)
     _validate_upload_inputs(
         filename=filename, content_type=content_type, size_bytes=size_bytes, settings=settings
     )

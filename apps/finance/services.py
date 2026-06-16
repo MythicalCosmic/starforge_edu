@@ -40,7 +40,7 @@ from apps.finance.signals import invoice_issued
 from apps.org.selectors import get_center_settings
 from apps.students.models import StudentProfile
 from core.exceptions import ConflictException, NotFoundException, ValidationException
-from core.utils import current_schema
+from core.utils import current_schema, stable_hash
 
 _ZERO = Decimal("0")
 _CENT = Decimal("0.01")
@@ -56,11 +56,34 @@ OPEN_STATUSES = (Invoice.Status.ISSUED, Invoice.Status.PARTIALLY_PAID, Invoice.S
 
 
 def _next_invoice_number(*, year: int) -> str:
-    """`INV-{YYYY}-{seq:06d}`, unique per center (the tenant schema). Computed
-    under a row lock over the year's invoices so concurrent issues never collide.
+    """`INV-{YYYY}-{seq:06d}`, unique per center (the tenant schema).
+
+    Serialized on a Postgres transaction-level advisory lock keyed by
+    (schema, year). A `MAX()+1`-style `select_for_update` locks no rows when the
+    year is empty (or after a gap), so two concurrent first issues would both
+    compute seq=1 and the unique constraint would surface as a 500. The advisory
+    lock exists regardless of row count, so two concurrent `issue_invoice`
+    transactions serialize here and always get distinct sequence numbers; the
+    lock auto-releases at COMMIT/ROLLBACK (it must be taken inside an atomic
+    block — `issue_invoice` is `@transaction.atomic`).
     """
+    from django.db import connection
+
+    # 64-bit advisory lock key derived from (schema, year). pg_advisory_xact_lock
+    # takes two int4s; we split a stable 64-bit hash so distinct (schema, year)
+    # pairs serialize independently.
+    digest = stable_hash(f"invoice_number:{current_schema()}:{year}")
+    key = int(digest[:16], 16)
+    key_hi = (key >> 32) & 0xFFFFFFFF
+    key_lo = key & 0xFFFFFFFF
+    # Map the unsigned halves into signed int4 range Postgres expects.
+    key_hi = key_hi - 0x100000000 if key_hi >= 0x80000000 else key_hi
+    key_lo = key_lo - 0x100000000 if key_lo >= 0x80000000 else key_lo
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT pg_advisory_xact_lock(%s, %s)", [key_hi, key_lo])
+
     prefix = f"INV-{year}-"
-    last = Invoice.objects.select_for_update().filter(number__startswith=prefix).order_by("-number").first()
+    last = Invoice.objects.filter(number__startswith=prefix).order_by("-number").first()
     seq = (int(last.number.rsplit("-", 1)[1]) + 1) if last else 1
     return f"{prefix}{seq:06d}"
 
@@ -480,7 +503,21 @@ def request_refund(
     if amount <= _ZERO:
         raise ValidationException(_("Refund amount must be positive."), code="invalid_amount")
     allocated = invoice.allocations.aggregate(s=Sum("amount_uzs"))["s"] or _ZERO
-    if amount > allocated:
+    # `allocated` is the amount STILL paid: a COMPLETED refund already deleted its
+    # allocation rows (reverse_allocations_for_payment), so it is reflected here.
+    # We must still subtract any IN-FLIGHT refunds (requested/approved/sent) that
+    # have not yet reversed their allocations, or two concurrent refund requests
+    # could each pass against the same gross paid amount (over-credit).
+    in_flight_states = (
+        Refund.State.REQUESTED,
+        Refund.State.APPROVED,
+        Refund.State.SENT_TO_PROVIDER,
+    )
+    in_flight = (
+        invoice.refunds.filter(state__in=in_flight_states).aggregate(s=Sum("amount_uzs"))["s"] or _ZERO
+    )
+    net_paid = (allocated - in_flight).quantize(_CENT)
+    if amount > net_paid:
         raise ValidationException(
             _("Refund exceeds the amount paid on this invoice."), code="refund_exceeds_paid"
         )
@@ -520,7 +557,13 @@ def register_refund_completion(refund_id: int, payment_id: int | None = None) ->
     reversal (e.g. Payme CancelTransaction state -2). Idempotent — a completed
     refund is returned unchanged. Stamps `payment_id` if supplied. Walks the
     state machine forward to `completed` regardless of the current intermediate
-    state (approved/sent_to_provider)."""
+    state (approved/sent_to_provider).
+
+    On the first transition to COMPLETED it also reverses the accounting:
+    `reverse_allocations_for_payment` deletes the matching `PaymentAllocation`
+    rows (scoped to the refunded amount) and re-runs `_refresh_invoice_status`,
+    so a fully-refunded invoice flips PAID -> PARTIALLY_PAID/ISSUED and the
+    student's outstanding balance returns to its pre-payment value."""
     refund = Refund.objects.select_for_update().filter(pk=refund_id).first()
     if refund is None:
         raise NotFoundException(_("Refund not found."), code="refund_not_found")
@@ -532,7 +575,59 @@ def register_refund_completion(refund_id: int, payment_id: int | None = None) ->
         return refund
     refund.state = Refund.State.COMPLETED
     refund.save(update_fields=["state", "payment_id", "updated_at"])
+    # Reverse the allocations this refund undoes so the invoice no longer reads
+    # as fully paid (the money was returned). Scope to the refund amount so a
+    # partial refund only releases that much.
+    if refund.payment_id is not None:
+        reverse_allocations_for_payment(payment_id=refund.payment_id, amount_uzs=refund.amount_uzs)
     return refund
+
+
+@transaction.atomic
+def reverse_allocations_for_payment(*, payment_id: int, amount_uzs: Decimal | None = None) -> Decimal:
+    """Release (up to) `amount_uzs` of a payment's allocations and refresh the
+    affected invoices' statuses.
+
+    Deletes whole `PaymentAllocation` rows newest-first; the final row touched by
+    a partial reversal is shrunk in place (its CheckConstraint forbids a non-
+    positive amount, so a fully-consumed row is deleted instead). `amount_uzs=None`
+    reverses the entire payment. Returns the total UZS actually released. Each
+    affected invoice is re-evaluated via `_refresh_invoice_status`, flipping a
+    previously PAID invoice back to PARTIALLY_PAID/ISSUED so
+    `outstanding_balance` is restored. Idempotent: once the rows are gone a re-call
+    releases nothing."""
+    allocations = list(
+        PaymentAllocation.objects.select_for_update()
+        .filter(payment_id=payment_id)
+        .order_by("-created_at", "-id")
+    )
+    if not allocations:
+        return _ZERO
+
+    target = (
+        Decimal(amount_uzs).quantize(_CENT)
+        if amount_uzs is not None
+        else sum((a.amount_uzs for a in allocations), _ZERO)
+    )
+    released = _ZERO
+    affected_invoice_ids: set[int] = set()
+    for alloc in allocations:
+        if released >= target:
+            break
+        remaining = (target - released).quantize(_CENT)
+        affected_invoice_ids.add(alloc.invoice_id)
+        if alloc.amount_uzs <= remaining:
+            released += alloc.amount_uzs
+            alloc.delete()
+        else:
+            # Partial reversal of this row: shrink it (stays positive).
+            alloc.amount_uzs = (alloc.amount_uzs - remaining).quantize(_CENT)
+            alloc.save(update_fields=["amount_uzs"])
+            released += remaining
+
+    for invoice in Invoice.objects.select_for_update().filter(pk__in=affected_invoice_ids):
+        _refresh_invoice_status(invoice)
+    return released.quantize(_CENT)
 
 
 # ---------------------------------------------------------------------------

@@ -565,6 +565,41 @@ def test_exam_create_requires_write(tenant_a, as_role):
     assert resp.status_code == 403
 
 
+def test_teacher_cannot_create_exam_in_non_taught_cohort(tenant_a, user_in, as_user):
+    """Write-path scoping (mirrors the assignment finding): a teacher with
+    academics:write may NOT POST an exam into a cohort they don't teach. The
+    out-of-scope cohort PK is filtered from the serializer queryset → 400; the
+    teacher's own cohort succeeds (201)."""
+    teacher_user = user_in(tenant_a, roles=["teacher"])
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        teacher_profile = TeacherProfileFactory(user=teacher_user, branch=branch)
+        own_cohort: Any = CohortFactory(branch=branch, primary_teacher=teacher_profile)
+        foreign_cohort: Any = CohortFactory(branch=branch)
+        subject = SubjectFactory()
+        term: Any = TermFactory()
+        own_id, foreign_id = own_cohort.id, foreign_cohort.id
+        subject_id, term_id = subject.id, term.id
+
+    client = as_user(tenant_a, teacher_user)
+    base = {
+        "subject": subject_id,
+        "term": term_id,
+        "type": "midterm",
+        "title": "Midterm",
+        "exam_date": date(2026, 3, 1).isoformat(),
+        "max_score": "100",
+        "weight": "1.0",
+    }
+
+    foreign = client.post("/api/v1/academics/exams/", {**base, "cohort": foreign_id}, format="json")
+    assert foreign.status_code == 400  # cohort not in the teacher's writable queryset
+
+    ok = client.post("/api/v1/academics/exams/", {**base, "cohort": own_id}, format="json")
+    assert ok.status_code == 201
+    assert ok.json()["cohort"] == own_id
+
+
 def test_grades_cross_tenant_isolated(tenant_a, tenant_b, user_in, as_user):
     with schema_context(tenant_a.schema_name):
         branch = BranchFactory()

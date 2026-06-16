@@ -6,7 +6,18 @@ from .base import *  # noqa: F403
 from .base import FIELD_ENCRYPTION_KEY, env
 
 DEBUG = False
+
+# Fail fast on insecure defaults — base.py ships dev-friendly fallbacks
+# (`dev-only-CHANGE-ME`, ALLOWED_HOSTS=["*"]) that must NEVER reach production:
+# the default SECRET_KEY would let anyone forge JWTs/sessions, and a wildcard
+# host disables Host-header validation.
+SECRET_KEY = env("SECRET_KEY")
+if not SECRET_KEY or SECRET_KEY == "dev-only-CHANGE-ME":
+    raise ImproperlyConfigured("SECRET_KEY must be set to a unique, secret value in production.")
+
 ALLOWED_HOSTS = env("ALLOWED_HOSTS")
+if not ALLOWED_HOSTS or "*" in ALLOWED_HOSTS:
+    raise ImproperlyConfigured("ALLOWED_HOSTS must be set explicitly in production (no wildcard).")
 
 # TD-11 / O-11: encrypted fields are unreadable without this — fail fast.
 if not FIELD_ENCRYPTION_KEY:

@@ -22,7 +22,7 @@ import anthropic
 from django.conf import settings
 from django.core.cache import cache
 
-from core.utils import stable_hash
+from core.utils import current_schema, stable_hash
 
 
 @lru_cache(maxsize=1)
@@ -51,7 +51,9 @@ def _cache_key(
         },
         sort_keys=True,
     )
-    return f"anthropic:resp:{stable_hash(payload)}"
+    # Schema-scoped: the Redis cache is shared across tenants, so an unscoped key
+    # would serve tenant A's AI response to tenant B on a byte-identical prompt.
+    return f"anthropic:resp:{current_schema()}:{stable_hash(payload)}"
 
 
 def complete(

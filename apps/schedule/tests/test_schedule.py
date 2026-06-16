@@ -179,6 +179,86 @@ def test_bulk_reschedule_atomic_rollback_on_conflict(tenant_a):
         assert before == after  # nothing moved
 
 
+def test_bulk_reschedule_emits_one_rescheduled_per_moved_lesson(tenant_a, django_capture_on_commit_callbacks):
+    """Regression: bulk_reschedule must emit lesson_rescheduled (on_commit) once
+    per shifted lesson, mirroring move_occurrence, so D3-C notifies students."""
+    received: list[int] = []
+
+    def _recv(sender, lesson_id, **kw):
+        received.append(lesson_id)
+
+    services.lesson_rescheduled.connect(_recv)
+    try:
+        with schema_context(tenant_a.schema_name):
+            ctx = _setup()
+            rule = _make_rule(ctx)
+            expected_ids = sorted(rule.lessons.values_list("id", flat=True))
+            assert len(expected_ids) == 8
+            with django_capture_on_commit_callbacks(execute=True):
+                moved = services.bulk_reschedule(rule, shift_minutes=30)
+            assert moved == 8
+        assert sorted(received) == expected_ids
+    finally:
+        services.lesson_rescheduled.disconnect(_recv)
+
+
+def test_bulk_reschedule_passes_actor_and_old_start(tenant_a, user_in, django_capture_on_commit_callbacks):
+    """The emitted kwargs must match move_occurrence: lesson_id, old_start
+    (isoformat of the pre-shift start), actor_id, schema_name."""
+    actor = user_in(tenant_a, roles=["director"])
+    captured: list[dict] = []
+
+    def _recv(sender, **kw):
+        captured.append(kw)
+
+    services.lesson_rescheduled.connect(_recv)
+    try:
+        with schema_context(tenant_a.schema_name):
+            ctx = _setup()
+            rule = _make_rule(ctx)
+            old_starts = {lf.id: lf.starts_at for lf in rule.lessons.all()}
+            with django_capture_on_commit_callbacks(execute=True):
+                services.bulk_reschedule(rule, shift_minutes=30, actor=actor)
+        assert captured  # at least one emit
+        for kw in captured:
+            assert kw["actor_id"] == actor.pk
+            assert kw["schema_name"] == tenant_a.schema_name
+            assert kw["old_start"] == old_starts[kw["lesson_id"]].isoformat()
+    finally:
+        services.lesson_rescheduled.disconnect(_recv)
+
+
+def test_deactivating_rule_clears_future_lessons_and_stops_regeneration(tenant_a):
+    """Regression: setting is_active=False must purge the rule's regenerable
+    (future, non-detached, attendance-free) lessons and stop re-materializing —
+    otherwise is_active is a misleading no-op control."""
+    with schema_context(tenant_a.schema_name):
+        ctx = _setup()
+        rule = _make_rule(ctx)
+        assert rule.lessons.count() == 8
+        # Deactivate via the same service the API update path uses.
+        services.update_rule(rule, is_active=False)
+        assert rule.lessons.count() == 0
+        # Re-materializing a deactivated rule does not regenerate occurrences.
+        services.materialize_rule(rule)
+        assert rule.lessons.count() == 0
+
+
+def test_deactivating_rule_preserves_detached_lessons(tenant_a):
+    """A detached (manually moved) lesson is preserved even when the rule is
+    deactivated, mirroring the re-materialize keep-set."""
+    with schema_context(tenant_a.schema_name):
+        ctx = _setup()
+        rule = _make_rule(ctx)
+        moved = rule.lessons.order_by("starts_at").first()
+        services.move_occurrence(moved, starts_at=_aware(2026, 8, 3, 9), ends_at=_aware(2026, 8, 3, 10))
+        services.update_rule(rule, is_active=False)
+        moved.refresh_from_db()
+        assert rule.lessons.filter(pk=moved.pk).exists()
+        # Only the detached lesson survives; the regenerable future ones are gone.
+        assert rule.lessons.count() == 1
+
+
 def test_ical_feed_valid_and_cross_tenant_rejected(tenant_a, tenant_b, user_in):
     from icalendar import Calendar
 

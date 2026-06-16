@@ -45,6 +45,26 @@ class StudentViewSet(TenantSafeModelViewSet):
             return StudentDetailSerializer
         return StudentReadSerializer
 
+    def update(self, request, *args, **kwargs):
+        """Accept edits via StudentUpdateSerializer but return the role-gated
+        StudentDetailSerializer so medical_notes (encrypted PHI) is NOT echoed
+        back to a writer who is not a MEDICAL_NOTES_ROLE (DoD #4 / TD-11). The
+        default ModelViewSet.update would return serializer.data with the
+        decrypted plaintext, bypassing the retrieve-time gate."""
+        partial = kwargs.pop("partial", False)
+        instance = self.get_object()
+        serializer = StudentUpdateSerializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        if getattr(instance, "_prefetched_objects_cache", None):
+            # Drop the prefetch cache invalidated by the write (DRF parity).
+            instance._prefetched_objects_cache = {}
+        return Response(StudentDetailSerializer(instance, context={"request": request}).data)
+
+    def partial_update(self, request, *args, **kwargs):
+        kwargs["partial"] = True
+        return self.update(request, *args, **kwargs)
+
     @extend_schema(
         summary="Enroll a student (creates user + profile, generates student_id)",
         request=StudentCreateSerializer,

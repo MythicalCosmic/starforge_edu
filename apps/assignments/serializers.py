@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from typing import cast
+
 from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
 
 from apps.assignments.models import Assignment, Submission, SubmissionGrade
+from apps.cohorts.models import Cohort
 from core.exceptions import UnprocessableEntity
 
 
@@ -25,6 +28,32 @@ class AssignmentSerializer(serializers.ModelSerializer):
             "created_at",
         )
         read_only_fields = ("status", "published_at", "created_at")
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Writes are scoped like reads: a non-staff TEACHER may only create/repoint
+        # an assignment into a cohort they teach. Otherwise an out-of-scope cohort
+        # PK 400s here, closing the scoped-reads/unscoped-writes asymmetry (mirrors
+        # ContentUploadUrlSerializer + academics scoped_exams). Director/HoD and
+        # superuser keep the default tenant-wide queryset. None context (e.g. schema
+        # generation) leaves the default queryset untouched.
+        from apps.assignments.selectors import STAFF_ROLES, _cohorts_taught_by
+        from core.permissions import Role, get_user_roles
+
+        request = self.context.get("request")
+        if request is None or getattr(request, "user", None) is None:
+            return
+        user = request.user
+        if getattr(user, "is_superuser", False):
+            return
+        roles = get_user_roles(request)
+        if roles & STAFF_ROLES:
+            return
+        cohort_field = cast(serializers.PrimaryKeyRelatedField, self.fields["cohort"])
+        if Role.TEACHER in roles:
+            cohort_field.queryset = Cohort.objects.filter(id__in=_cohorts_taught_by(user))
+        else:
+            cohort_field.queryset = Cohort.objects.none()
 
     def validate_rubric(self, rubric):
         if not isinstance(rubric, list):

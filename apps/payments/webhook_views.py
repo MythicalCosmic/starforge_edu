@@ -31,6 +31,7 @@ from rest_framework.views import APIView
 
 from apps.payments import services
 from apps.payments.models import Provider, ProviderConfig
+from core.exceptions import ValidationException
 from core.utils import client_ip
 
 
@@ -92,7 +93,15 @@ class ClickWebhookView(_PublicWebhookView):
 
                 invoice = Invoice.objects.filter(number=payload.get("merchant_trans_id", "")).first()
                 if invoice is not None:
-                    services.process_click_complete(payload=payload, invoice=invoice)
+                    try:
+                        services.process_click_complete(payload=payload, invoice=invoice)
+                    except ValidationException:
+                        # Amount mismatch (provider reported != invoice total):
+                        # reject the event so a Click retry is NOT swallowed as a
+                        # duplicate, and never credit the invoice. Click reads the
+                        # error member; -1 is its generic failure code.
+                        services.mark_webhook_rejected(event)
+                        return Response({"error": ERROR_SIGN_CHECK_FAILED, "error_note": "Amount mismatch"})
             services.mark_webhook_processed(event)
             return Response({"error": ERROR_SUCCESS, "error_note": "Success"})
 
@@ -123,12 +132,16 @@ class PaymeWebhookView(_PublicWebhookView):
             method = body.get("method")
             params = body.get("params") or {}
             if method in ("CreateTransaction",) and params.get("id"):
+                # Payme's CreateTransaction is idempotent on params.id — a repeat of
+                # the same id is an EXPECTED retry, not a nonce-replay, so it must
+                # not be flagged `duplicate`. The handler echoes the existing txn.
                 services.record_webhook_event(
                     provider=self.provider,
                     event_id=str(params["id"]),
                     payload=body,
                     remote_ip=client_ip(request),
                     signature_valid=client.verify_auth(auth_header=auth_header, key=key),
+                    idempotent_retry=True,
                 )
             response = client.handle(body=body, auth_header=auth_header, key=key, store=store)
             return Response(response)
@@ -176,6 +189,16 @@ class UzumWebhookView(_PublicWebhookView):
             order_ref = payload.get("order_id") or payload.get("order_number") or payload.get("account", "")
             invoice = Invoice.objects.filter(number=order_ref).first()
             if invoice is not None:
-                services.process_uzum_payment(payload=payload, invoice=invoice)
+                try:
+                    services.process_uzum_payment(payload=payload, invoice=invoice)
+                except ValidationException:
+                    # Amount mismatch: reject (do not credit the invoice) and mark
+                    # the event rejected so a retry is not swallowed as a duplicate.
+                    services.mark_webhook_rejected(event)
+                    return _error(
+                        "amount_mismatch",
+                        "Reported amount does not match the invoice total.",
+                        http_status=status.HTTP_400_BAD_REQUEST,
+                    )
             services.mark_webhook_processed(event)
             return Response({"status": "ok"})

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from rest_framework.throttling import SimpleRateThrottle
 
+from core.utils import current_schema
 from core.validators import normalize_phone
 
 
@@ -44,7 +45,9 @@ class LoginUserThrottle(SimpleRateThrottle):
         username = request.data.get("username") if hasattr(request, "data") else None
         if not isinstance(username, str) or not username:
             return None
-        return f"login_user:{username.strip().lower()}"
+        # Schema-scoped: usernames are unique per tenant, so an attack on tenant
+        # A's "admin" must not exhaust tenant B's "admin" bucket (shared Redis).
+        return f"login_user:{current_schema()}:{username.strip().lower()}"
 
 
 class LoginIPThrottle(SimpleRateThrottle):

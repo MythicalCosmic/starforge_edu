@@ -120,6 +120,128 @@ class TestModelReceivers:
 
 
 # --------------------------------------------------------------------------- #
+# Public-schema guard (audit is TENANT-ONLY; audit_auditlog absent in public)
+# --------------------------------------------------------------------------- #
+
+
+class TestPublicSchemaGuard:
+    """``apps.audit`` is tenant-only, so ``audit_auditlog`` does not exist in the
+    public schema. Platform-staff writes to the SHARED users.User /
+    users.RoleMembership tables fire the audit receivers while the connection is
+    on ``public`` — those must NO-OP, not raise ProgrammingError."""
+
+    def test_public_schema_user_save_does_not_raise_or_audit(
+        self, public_tenant, django_capture_on_commit_callbacks
+    ):
+        from django.db import connection
+        from django_tenants.utils import get_public_schema_name, schema_context
+
+        from apps.users.tests.factories import UserFactory
+
+        with schema_context(get_public_schema_name()):
+            assert connection.schema_name == get_public_schema_name()
+            # The on_commit audit hook would target a non-existent table; the
+            # public-schema guard must keep this from being scheduled/raised.
+            with django_capture_on_commit_callbacks(execute=True):
+                user = UserFactory()
+            # User actually persisted on the public schema.
+            from apps.users.models import User
+
+            assert User.objects.filter(pk=user.pk).exists()
+
+    def test_public_schema_rolemembership_save_does_not_raise(
+        self, public_tenant, django_capture_on_commit_callbacks
+    ):
+        from django_tenants.utils import get_public_schema_name, schema_context
+
+        from apps.users.tests.factories import UserFactory
+
+        with schema_context(get_public_schema_name()):
+            user = UserFactory()
+            # org_branch does not exist on public; the branch FK is db_constraint=
+            # False (ADR-007), so a public-schema RoleMembership uses a bare
+            # branch_id. The audit receiver still fires on this save and must
+            # no-op rather than hit the non-existent audit_auditlog table.
+            with django_capture_on_commit_callbacks(execute=True):
+                membership = RoleMembership.objects.create(user=user, branch_id=1, role=Role.IT)
+            assert RoleMembership.objects.filter(pk=membership.pk).exists()
+
+    def test_audit_log_helper_noops_on_public_schema(self, public_tenant):
+        from django_tenants.utils import get_public_schema_name, schema_context
+
+        with schema_context(get_public_schema_name()):
+            # Synchronous audit_log() (the auth-flow path) must also no-op.
+            row = audit_log(
+                actor=None,
+                action=Action.LOGIN_FAILED,
+                resource_type="users.User",
+                after={"username": "platform-admin"},
+            )
+            assert row is None
+
+
+# --------------------------------------------------------------------------- #
+# Before-snapshot thread-local: schema-scoped + self-cleaning (D3-F)
+# --------------------------------------------------------------------------- #
+
+
+class TestBeforeSnapshotThreadLocal:
+    """A pre_save whose write fails (post_save never fires) must not corrupt a
+    LATER save's before/after diff — especially in a DIFFERENT tenant reusing the
+    same worker thread. The store key includes the schema and is self-cleaning."""
+
+    def test_store_key_is_schema_scoped(self, tenant_a, tenant_b):
+        from django_tenants.utils import schema_context
+
+        from apps.audit import receivers
+
+        with schema_context(tenant_a.schema_name):
+            key_a = receivers._store_key("users.User", 5)
+        with schema_context(tenant_b.schema_name):
+            key_b = receivers._store_key("users.User", 5)
+        # Same label+pk in different tenants must NOT collide.
+        assert key_a != key_b
+        assert tenant_a.schema_name in key_a
+        assert tenant_b.schema_name in key_b
+
+    def test_stale_pre_save_does_not_corrupt_next_tenant_diff(
+        self, tenant_a, tenant_b, django_capture_on_commit_callbacks
+    ):
+        """Simulate a leaked before-snapshot from tenant A (a failed save where
+        post_save never popped it), then do a real update of the same label:pk in
+        tenant B. B's diff must reflect B's true prior state, not A's stale one."""
+        from django_tenants.utils import schema_context
+
+        from apps.audit import receivers
+        from apps.users.tests.factories import UserFactory
+
+        # Leak a stale tenant-A snapshot for users.User pk that we'll reuse in B.
+        with schema_context(tenant_a.schema_name):
+            user_a = UserFactory(first_name="LeakedTenantA")
+            stale_key = receivers._store_key("users.User", user_a.pk)
+            store = receivers._before_store.__dict__.setdefault("data", {})
+            store[stale_key] = {"first_name": "LeakedTenantA"}
+
+        with schema_context(tenant_b.schema_name):
+            # Create a user in B that happens to share the pk (or any pk) and
+            # update it: its before/after diff must be B's own, never A's leak.
+            user_b = UserFactory(first_name="RealTenantB")
+            with django_capture_on_commit_callbacks(execute=True):
+                user_b.first_name = "RealTenantB-Updated"
+                user_b.save(update_fields=["first_name"])
+            row = (
+                AuditLog.objects.filter(
+                    resource_type="users.User", resource_id=str(user_b.pk), action=Action.UPDATE
+                )
+                .order_by("-id")
+                .first()
+            )
+            assert row is not None
+            assert row.before["first_name"] == "RealTenantB"
+            assert row.before["first_name"] != "LeakedTenantA"
+
+
+# --------------------------------------------------------------------------- #
 # audit_log() helper (D3-D-3)
 # --------------------------------------------------------------------------- #
 

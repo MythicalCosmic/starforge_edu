@@ -23,6 +23,7 @@ import threading
 from typing import Any
 
 from django.apps import apps
+from django.core.signals import request_finished
 from django.db.models.signals import post_delete, post_save, pre_save
 from django.dispatch import receiver
 
@@ -35,6 +36,7 @@ from apps.auth.signals import (
     otp_requested,
     otp_verified,
 )
+from core.utils import current_schema
 
 logger = logging.getLogger("starforge.audit")
 
@@ -55,8 +57,11 @@ _PRE_UID = "audit.pre_save"
 _POST_UID = "audit.post_save"
 _DEL_UID = "audit.post_delete"
 
-# Per-thread before-snapshot store: maps "label:pk" -> field snapshot captured
-# at pre_save, consumed by the following post_save in the same thread/request.
+# Per-thread before-snapshot store: maps "schema:label:pk" -> field snapshot
+# captured at pre_save, consumed by the following post_save in the same
+# thread/request. The schema is part of the key so a stale entry left by a
+# failed save in tenant A can never be popped by tenant B's save of the same
+# label:pk on a reused (Celery/gunicorn) worker thread.
 _before_store = threading.local()
 
 
@@ -65,7 +70,8 @@ def _label_for(sender: Any) -> str:
 
 
 def _store_key(label: str, pk: Any) -> str:
-    return f"{label}:{pk}"
+    # Schema-scoped so a reused worker thread can't cross-pollinate tenants.
+    return f"{current_schema()}:{label}:{pk}"
 
 
 def _on_pre_save(sender: Any, instance: Any, **kwargs: Any) -> None:
@@ -83,6 +89,13 @@ def _on_pre_save(sender: Any, instance: Any, **kwargs: Any) -> None:
 
 def _on_post_save(sender: Any, instance: Any, created: bool, **kwargs: Any) -> None:
     label = _label_for(sender)
+    key = _store_key(label, instance.pk)
+    # ALWAYS pop our own pre_save entry, even on the created path: a create can
+    # follow a failed update of the same pk (pre_save fired, the UPDATE raised,
+    # post_save never ran) and the stale entry must not linger. try/finally is
+    # not enough on its own — pop unconditionally so the store self-cleans.
+    store = _before_store.__dict__.setdefault("data", {})
+    before = store.pop(key, None)
     after = serialize_instance(instance)
     if created:
         audit_log_on_commit(
@@ -94,8 +107,6 @@ def _on_post_save(sender: Any, instance: Any, created: bool, **kwargs: Any) -> N
             after=after,
         )
         return
-    store = _before_store.__dict__.setdefault("data", {})
-    before = store.pop(_store_key(label, instance.pk), None)
     audit_log_on_commit(
         actor=None,
         action=AuditLog.Action.UPDATE,
@@ -104,6 +115,18 @@ def _on_post_save(sender: Any, instance: Any, created: bool, **kwargs: Any) -> N
         before=before,
         after=diff_snapshots(before, after) if before else after,
     )
+
+
+@receiver(request_finished, dispatch_uid="audit.clear_before_store")
+def _clear_before_store(sender: Any, **kwargs: Any) -> None:
+    """Drop any before-snapshots left over by a failed save at request end.
+
+    A pre_save whose DB write raised before post_save fired leaves its entry in
+    the thread-local. Worker/gunicorn threads are long-lived, so clear the store
+    at the request boundary as defense-in-depth (the schema in the key already
+    prevents a cross-tenant pop; this prevents an intra-tenant stale diff too).
+    """
+    _before_store.__dict__.pop("data", None)
 
 
 def _on_post_delete(sender: Any, instance: Any, **kwargs: Any) -> None:

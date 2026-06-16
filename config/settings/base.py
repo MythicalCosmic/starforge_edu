@@ -161,13 +161,16 @@ MIDDLEWARE = [
     # resolution, so this sits before TenantMainMiddleware (D1-LA-8).
     "core.middleware.HealthCheckMiddleware",
     "django_tenants.middleware.main.TenantMainMiddleware",
+    # CORS must wrap the short-circuit responses below (402 paywall / 503 inactive)
+    # so a browser SPA on an allowed origin can read the real envelope instead of a
+    # generic CORS failure — hence it sits ABOVE SubscriptionGate/InactiveTenant.
+    "corsheaders.middleware.CorsMiddleware",
     # TD-8 paywall: a suspended tenant's API returns 402 (needs the resolved
     # tenant, so immediately after TenantMainMiddleware; allowlists admin/auth/
     # healthz/schema; public schema is a no-op).
     "apps.billing.middleware.SubscriptionGateMiddleware",
     # A resolved-but-inactive tenant returns 503 (Lane B, after tenant resolution).
     "core.middleware.InactiveTenantMiddleware",
-    "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.locale.LocaleMiddleware",

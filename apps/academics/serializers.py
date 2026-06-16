@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from typing import cast
+
 from rest_framework import serializers
 
 from apps.academics.models import Exam, ExamResult, Grade, Subject, Transcript
+from apps.cohorts.models import Cohort
 from apps.schedule.models import Term
 from apps.students.models import StudentProfile
 
@@ -30,6 +33,30 @@ class ExamSerializer(serializers.ModelSerializer):
             "published_at",
         )
         read_only_fields = ("is_published", "published_at")
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Mirror AssignmentSerializer / scoped_exams: a non-staff TEACHER may only
+        # create an exam in a cohort they teach (otherwise the cohort PK 400s here),
+        # closing the scoped-reads/unscoped-create asymmetry. Director/HoD and
+        # superuser keep the tenant-wide default. None context leaves it untouched.
+        from apps.academics.selectors import STAFF_ROLES, _cohorts_taught_by
+        from core.permissions import Role, get_user_roles
+
+        request = self.context.get("request")
+        if request is None or getattr(request, "user", None) is None:
+            return
+        user = request.user
+        if getattr(user, "is_superuser", False):
+            return
+        roles = get_user_roles(request)
+        if roles & STAFF_ROLES:
+            return
+        cohort_field = cast(serializers.PrimaryKeyRelatedField, self.fields["cohort"])
+        if Role.TEACHER in roles:
+            cohort_field.queryset = Cohort.objects.filter(id__in=_cohorts_taught_by(user))
+        else:
+            cohort_field.queryset = Cohort.objects.none()
 
 
 class ExamResultSerializer(serializers.ModelSerializer):

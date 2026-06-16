@@ -94,6 +94,7 @@ def create_student(
     academic_level: str = "",
     medical_notes: str = "",
     emergency_contacts: list | None = None,
+    skip_limit_check: bool = False,
 ) -> StudentProfile:
     user = resolve_or_create_user(
         phone=phone,
@@ -104,6 +105,17 @@ def create_student(
     )
     if StudentProfile.objects.filter(user=user).exists():
         raise ValidationException(_("This person already has a student profile."), code="duplicate_student")
+    # TD-8 paywall: creating directly at a seat-consuming status (enrolled/active)
+    # acquires a seat just like the ENROLLED transition, so it must honour the
+    # plan's max_students cap (raises 402 plan_limit_exceeded at the cap). The
+    # seed/import path passes skip_limit_check=True; the API path never does.
+    if not skip_limit_check and status in (
+        StudentProfile.Status.ENROLLED,
+        StudentProfile.Status.ACTIVE,
+    ):
+        from apps.billing.services import enforce_student_limit  # lazy: separate app
+
+        enforce_student_limit()
     student = StudentProfile.objects.create(
         user=user,
         branch=branch,

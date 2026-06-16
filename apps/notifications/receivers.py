@@ -134,11 +134,16 @@ def _connect_academics() -> None:
             return
         recipients = [_student_user_id(student_id), *_guardian_user_ids(student_id)]
         context = {"student_id": student_id, "new_score": str(new_score)}
+        # Dedupe per (result, new_score), NOT per result pk: a grade CORRECTION
+        # (50->60 then 60->70) is a distinct event the student/parent must hear
+        # about. Keying on the row pk alone permanently suppresses every change
+        # after the first. The score makes each distinct correction notify once
+        # while a double-fire of the same overwrite still collapses.
         _dispatch_many(
             user_ids=recipients,
             event_type=EventType.ACADEMICS_GRADES_PUBLISHED,
             context=context,
-            dedupe_prefix=f"academics.grades_published:{getattr(instance, 'pk', '')}",
+            dedupe_prefix=f"academics.grades_published:{getattr(instance, 'pk', '')}:{new_score}",
         )
 
 
@@ -182,11 +187,14 @@ def _connect_assignments() -> None:
         from apps.notifications.models import EventType
 
         recipients = [_student_user_id(student_id), *_guardian_user_ids(student_id)]
+        # Same correction issue as grade_changed: re-grading a submission
+        # (grade_submission uses update_or_create) is a distinct event. Include
+        # the score so each new grade notifies once and a double-fire collapses.
         _dispatch_many(
             user_ids=recipients,
             event_type=EventType.ASSIGNMENTS_GRADED,
             context={"submission_id": submission_id, "score": str(score)},
-            dedupe_prefix=f"assignments.graded:{submission_id}",
+            dedupe_prefix=f"assignments.graded:{submission_id}:{score}",
         )
 
 
@@ -258,16 +266,20 @@ def _connect_auth() -> None:
     def on_login_succeeded(
         sender, *, username=None, user_id=None, ip="", user_agent="", schema_name="", **kwargs
     ):
-        from apps.notifications.models import EventType
-
         if user_id is None:
             return
-        services.dispatch(
-            event_type=EventType.AUTH_NEW_DEVICE_LOGIN,
-            recipient_id=user_id,
-            context={"ip": ip, "user_agent": user_agent},
-            # No dedupe — each login is its own event.
-        )
+        # SUPPRESSED until the login signal carries device info. login_succeeded
+        # fires on EVERY successful login; AUTH_NEW_DEVICE_LOGIN defaults ON for
+        # in-app + push, so dispatching here cried "New device login" on every
+        # routine login — a false security alert. The real fix needs the auth
+        # flow to pass a device_id/fingerprint so we can dispatch ONLY when no
+        # prior non-revoked Device exists for that device (or dedupe per
+        # (user, device)). The receiver stays connected (wiring tested) but
+        # no-ops the dispatch until that signal payload lands.
+        # TODO(device-novelty): once login_succeeded carries device_id, resolve
+        # the device and dispatch EventType.AUTH_NEW_DEVICE_LOGIN only for a
+        # genuinely new device, deduped per (user, device).
+        return
 
 
 # ---------------------------------------------------------------------------

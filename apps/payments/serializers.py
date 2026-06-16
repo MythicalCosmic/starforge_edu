@@ -107,3 +107,11 @@ class AllocateSerializer(serializers.Serializer):
 class RefundSerializer(serializers.Serializer):
     amount = serializers.DecimalField(max_digits=18, decimal_places=2, required=False)
     reason = serializers.CharField(max_length=255, required=False, allow_blank=True, default="")
+
+
+class CashPaymentSerializer(serializers.Serializer):
+    """Cash intake at the drawer: an invoice id and an optional amount (defaults
+    to the invoice total). The payment is stamped with the cashier's open shift."""
+
+    invoice = serializers.IntegerField()
+    amount_uzs = serializers.DecimalField(max_digits=18, decimal_places=2, required=False, allow_null=True)

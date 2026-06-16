@@ -317,11 +317,14 @@ def reset_password(
     """Complete a password reset: verify the OTP, set the password, end all
     sessions. The user logs in fresh with the new password afterwards."""
     identifier = _normalize(identifier)
-    verify_otp(identifier=identifier, code=code, purpose=OTP.PURPOSE_RESET, ip=ip, user_agent=user_agent)
     user = _find_by_identifier(identifier)
+    # Validate the new password BEFORE consuming the OTP, so a weak-password
+    # attempt doesn't burn the (correct) code and force a cooldown-gated re-request.
+    if user is not None:
+        _validate_new_password(new_password, user)
+    verify_otp(identifier=identifier, code=code, purpose=OTP.PURPOSE_RESET, ip=ip, user_agent=user_agent)
     if user is None:  # unreachable in practice: no OTP is issued for unknowns
         raise ValidationException(_("Invalid code."))
-    _validate_new_password(new_password, user)
     set_user_password(user, new_password)
 
 
@@ -394,8 +397,34 @@ def rotate_refresh_token(raw_refresh: str) -> dict[str, str]:
     if user is None:
         raise AuthenticationException(_("Invalid or expired refresh token."), code="authentication_failed")
 
+    # Honour the token_version like the access path (core/authentication.py): a
+    # password change / role change / logout-all bumps tv, so a refresh carrying
+    # a stale tv must NOT mint a fresh pair — otherwise the session never ends.
+    if refresh.get("tv") != user.token_version:
+        raise AuthenticationException(
+            _("Your session is no longer valid. Please sign in again."), code="token_stale"
+        )
+
     refresh.blacklist()
     return issue_token_pair(user)
+
+
+def logout_one(raw_refresh: str) -> None:
+    """Blacklist a single refresh token (this device). Tenant-bound: a refresh
+    minted on another center is rejected (it must be blacklisted in ITS schema,
+    where its jti lives) rather than silently no-op'ing here (the stock
+    TokenBlacklistView skipped this check)."""
+    try:
+        refresh = RefreshToken(raw_refresh)  # type: ignore[arg-type]
+    except TokenError as exc:
+        raise AuthenticationException(
+            _("Invalid or expired refresh token."), code="authentication_failed"
+        ) from exc
+    if refresh.get("schema") != current_schema():
+        raise AuthenticationException(
+            _("This token was issued for a different center."), code="tenant_mismatch"
+        )
+    refresh.blacklist()
 
 
 def _detect_refresh_reuse(raw_refresh: str) -> None:

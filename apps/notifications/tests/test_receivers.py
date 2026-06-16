@@ -86,3 +86,100 @@ def test_cohort_member_moved_bridges_enrollment_changed(tenant_a):
         notif = Notification.objects.filter(user=student.user).first()
         assert notif is not None
         assert notif.event_type == EventType.STUDENTS_ENROLLMENT_CHANGED
+
+
+# ---------------------------------------------------------------------------
+# Grade CORRECTIONS must re-notify (dedupe must reflect the change, not the row)
+# ---------------------------------------------------------------------------
+def test_grade_correction_after_first_change_re_notifies(tenant_a):
+    """grade_changed for the SAME ExamResult with a NEW score is a distinct event
+    (a correction) and must produce a SECOND notification — keying dedupe on the
+    row pk alone permanently suppressed every correction after the first."""
+    from decimal import Decimal
+
+    from apps.academics.signals import grade_changed
+    from apps.academics.tests.factories import ExamResultFactory
+
+    with schema_context(tenant_a.schema_name):
+        result = ExamResultFactory(score=Decimal("60"))
+        student = result.student
+
+        grade_changed.send(
+            sender=type(result),
+            instance=result,
+            old_score=Decimal("50"),
+            new_score=Decimal("60"),
+            actor_id=None,
+            schema_name=tenant_a.schema_name,
+        )
+        grade_changed.send(
+            sender=type(result),
+            instance=result,
+            old_score=Decimal("60"),
+            new_score=Decimal("70"),
+            actor_id=None,
+            schema_name=tenant_a.schema_name,
+        )
+
+        notifs = Notification.objects.filter(
+            user=student.user, event_type=EventType.ACADEMICS_GRADES_PUBLISHED
+        )
+        # Two distinct corrections -> two notifications.
+        assert notifs.count() == 2
+
+
+def test_grade_same_score_double_fire_still_dedupes(tenant_a):
+    """Control: a double-fire of the SAME (result, score) still collapses to one."""
+    from decimal import Decimal
+
+    from apps.academics.signals import grade_changed
+    from apps.academics.tests.factories import ExamResultFactory
+
+    with schema_context(tenant_a.schema_name):
+        result = ExamResultFactory(score=Decimal("90"))
+        student = result.student
+        for _ in range(2):
+            grade_changed.send(
+                sender=type(result),
+                instance=result,
+                old_score=Decimal("80"),
+                new_score=Decimal("90"),
+                actor_id=None,
+                schema_name=tenant_a.schema_name,
+            )
+        assert (
+            Notification.objects.filter(
+                user=student.user, event_type=EventType.ACADEMICS_GRADES_PUBLISHED
+            ).count()
+            == 1
+        )
+
+
+# ---------------------------------------------------------------------------
+# auth.new_device_login must NOT fire on every login (false security alert)
+# ---------------------------------------------------------------------------
+def test_login_succeeded_does_not_dispatch_new_device_login(tenant_a):
+    """The receiver stays CONNECTED (wiring under test) but must NOT dispatch a
+    'New device login' on every routine login until the signal carries device
+    info — that cried wolf on each login."""
+    from apps.auth.signals import login_succeeded
+    from apps.users.tests.factories import UserFactory
+
+    with schema_context(tenant_a.schema_name):
+        user = UserFactory()
+        login_succeeded.send(
+            sender=None,
+            username=user.username,
+            user_id=user.pk,
+            ip="1.2.3.4",
+            user_agent="ua",
+            schema_name=tenant_a.schema_name,
+        )
+        assert not Notification.objects.filter(user=user, event_type=EventType.AUTH_NEW_DEVICE_LOGIN).exists()
+
+
+def test_login_succeeded_receiver_still_connected():
+    """Suppressing the dispatch must NOT disconnect the receiver (test wiring)."""
+    from apps.auth.signals import login_succeeded
+
+    assert any("notifications.login_succeeded" in uid for uid in _connected_uids(login_succeeded))

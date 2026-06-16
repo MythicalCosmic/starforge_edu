@@ -78,6 +78,19 @@ def dispatch_notification(self, notification_id: int, *, channels: list[str] | N
 
         # Quiet hours: SMS + push deferred to window end; in-app + email immediate.
         if quiet and channel in (Channel.SMS, Channel.PUSH):
+            # Idempotent deferral: a Celery redelivery of dispatch_notification
+            # (at-least-once) re-enters this branch because the top-of-loop guard
+            # EXCLUDES SKIPPED_QUIET_HOURS. Without this check a redelivery would
+            # record a SECOND skip marker AND schedule a SECOND deliver_single_
+            # channel -> two SMS/push for one event. If a skip marker already
+            # exists for (notification, channel), the deferral is already queued.
+            if NotificationDelivery.objects.filter(
+                notification=notification,
+                channel=channel,
+                status=NotificationDelivery.Status.SKIPPED_QUIET_HOURS,
+            ).exists():
+                results[channel] = "already_deferred"
+                continue
             eta = quiet_hours_eta(at=now, end=settings_obj.quiet_hours_end)
             _record(
                 notification,
@@ -138,6 +151,19 @@ def deliver_single_channel(self, notification_id: int, channel: str, deferred_to
     except Notification.DoesNotExist:
         return "missing"
 
+    # Idempotency guard: a redelivery of this deferred task (or two skip markers
+    # producing two scheduled tasks) must send only ONCE. If a non-skip delivery
+    # already exists for (notification, channel), the window-end send already ran
+    # — no-op. This complements the dispatch-side guard so the at-least-once
+    # quiet-hours path never double-sends a paid SMS / push.
+    already_delivered = (
+        NotificationDelivery.objects.filter(notification=notification, channel=channel)
+        .exclude(status=NotificationDelivery.Status.SKIPPED_QUIET_HOURS)
+        .exists()
+    )
+    if already_delivered:
+        return "already_delivered"
+
     NotificationDelivery.objects.filter(
         notification=notification,
         channel=channel,
@@ -178,15 +204,23 @@ def _deliver(notification, channel, context, render_template) -> str:
 # Per-channel delivery
 # ---------------------------------------------------------------------------
 def _deliver_in_app(notification, title, body) -> str:
-    """In-app = a delivery row + a WS group_send to user.{id} (TD-15 producer)."""
+    """In-app = a delivery row + a WS group_send to {schema}.user.{id} (TD-15)."""
     from apps.notifications.models import Channel, NotificationDelivery
+    from core.utils import current_schema
     from infrastructure.websocket.channel_layer import group_send
 
     _record(notification, Channel.IN_APP, NotificationDelivery.Status.SENT)
     # dispatch is the ONLY group_send producer (TD-15). Payload shape is the
     # Day-4 NotificationConsumer contract (published to WORKLOG).
+    #
+    # The group name MUST be schema-prefixed: user ids are per-tenant-schema
+    # autoincrements, so an unscoped "user.5" collides across tenants on the
+    # shared Redis channel layer (tenant A user 5 receives tenant B user 5's
+    # notifications). The Day-4 NotificationConsumer MUST join the SAME
+    # schema-prefixed group, deriving the schema from
+    # scope["tenant"].schema_name (see integration_needed).
     group_send(
-        f"user.{notification.user_id}",
+        f"{current_schema()}.user.{notification.user_id}",
         {
             "type": "notification.message",
             "id": notification.pk,

@@ -550,6 +550,93 @@ def test_upload_url_accepts_in_scope_folder(tenant_a, as_role, monkeypatch):
     assert "file_id" in resp.json()
 
 
+@pytest.mark.parametrize(
+    "bad_name",
+    [
+        "../../../evil.pdf",  # posix traversal
+        "..\\..\\evil.pdf",  # windows-separator traversal
+        "/etc/passwd",  # leading slash / absolute
+        "sub/dir/x.pdf",  # nested separator
+        ".pdf",  # leading-dot only
+        "a b.pdf",  # disallowed space
+        "x\x00.pdf",  # NUL byte
+    ],
+)
+def test_upload_url_rejects_unsafe_filename(tenant_a, as_role, monkeypatch, bad_name):
+    """A filename with path separators / '..' / NUL / leading dot is rejected at
+    the serializer (400) and never produces an S3 key — closing the
+    path-traversal-in-the-key hole on the upload-url path."""
+    from core.permissions import Role
+
+    _stub_s3(monkeypatch)
+    client, _ = as_role(Role.TEACHER)
+    with schema_context(tenant_a.schema_name):
+        visible_folder: Any = FolderFactory(library=ContentLibraryFactory(visibility="tenant"))
+        visible_id = visible_folder.id
+        before = LessonFile.objects.count()
+
+    resp = client.post(
+        "/api/v1/content/upload-url/",
+        {
+            "filename": bad_name,
+            "content_type": "application/pdf",
+            "size_bytes": 1000,
+            "folder": visible_id,
+        },
+        format="json",
+    )
+    assert resp.status_code == 400
+    assert "filename" in resp.json().get("error", {}).get("fields", resp.json())
+    with schema_context(tenant_a.schema_name):
+        assert LessonFile.objects.count() == before  # nothing created
+
+
+def test_upload_url_normal_filename_accepted_key_under_schema(tenant_a, as_role, monkeypatch):
+    """A normal filename is accepted and the issued key still starts with the
+    tenant schema prefix (positive path for the sanitizer)."""
+    from core.permissions import Role
+
+    _stub_s3(monkeypatch)
+    client, _ = as_role(Role.TEACHER)
+    with schema_context(tenant_a.schema_name):
+        visible_folder: Any = FolderFactory(library=ContentLibraryFactory(visibility="tenant"))
+        visible_id = visible_folder.id
+
+    resp = client.post(
+        "/api/v1/content/upload-url/",
+        {
+            "filename": "lecture-notes_v2.pdf",
+            "content_type": "application/pdf",
+            "size_bytes": 1000,
+            "folder": visible_id,
+        },
+        format="json",
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["key"].startswith(f"{tenant_a.schema_name}/tmp/")
+    assert body["key"].endswith("/lecture-notes_v2.pdf")
+
+
+def test_request_upload_service_sanitizes_traversal_basename(tenant_a, monkeypatch):
+    """Defense in depth: even a direct service call with a traversal filename
+    never yields a key with '..' or separators escaping the {uuid}/ isolation;
+    the key reduces to the basename under the schema prefix."""
+    _stub_s3(monkeypatch)
+    with schema_context(tenant_a.schema_name):
+        folder: Any = FolderFactory()
+        result = services.request_upload(
+            filename="../../../evil.pdf",
+            content_type="application/pdf",
+            size_bytes=1000,
+            folder=folder,
+        )
+        key = result["key"]
+        assert key.startswith(f"{tenant_a.schema_name}/tmp/")
+        assert ".." not in key
+        assert key.endswith("/evil.pdf")
+
+
 def test_files_cross_tenant_isolated(tenant_a, tenant_b, user_in, as_user):
     with schema_context(tenant_a.schema_name):
         LessonFileFactory(status=LessonFile.Status.CLEAN)

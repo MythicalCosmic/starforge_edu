@@ -96,6 +96,13 @@ def materialize_rule(rule: RecurrenceRule) -> list[Lesson]:
     regenerable_ids = [lf.id for lf in existing if lf not in kept]
     Lesson.objects.filter(id__in=regenerable_ids).delete()
 
+    # A deactivated rule purges its regenerable (future, non-detached,
+    # attendance-free) lessons and stops generating new ones — otherwise
+    # is_active would be a misleading no-op control. Past/detached/attended
+    # lessons are preserved exactly like the re-materialize path above.
+    if not rule.is_active:
+        return list(rule.lessons.order_by("starts_at"))
+
     to_create = []
     for starts_at, ends_at in _rule_occurrences(rule):
         if starts_at <= now or starts_at in kept_starts:
@@ -221,14 +228,35 @@ def move_occurrence(lesson: Lesson, *, starts_at, ends_at, actor=None) -> Lesson
     return lesson
 
 
+def _emit_rescheduled(*, lesson_id: int, old_start, actor_id, schema: str):
+    """Build an on_commit callback that emits lesson_rescheduled with kwargs
+    matching move_occurrence — a factory binds the per-lesson values cleanly
+    (avoids late-binding pitfalls of a loop lambda)."""
+
+    def _send():
+        lesson_rescheduled.send(
+            sender=Lesson,
+            lesson_id=lesson_id,
+            old_start=old_start.isoformat(),
+            actor_id=actor_id,
+            schema_name=schema,
+        )
+
+    return _send
+
+
 @transaction.atomic
 def bulk_reschedule(rule: RecurrenceRule, *, shift_minutes: int, actor=None) -> int:
     """Shift every FUTURE scheduled lesson of the rule by `shift_minutes`,
-    all-or-nothing: any induced conflict rolls the whole batch back."""
+    all-or-nothing: any induced conflict rolls the whole batch back. Each shifted
+    lesson emits lesson_rescheduled on commit (matching move_occurrence) so D3-C's
+    on_lesson_rescheduled notifies students/parents — a bulk shift is the highest-
+    impact reschedule and must not be silent."""
     delta = dt.timedelta(minutes=shift_minutes)
     now = timezone.now()
     lessons = list(rule.lessons.filter(status=Lesson.Status.SCHEDULED, starts_at__gt=now))
     moved_ids = [lf.id for lf in lessons]
+    old_starts = {lf.id: lf.starts_at for lf in lessons}
     for lesson in lessons:
         new_start = lesson.starts_at + delta
         new_end = lesson.ends_at + delta
@@ -246,6 +274,17 @@ def bulk_reschedule(rule: RecurrenceRule, *, shift_minutes: int, actor=None) -> 
         lesson.ends_at = new_end
     for lesson in lessons:
         lesson.save(update_fields=["starts_at", "ends_at", "updated_at"])
+    schema = current_schema()
+    actor_id = getattr(actor, "pk", None)
+    for lesson in lessons:
+        transaction.on_commit(
+            _emit_rescheduled(
+                lesson_id=lesson.pk,
+                old_start=old_starts[lesson.id],
+                actor_id=actor_id,
+                schema=schema,
+            )
+        )
     return len(lessons)
 
 
