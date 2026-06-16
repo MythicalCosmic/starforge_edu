@@ -6,3 +6,6 @@ class FinanceConfig(AppConfig):
     name = "apps.finance"
     label = "finance"
     verbose_name = "Finance"
+
+    def ready(self) -> None:
+        from . import receivers  # noqa: F401

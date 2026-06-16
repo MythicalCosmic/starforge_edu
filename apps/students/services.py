@@ -139,6 +139,12 @@ def transition_enrollment(
             _("Cannot move from %(from)s to %(to)s.") % {"from": from_status, "to": to_status},
             code="invalid_transition",
         )
+    # TD-8 paywall: ENROLLED is the seat-acquiring transition — enforce the plan's
+    # max_students before committing (raises 402 plan_limit_exceeded at the cap).
+    if to_status == StudentProfile.Status.ENROLLED:
+        from apps.billing.services import enforce_student_limit  # lazy: separate app
+
+        enforce_student_limit()
     student.status = to_status
     fields = ["status", "updated_at"]
     if to_status == StudentProfile.Status.ENROLLED and student.enrollment_date is None:

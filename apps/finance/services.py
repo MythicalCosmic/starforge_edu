@@ -1,1 +1,711 @@
-"""Finance write-side services. Wire orchestrations as needs emerge."""
+"""Finance write services (TASKS §15, TD-13/14/18).
+
+All writes flow through here: typed, keyword-only, `@transaction.atomic`, raising
+`StarforgeError` subclasses and emitting signals via `transaction.on_commit`.
+
+Highlights:
+- `issue_invoice` — per-center `INV-{YYYY}-{seq:06d}` numbering, FX snapshot frozen
+  at issue, sibling-discount materialization (when `CenterSettings
+  .sibling_discount_percent > 0` and the student shares a Guardian with another
+  enrolled student).
+- `auto_issue_on_enrollment` — idempotent receiver body; dedupe on
+  `(student, fee_schedule, period)`.
+- `allocate_payment` — oldest-due-first split, EXACT Decimal accounting,
+  over-allocation -> `ValidationException`.
+- cashier shift open/close + statement (weasyprint, off-request, S3).
+"""
+
+from __future__ import annotations
+
+from datetime import date
+from decimal import Decimal
+
+from django.db import transaction
+from django.db.models import Sum
+from django.utils import timezone
+from django.utils.translation import gettext_lazy as _
+
+from apps.finance.models import (
+    CashierShift,
+    Discount,
+    FeeSchedule,
+    Invoice,
+    InvoiceLine,
+    PaymentAllocation,
+    PaymentPlan,
+    PaymentPlanInstallment,
+    Refund,
+)
+from apps.finance.signals import invoice_issued
+from apps.org.selectors import get_center_settings
+from apps.students.models import StudentProfile
+from core.exceptions import ConflictException, NotFoundException, ValidationException
+from core.utils import current_schema
+
+_ZERO = Decimal("0")
+_CENT = Decimal("0.01")
+_HUNDRED = Decimal("100")
+
+# Statuses that still owe money (used for allocation + reminders + balance).
+OPEN_STATUSES = (Invoice.Status.ISSUED, Invoice.Status.PARTIALLY_PAID, Invoice.Status.OVERDUE)
+
+
+# ---------------------------------------------------------------------------
+# Invoice numbering + FX
+# ---------------------------------------------------------------------------
+
+
+def _next_invoice_number(*, year: int) -> str:
+    """`INV-{YYYY}-{seq:06d}`, unique per center (the tenant schema). Computed
+    under a row lock over the year's invoices so concurrent issues never collide.
+    """
+    prefix = f"INV-{year}-"
+    last = Invoice.objects.select_for_update().filter(number__startswith=prefix).order_by("-number").first()
+    seq = (int(last.number.rsplit("-", 1)[1]) + 1) if last else 1
+    return f"{prefix}{seq:06d}"
+
+
+def _fx_snapshot(settings) -> tuple[Decimal | None, str]:
+    """Return `(fx_rate_usd, fx_source)` frozen onto the invoice.
+
+    `CenterSettings.fx_source` selects the strategy:
+    - "manual" -> `CenterSettings.fx_rate_usd_manual` (a fixed admin-entered rate);
+    - "cbu" (default) -> the cached CBU rate written by the FX-refresh task; falls
+      back to the manual rate when no cached rate exists (mock-first, TD-2).
+    A null rate means USD totals are simply not computed (never a hard failure).
+    """
+    source = settings.fx_source or "cbu"
+    manual = getattr(settings, "fx_rate_usd_manual", None)
+    if source == "manual":
+        return manual, "manual"
+    # "cbu": use the cached rate if present, else the manual fallback.
+    cached = _cached_cbu_rate()
+    return (cached if cached is not None else manual), source
+
+
+def _cached_cbu_rate() -> Decimal | None:
+    """Per-tenant cached CBU UZS->USD rate (written by `refresh_fx_rates`). Mock
+    path returns None until the task populates it; manual fallback covers issue."""
+    from django.core.cache import cache
+
+    raw = cache.get(f"finance:fx_rate_usd:{current_schema()}")
+    return Decimal(str(raw)) if raw is not None else None
+
+
+def _usd_total(total_uzs: Decimal, rate: Decimal | None) -> Decimal | None:
+    if rate is None or rate == _ZERO:
+        return None
+    return (total_uzs / rate).quantize(_CENT)
+
+
+# ---------------------------------------------------------------------------
+# Discounts (sibling materialization)
+# ---------------------------------------------------------------------------
+
+
+def _has_enrolled_sibling(student: StudentProfile) -> bool:
+    """True when `student` shares an active `Guardian` with another ENROLLED/ACTIVE
+    student. Routed via parents.Guardian (the sanctioned parent<->student link)."""
+    parent_ids = list(student.guardians.values_list("parent_id", flat=True))
+    if not parent_ids:
+        return False
+    return (
+        StudentProfile.objects.filter(
+            guardians__parent_id__in=parent_ids,
+            status__in=(StudentProfile.Status.ENROLLED, StudentProfile.Status.ACTIVE),
+        )
+        .exclude(pk=student.pk)
+        .exists()
+    )
+
+
+def _active_discounts(student: StudentProfile, *, on: date) -> list[Discount]:
+    return list(
+        Discount.objects.filter(student=student, is_active=True).filter(
+            (
+                # valid_from null OR <= on
+                models_q_lte_or_null("valid_from", on)
+            )
+            & models_q_gte_or_null("valid_until", on)
+        )
+    )
+
+
+def models_q_lte_or_null(field: str, value):
+    from django.db.models import Q
+
+    return Q(**{f"{field}__isnull": True}) | Q(**{f"{field}__lte": value})
+
+
+def models_q_gte_or_null(field: str, value):
+    from django.db.models import Q
+
+    return Q(**{f"{field}__isnull": True}) | Q(**{f"{field}__gte": value})
+
+
+def _discount_amount(discount: Discount, base_uzs: Decimal) -> Decimal:
+    """The positive UZS value of a discount against `base_uzs` (capped at base)."""
+    if discount.percent is not None:
+        amount = (base_uzs * discount.percent / _HUNDRED).quantize(_CENT)
+    else:
+        amount = (discount.fixed_amount_uzs or _ZERO).quantize(_CENT)
+    return min(amount, base_uzs)
+
+
+# ---------------------------------------------------------------------------
+# issue_invoice
+# ---------------------------------------------------------------------------
+
+
+@transaction.atomic
+def issue_invoice(
+    *,
+    student_id: int,
+    fee_schedule_id: int | None = None,
+    lines: list[dict] | None = None,
+    period: str = "",
+    created_by=None,
+) -> Invoice:
+    """Issue an invoice for `student_id`.
+
+    Lines come from `fee_schedule_id` (one tuition line of `amount_uzs`) and/or an
+    explicit `lines=[{description, line_type, quantity, unit_price_uzs}]` list.
+    Standing discounts (including an auto-materialized sibling discount when
+    `CenterSettings.sibling_discount_percent > 0` and the student has an enrolled
+    sibling) are appended as negative discount lines. The invoice number,
+    `fx_rate_usd`, and `total_usd` are frozen at issue.
+    """
+    student = StudentProfile.objects.select_related("user").filter(pk=student_id).first()
+    if student is None:
+        raise NotFoundException(_("Student not found."), code="student_not_found")
+
+    settings = get_center_settings()
+    fee_schedule = None
+    if fee_schedule_id is not None:
+        fee_schedule = FeeSchedule.objects.filter(pk=fee_schedule_id).first()
+        if fee_schedule is None:
+            raise NotFoundException(_("Fee schedule not found."), code="fee_schedule_not_found")
+
+    line_specs: list[dict] = []
+    if fee_schedule is not None:
+        line_specs.append(
+            {
+                "description": fee_schedule.name,
+                "line_type": InvoiceLine.LineType.TUITION,
+                "quantity": Decimal("1"),
+                "unit_price_uzs": fee_schedule.amount_uzs,
+            }
+        )
+    for raw in lines or []:
+        qty = Decimal(str(raw.get("quantity", "1")))
+        line_specs.append(
+            {
+                "description": raw["description"],
+                "line_type": raw.get("line_type", InvoiceLine.LineType.OTHER),
+                "quantity": qty,
+                "unit_price_uzs": Decimal(str(raw["unit_price_uzs"])),
+            }
+        )
+    if not line_specs:
+        raise ValidationException(
+            _("An invoice needs at least a fee schedule or one explicit line."),
+            code="empty_invoice",
+        )
+
+    charge_lines = [
+        {**spec, "amount_uzs": (spec["quantity"] * spec["unit_price_uzs"]).quantize(_CENT)}
+        for spec in line_specs
+    ]
+    gross = sum((line["amount_uzs"] for line in charge_lines), _ZERO)
+
+    today = timezone.now().date()
+    discount_lines = _build_discount_lines(student=student, base_uzs=gross, on=today, settings=settings)
+    total_uzs = (gross + sum((line["amount_uzs"] for line in discount_lines), _ZERO)).quantize(_CENT)
+    if total_uzs < _ZERO:
+        total_uzs = _ZERO
+
+    rate, fx_source = _fx_snapshot(settings)
+    invoice = Invoice.objects.create(
+        number=_next_invoice_number(year=today.year),
+        student=student,
+        cohort=student.current_cohort,
+        fee_schedule=fee_schedule,
+        period=period,
+        status=Invoice.Status.ISSUED,
+        issue_date=today,
+        due_date=_due_date(today, fee_schedule, settings),
+        currency=settings.currency_primary or "UZS",
+        total_uzs=total_uzs,
+        fx_rate_usd=rate,
+        fx_source=fx_source,
+        total_usd=_usd_total(total_uzs, rate),
+        created_by=created_by,
+    )
+    InvoiceLine.objects.bulk_create(
+        InvoiceLine(invoice=invoice, **line) for line in (charge_lines + discount_lines)
+    )
+
+    schema = current_schema()
+    transaction.on_commit(
+        lambda: invoice_issued.send(
+            sender=Invoice,
+            invoice_id=invoice.pk,
+            student_id=student.pk,
+            schema_name=schema,
+        )
+    )
+    return invoice
+
+
+def _build_discount_lines(*, student, base_uzs: Decimal, on: date, settings) -> list[dict]:
+    """Negative discount lines to materialize: standing discounts + an auto
+    sibling discount when configured and the student has an enrolled sibling."""
+    lines: list[dict] = []
+    for discount in _active_discounts(student, on=on):
+        amount = _discount_amount(discount, base_uzs)
+        if amount <= _ZERO:
+            continue
+        lines.append(
+            {
+                "description": str(_("Discount: %(t)s")) % {"t": discount.get_discount_type_display()},
+                "line_type": InvoiceLine.LineType.DISCOUNT,
+                "quantity": Decimal("1"),
+                "unit_price_uzs": -amount,
+                "amount_uzs": -amount,
+            }
+        )
+
+    sibling_pct = getattr(settings, "sibling_discount_percent", None) or _ZERO
+    if sibling_pct > _ZERO and _has_enrolled_sibling(student):
+        amount = (base_uzs * Decimal(str(sibling_pct)) / _HUNDRED).quantize(_CENT)
+        if amount > _ZERO:
+            lines.append(
+                {
+                    "description": str(_("Sibling discount (%(p)s%%)")) % {"p": sibling_pct},
+                    "line_type": InvoiceLine.LineType.DISCOUNT,
+                    "quantity": Decimal("1"),
+                    "unit_price_uzs": -amount,
+                    "amount_uzs": -amount,
+                }
+            )
+    return lines
+
+
+def _due_date(issue_day: date, fee_schedule: FeeSchedule | None, settings) -> date:
+    """Due date for a freshly issued invoice: the fee schedule's
+    `due_day_of_month` this month (or next month if already past)."""
+    import calendar
+
+    day = fee_schedule.due_day_of_month if fee_schedule else 5
+    year, month = issue_day.year, issue_day.month
+    last_day = calendar.monthrange(year, month)[1]
+    due = date(year, month, min(day, last_day))
+    if due < issue_day:
+        if month == 12:
+            year, month = year + 1, 1
+        else:
+            month += 1
+        last_day = calendar.monthrange(year, month)[1]
+        due = date(year, month, min(day, last_day))
+    return due
+
+
+@transaction.atomic
+def void_invoice(*, invoice: Invoice, actor=None) -> Invoice:
+    if invoice.status == Invoice.Status.PAID:
+        raise ConflictException(_("A paid invoice cannot be voided."), code="invoice_paid")
+    if invoice.allocations.exists():
+        raise ConflictException(
+            _("An invoice with payments cannot be voided; refund first."), code="invoice_has_payments"
+        )
+    invoice.status = Invoice.Status.VOID
+    invoice.save(update_fields=["status", "updated_at"])
+    return invoice
+
+
+# ---------------------------------------------------------------------------
+# Auto-issue on enrollment (D3-A-3)
+# ---------------------------------------------------------------------------
+
+
+def _period_key(*, on: date | None = None) -> str:
+    on = on or timezone.now().date()
+    return on.strftime("%Y-%m")
+
+
+@transaction.atomic
+def auto_issue_on_enrollment(*, student_id: int, cohort_id: int | None = None) -> Invoice | None:
+    """Idempotent: issue one invoice for the student's matching active
+    `FeeSchedule` (cohort-specific if present, else the center-wide default).
+    Dedupes on `(student, fee_schedule, period)` — re-firing the enrollment signal
+    creates nothing new. Returns the invoice (existing or created), or None when
+    no active fee schedule matches."""
+    student = StudentProfile.objects.filter(pk=student_id).first()
+    if student is None:
+        return None
+
+    cohort_id = cohort_id or student.current_cohort_id
+    fee_schedule = (
+        FeeSchedule.objects.filter(is_active=True, cohort_id=cohort_id).order_by("id").first()
+        if cohort_id
+        else None
+    )
+    if fee_schedule is None:  # fall back to the center-wide default (cohort is null)
+        fee_schedule = FeeSchedule.objects.filter(is_active=True, cohort__isnull=True).order_by("id").first()
+    if fee_schedule is None:
+        return None
+
+    period = _period_key()
+    existing = Invoice.objects.filter(student=student, fee_schedule=fee_schedule, period=period).first()
+    if existing is not None:
+        return existing
+    return issue_invoice(student_id=student.pk, fee_schedule_id=fee_schedule.pk, period=period)
+
+
+# ---------------------------------------------------------------------------
+# allocate_payment (D3-A-4)
+# ---------------------------------------------------------------------------
+
+
+def _outstanding_for(invoice: Invoice) -> Decimal:
+    allocated = invoice.allocations.aggregate(s=Sum("amount_uzs"))["s"] or _ZERO
+    return (invoice.total_uzs - allocated).quantize(_CENT)
+
+
+def _refresh_invoice_status(invoice: Invoice) -> None:
+    """Flip issued -> partially_paid -> paid based on allocation total. Never
+    downgrades a void invoice."""
+    if invoice.status == Invoice.Status.VOID:
+        return
+    allocated = invoice.allocations.aggregate(s=Sum("amount_uzs"))["s"] or _ZERO
+    if allocated >= invoice.total_uzs and invoice.total_uzs > _ZERO:
+        new_status = Invoice.Status.PAID
+    elif allocated > _ZERO:
+        new_status = Invoice.Status.PARTIALLY_PAID
+    else:
+        new_status = Invoice.Status.ISSUED
+    if invoice.status != new_status:
+        invoice.status = new_status
+        invoice.save(update_fields=["status", "updated_at"])
+
+
+@transaction.atomic
+def allocate_payment(
+    *, payment_id: int, amount_uzs: Decimal, invoice_ids: list[int] | None = None
+) -> list[PaymentAllocation]:
+    """Split `amount_uzs` of payment `payment_id` across invoices, oldest-due
+    first, with EXACT Decimal accounting (sum of allocations == `amount_uzs`, no
+    rounding loss). Over-allocation (more than the targets owe) raises
+    `ValidationException`. Idempotent on `payment_id`: re-calling with an already
+    allocated payment returns the existing allocations unchanged.
+
+    Lane B calls this from the webhook completion path (import this function
+    lazily there)."""
+    amount = Decimal(amount_uzs).quantize(_CENT)
+    if amount <= _ZERO:
+        raise ValidationException(_("Allocation amount must be positive."), code="invalid_amount")
+
+    existing = list(PaymentAllocation.objects.filter(payment_id=payment_id))
+    if existing:  # already allocated — idempotent no-op
+        return existing
+
+    if invoice_ids:
+        invoices = list(
+            Invoice.objects.select_for_update()
+            .filter(pk__in=invoice_ids, status__in=OPEN_STATUSES)
+            .order_by("due_date", "id")
+        )
+        if len(invoices) != len(set(invoice_ids)):
+            raise ValidationException(
+                _("One or more invoices are not open for allocation."), code="invoice_not_open"
+            )
+    else:
+        invoices = list(
+            Invoice.objects.select_for_update().filter(status__in=OPEN_STATUSES).order_by("due_date", "id")
+        )
+
+    total_due = sum((_outstanding_for(inv) for inv in invoices), _ZERO)
+    if amount > total_due:
+        raise ValidationException(
+            _("Payment exceeds outstanding balance by %(x)s UZS.") % {"x": amount - total_due},
+            code="over_allocation",
+            fields={"amount_uzs": [str(amount)], "outstanding_uzs": [str(total_due)]},
+        )
+
+    remaining = amount
+    allocations: list[PaymentAllocation] = []
+    for invoice in invoices:
+        if remaining <= _ZERO:
+            break
+        owed = _outstanding_for(invoice)
+        if owed <= _ZERO:
+            continue
+        take = min(owed, remaining)
+        allocations.append(
+            PaymentAllocation.objects.create(invoice=invoice, payment_id=payment_id, amount_uzs=take)
+        )
+        remaining -= take
+        _refresh_invoice_status(invoice)
+
+    # Exactness backstop: the loop consumes exactly `amount` because amount <=
+    # total_due and each `take` is an exact Decimal min — `remaining` lands on 0.
+    if remaining != _ZERO:  # pragma: no cover - defensive
+        raise ValidationException(_("Allocation could not be balanced."), code="allocation_unbalanced")
+    return allocations
+
+
+# ---------------------------------------------------------------------------
+# Refunds (state machine) — Lane B drives this
+# ---------------------------------------------------------------------------
+
+_REFUND_TRANSITIONS: dict[str, set[str]] = {
+    Refund.State.REQUESTED: {Refund.State.APPROVED, Refund.State.FAILED},
+    Refund.State.APPROVED: {Refund.State.SENT_TO_PROVIDER, Refund.State.FAILED},
+    Refund.State.SENT_TO_PROVIDER: {Refund.State.COMPLETED, Refund.State.FAILED},
+    Refund.State.COMPLETED: set(),
+    Refund.State.FAILED: set(),
+}
+
+
+@transaction.atomic
+def request_refund(
+    *,
+    invoice: Invoice,
+    amount_uzs: Decimal,
+    reason: str = "",
+    payment_id: int | None = None,
+    requested_by=None,
+) -> Refund:
+    amount = Decimal(amount_uzs).quantize(_CENT)
+    if amount <= _ZERO:
+        raise ValidationException(_("Refund amount must be positive."), code="invalid_amount")
+    allocated = invoice.allocations.aggregate(s=Sum("amount_uzs"))["s"] or _ZERO
+    if amount > allocated:
+        raise ValidationException(
+            _("Refund exceeds the amount paid on this invoice."), code="refund_exceeds_paid"
+        )
+    return Refund.objects.create(
+        invoice=invoice,
+        amount_uzs=amount,
+        reason=reason,
+        payment_id=payment_id,
+        requested_by=requested_by,
+    )
+
+
+@transaction.atomic
+def transition_refund(*, refund_id: int, to_state: str, actor=None) -> Refund:
+    """Move a refund along its state machine; an illegal jump raises
+    `ValidationException`."""
+    refund = Refund.objects.select_for_update().filter(pk=refund_id).first()
+    if refund is None:
+        raise NotFoundException(_("Refund not found."), code="refund_not_found")
+    if to_state not in _REFUND_TRANSITIONS.get(refund.state, set()):
+        raise ValidationException(
+            _("Cannot move refund from %(f)s to %(t)s.") % {"f": refund.state, "t": to_state},
+            code="invalid_refund_transition",
+        )
+    refund.state = to_state
+    fields = ["state", "updated_at"]
+    if to_state == Refund.State.APPROVED and actor is not None:
+        refund.approved_by = actor
+        fields.append("approved_by")
+    refund.save(update_fields=fields)
+    return refund
+
+
+@transaction.atomic
+def register_refund_completion(refund_id: int, payment_id: int | None = None) -> Refund:
+    """Lane B entry point: mark a refund completed once the provider confirms the
+    reversal (e.g. Payme CancelTransaction state -2). Idempotent — a completed
+    refund is returned unchanged. Stamps `payment_id` if supplied. Walks the
+    state machine forward to `completed` regardless of the current intermediate
+    state (approved/sent_to_provider)."""
+    refund = Refund.objects.select_for_update().filter(pk=refund_id).first()
+    if refund is None:
+        raise NotFoundException(_("Refund not found."), code="refund_not_found")
+    if payment_id is not None and refund.payment_id is None:
+        refund.payment_id = payment_id
+    if refund.state == Refund.State.COMPLETED:
+        if payment_id is not None:
+            refund.save(update_fields=["payment_id", "updated_at"])
+        return refund
+    refund.state = Refund.State.COMPLETED
+    refund.save(update_fields=["state", "payment_id", "updated_at"])
+    return refund
+
+
+# ---------------------------------------------------------------------------
+# Payment plans (D3-A-1, validated sum)
+# ---------------------------------------------------------------------------
+
+
+@transaction.atomic
+def create_payment_plan(*, invoice: Invoice, installments: list[dict], created_by=None) -> PaymentPlan:
+    """Create an installment plan whose amounts must sum EXACTLY to
+    `invoice.total_uzs`. `installments=[{due_date, amount_uzs}]`."""
+    if hasattr(invoice, "payment_plan"):
+        raise ConflictException(_("This invoice already has a payment plan."), code="plan_exists")
+    if not installments:
+        raise ValidationException(_("A plan needs at least one installment."), code="empty_plan")
+    total = sum((Decimal(str(i["amount_uzs"])).quantize(_CENT) for i in installments), _ZERO)
+    if total != invoice.total_uzs:
+        raise ValidationException(
+            _("Installments must sum to the invoice total (%(t)s).") % {"t": invoice.total_uzs},
+            code="plan_sum_mismatch",
+            fields={"sum": [str(total)], "total_uzs": [str(invoice.total_uzs)]},
+        )
+    plan = PaymentPlan.objects.create(invoice=invoice, created_by=created_by)
+    PaymentPlanInstallment.objects.bulk_create(
+        PaymentPlanInstallment(
+            plan=plan,
+            due_date=i["due_date"],
+            amount_uzs=Decimal(str(i["amount_uzs"])).quantize(_CENT),
+        )
+        for i in installments
+    )
+    return plan
+
+
+# ---------------------------------------------------------------------------
+# Cashier shifts (D3-A-5)
+# ---------------------------------------------------------------------------
+
+
+@transaction.atomic
+def open_cashier_shift(
+    *, cashier, branch, opening_cash_uzs: Decimal = _ZERO, notes: str = ""
+) -> CashierShift:
+    """Open a shift. A cashier may only have ONE open shift at a time
+    (409-style `ConflictException`)."""
+    if CashierShift.objects.filter(cashier=cashier, status=CashierShift.Status.OPEN).exists():
+        raise ConflictException(_("This cashier already has an open shift."), code="shift_already_open")
+    return CashierShift.objects.create(
+        cashier=cashier,
+        branch=branch,
+        opening_cash_uzs=Decimal(opening_cash_uzs).quantize(_CENT),
+        notes=notes,
+    )
+
+
+@transaction.atomic
+def close_cashier_shift(*, shift: CashierShift, closing_cash_uzs: Decimal, notes: str = "") -> CashierShift:
+    """Close a shift, computing `discrepancy = closing_cash - (opening_cash +
+    cash payments in shift)`."""
+    if shift.status == CashierShift.Status.CLOSED:
+        raise ConflictException(_("Shift is already closed."), code="shift_closed")
+    closing = Decimal(closing_cash_uzs).quantize(_CENT)
+    cash_in = _shift_cash_total(shift)
+    shift.closing_cash_uzs = closing
+    shift.discrepancy_uzs = (closing - (shift.opening_cash_uzs + cash_in)).quantize(_CENT)
+    shift.status = CashierShift.Status.CLOSED
+    shift.closed_at = timezone.now()
+    if notes:
+        shift.notes = notes
+    shift.save(update_fields=["closing_cash_uzs", "discrepancy_uzs", "status", "closed_at", "notes"])
+    return shift
+
+
+def _shift_cash_total(shift: CashierShift) -> Decimal:
+    """Sum of CASH payments recorded against this shift. Tolerates Lane B not yet
+    merged (no Payment model / FK) — returns 0 in that case (D3-A-5 acceptance)."""
+    try:
+        from apps.payments.models import Payment
+    except Exception:  # Lane B not merged yet
+        return _ZERO
+    total = (
+        Payment.objects.filter(cashier_shift_id=shift.pk, provider="cash", status="completed").aggregate(
+            s=Sum("amount_uzs")
+        )["s"]
+        or _ZERO
+    )
+    return Decimal(total).quantize(_CENT)
+
+
+# ---------------------------------------------------------------------------
+# Late-payment reminders (D3-A-8 beat body)
+# ---------------------------------------------------------------------------
+
+
+def emit_payment_reminders(*, today: date | None = None) -> int:
+    """Scan invoices with `due_date < today` in status issued/partially_paid and
+    emit `payment_reminder` once per invoice per `payment_reminder_interval_days`
+    cycle. Dedupe via a cache key so re-running the same day sends nothing.
+    Returns the count of reminders emitted. Runs in the active tenant schema."""
+    from django.core.cache import cache
+
+    today = today or timezone.now().date()
+    settings = get_center_settings()
+    interval = getattr(settings, "payment_reminder_interval_days", None) or 3
+    schema = current_schema()
+
+    # Also flip past-due open invoices to `overdue` (status hygiene).
+    overdue = Invoice.objects.filter(
+        due_date__lt=today,
+        status__in=(Invoice.Status.ISSUED, Invoice.Status.PARTIALLY_PAID),
+    ).select_related("student")
+
+    emitted = 0
+    from apps.finance.signals import payment_reminder
+
+    for invoice in overdue.iterator():
+        if invoice.due_date is None:  # overdue filter excludes these; guard for typing/safety
+            continue
+        # Per-invoice dedupe bucket: floor(days_overdue / interval) so we emit at
+        # most once per interval window; cache TTL covers the window.
+        days_overdue = (today - invoice.due_date).days
+        bucket = days_overdue // interval
+        key = f"finance:reminder:{schema}:{invoice.pk}:{bucket}"
+        if cache.get(key) is not None:
+            continue
+        cache.set(key, 1, timeout=interval * 24 * 60 * 60)
+        student_id = invoice.student_id
+        payment_reminder.send(
+            sender=Invoice,
+            invoice_id=invoice.pk,
+            student_id=student_id,
+            schema_name=schema,
+        )
+        emitted += 1
+
+    # Mark them overdue (separate UPDATE, after the scan, so iteration is stable).
+    Invoice.objects.filter(
+        due_date__lt=today,
+        status=Invoice.Status.ISSUED,
+    ).update(status=Invoice.Status.OVERDUE)
+    return emitted
+
+
+# ---------------------------------------------------------------------------
+# Statement of account (D3-A-7: weasyprint -> S3 -> signed URL, off-request)
+# ---------------------------------------------------------------------------
+
+
+def render_statement_pdf(*, student, locale: str = "en") -> bytes:
+    """Render the statement HTML to PDF bytes. weasyprint is imported LAZILY so
+    the app loads where its GTK native libs are absent (Windows dev box)."""
+    from django.template.loader import render_to_string
+    from django.utils import translation
+    from weasyprint import HTML  # lazy: GTK native libs only needed here
+
+    from apps.finance.selectors import statement_context
+
+    context = statement_context(student=student)
+    template = f"documents/statement_{locale}.html"
+    with translation.override(locale):
+        html = render_to_string(template, context)
+    return HTML(string=html).write_pdf()
+
+
+def generate_statement(student_id: int, *, locale: str = "en") -> str:
+    """Idempotent-ish task body: render the statement and upload it to
+    `{schema}/documents/statement_{student_id}_{ts}.pdf`. Returns the S3 key.
+    Cache the key under the task id so the result endpoint can sign it."""
+    student = StudentProfile.objects.select_related("user").get(pk=student_id)
+    pdf = render_statement_pdf(student=student, locale=locale)
+    ts = timezone.now().strftime("%Y%m%d%H%M%S")
+    key = f"{current_schema()}/documents/statement_{student_id}_{ts}.pdf"
+    from infrastructure.storage.s3_client import upload_bytes
+
+    upload_bytes(key, pdf, content_type="application/pdf")
+    return key

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from dateutil.rrule import rrulestr  # type: ignore[import-untyped]
+from dateutil.rrule import rrulestr
 from django.apps import apps as django_apps
 from django.core import signing
 from django.db import transaction

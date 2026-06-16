@@ -428,6 +428,16 @@ def _detect_refresh_reuse(raw_refresh: str) -> None:
         return  # already invalidated by a tv bump — not theft
     _revoke_all_refresh_tokens(user_id)
     bump_token_version(user_id)
+    # TD-9: refresh-reuse is a security event (no dedicated signal) — audit it.
+    from apps.audit.services import audit_log
+
+    audit_log(
+        actor=user,
+        action="login_failed",
+        resource_type="users.User",
+        resource_id=str(user_id),
+        after={"event": "refresh_reuse_detected", "jti": jti},
+    )
     raise AuthenticationException(_("Refresh token reuse detected."), code="refresh_reused")
 
 
@@ -441,3 +451,7 @@ def logout_everywhere(user: User) -> None:
     access tokens die too (D1-LC-8)."""
     _revoke_all_refresh_tokens(user.pk)
     bump_token_version(user.pk)
+    # TD-9: logout has no signal — audit it directly.
+    from apps.audit.services import audit_log
+
+    audit_log(actor=user, action="logout", resource_type="users.User", resource_id=str(user.pk))

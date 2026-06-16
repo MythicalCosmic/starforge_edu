@@ -12,7 +12,10 @@ from tenant_schemas_celery.app import CeleryApp
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings.development")
 
-app = CeleryApp("starforge")
+# SchemaHeaderTask lets `.delay(..., _schema_name="acme")` work correctly: it
+# lifts the kwarg into task headers, where tenant-schemas-celery reads it to
+# activate the schema (otherwise it leaks into the task signature).
+app = CeleryApp("starforge", task_cls="core.celery_base:SchemaHeaderTask")
 app.config_from_object("django.conf:settings", namespace="CELERY")
 app.autodiscover_tasks(["celery_tasks"])
 

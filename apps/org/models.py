@@ -118,6 +118,12 @@ class CenterSettings(models.Model):
     currency_primary = models.CharField(max_length=3, default="UZS")
     currency_secondary = models.CharField(max_length=3, default="USD")
     fx_source = models.CharField(max_length=32, default="cbu")
+    # D3-A finance knobs (consumed by apps/finance/services.py):
+    fx_rate_usd_manual = models.DecimalField(  # used when fx_source == "manual"
+        max_digits=12, decimal_places=4, null=True, blank=True
+    )
+    sibling_discount_percent = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("0"))
+    payment_reminder_interval_days = models.PositiveSmallIntegerField(default=3)
     quiet_hours_start = models.TimeField(default=time(22, 0))
     quiet_hours_end = models.TimeField(default=time(7, 0))
     otp_channel_prefs = models.JSONField(default=_default_otp_channel_prefs)

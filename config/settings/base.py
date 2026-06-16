@@ -46,6 +46,33 @@ env = environ.Env(
     EMAIL_HOST_USER=(str, ""),
     EMAIL_HOST_PASSWORD=(str, ""),
     EMAIL_USE_TLS=(bool, False),
+    # --- Day 3: payment providers (TD-6), mock-first (TD-2). Per-tenant merchant
+    # credentials live encrypted in payments.ProviderConfig; these are toggles +
+    # redirect bases only. ---
+    CLICK_USE_MOCK=(bool, True),
+    CLICK_CHECKOUT_URL=(str, "https://my.click.uz/services/pay"),
+    PAYME_USE_MOCK=(bool, True),
+    PAYME_CHECKOUT_URL=(str, "https://checkout.paycom.uz"),
+    UZUM_USE_MOCK=(bool, True),
+    UZUM_CHECKOUT_URL=(str, "https://www.uzumbank.uz/open-service"),
+    # --- Soliq fiscalization (TD-7), mock-first [OWNER:O-5] ---
+    SOLIQ_USE_MOCK=(bool, True),
+    SOLIQ_API_URL=(str, ""),
+    SOLIQ_API_TOKEN=(str, ""),
+    SOLIQ_QR_BASE_URL=(str, "https://ofd.soliq.uz/check"),
+    # --- FCM push (TD-15), mock-first [OWNER:O-7] ---
+    FCM_USE_MOCK=(bool, True),
+    FCM_CREDENTIALS_FILE=(str, ""),
+    # --- Billing / paywall (TD-8) ---
+    BILLING_TRIAL_GRACE_DAYS=(int, 3),
+    BILLING_DUNNING_DAYS=(int, 7),
+    # Platform (owner) merchant credentials for subscription checkout, mock-first.
+    PLATFORM_PAYMENTS_USE_MOCK=(bool, True),
+    PLATFORM_CLICK_SERVICE_ID=(str, ""),
+    PLATFORM_CLICK_MERCHANT_ID=(str, ""),
+    PLATFORM_CLICK_SECRET_KEY=(str, ""),
+    PLATFORM_PAYME_MERCHANT_ID=(str, ""),
+    PLATFORM_PAYME_KEY=(str, ""),
 )
 
 env_file = BASE_DIR / ".env"
@@ -77,6 +104,9 @@ SHARED_APPS = [
     # These stay in TENANT_APPS too (a table per tenant schema as well).
     "apps.users.apps.UsersConfig",
     "apps.auth.apps.AuthAppConfig",
+    # TD-8: platform billing (Plan/Subscription/UsageSnapshot) is public-schema
+    # only — it monetizes tenants, so it must NOT appear in TENANT_APPS.
+    "apps.billing.apps.BillingConfig",
     "rest_framework_simplejwt.token_blacklist",
     "django_celery_beat",
     "channels",
@@ -131,6 +161,10 @@ MIDDLEWARE = [
     # resolution, so this sits before TenantMainMiddleware (D1-LA-8).
     "core.middleware.HealthCheckMiddleware",
     "django_tenants.middleware.main.TenantMainMiddleware",
+    # TD-8 paywall: a suspended tenant's API returns 402 (needs the resolved
+    # tenant, so immediately after TenantMainMiddleware; allowlists admin/auth/
+    # healthz/schema; public schema is a no-op).
+    "apps.billing.middleware.SubscriptionGateMiddleware",
     # A resolved-but-inactive tenant returns 503 (Lane B, after tenant resolution).
     "core.middleware.InactiveTenantMiddleware",
     "corsheaders.middleware.CorsMiddleware",
@@ -309,6 +343,18 @@ CELERY_BEAT_SCHEDULE = {
         "task": "celery_tasks.assignment_tasks.send_due_soon_reminders",
         "schedule": 60 * 60,  # hourly (D2-D-7)
     },
+    "late-payment-reminders": {
+        "task": "celery_tasks.finance_tasks.late_payment_reminders",
+        "schedule": 60 * 60 * 24,  # daily (D3-A-8)
+    },
+    "cleanup-old-audit-logs": {
+        "task": "celery_tasks.audit_tasks.cleanup_old_audit_logs",
+        "schedule": 60 * 60 * 24 * 7,  # weekly (D3-D-6)
+    },
+    "run-nightly-metering": {
+        "task": "celery_tasks.billing_tasks.run_nightly_metering",
+        "schedule": 60 * 60 * 24,  # nightly usage snapshot + state flips (D3-E-5)
+    },
 }
 
 # ---------------------------------------------------------------------------
@@ -449,3 +495,35 @@ OTP_MAX_ATTEMPTS = 5
 # cooldown per tenant — these are the platform fallbacks).
 OTP_COOLDOWN_SECONDS = 60
 OTP_IP_DISTINCT_IDENTIFIER_CAP = 5
+
+# ---------------------------------------------------------------------------
+# Day 3: payment providers, fiscalization, push, billing (all mock-first, TD-2)
+# ---------------------------------------------------------------------------
+# Per-tenant merchant credentials live encrypted in payments.ProviderConfig;
+# these settings are the mock toggles + provider redirect/checkout bases.
+CLICK_USE_MOCK = env("CLICK_USE_MOCK")
+CLICK_CHECKOUT_URL = env("CLICK_CHECKOUT_URL")
+PAYME_USE_MOCK = env("PAYME_USE_MOCK")
+PAYME_CHECKOUT_URL = env("PAYME_CHECKOUT_URL")
+UZUM_USE_MOCK = env("UZUM_USE_MOCK")
+UZUM_CHECKOUT_URL = env("UZUM_CHECKOUT_URL")
+
+# Soliq e-fiscalization (TD-7) [OWNER:O-5]
+SOLIQ_USE_MOCK = env("SOLIQ_USE_MOCK")
+SOLIQ_API_URL = env("SOLIQ_API_URL")
+SOLIQ_API_TOKEN = env("SOLIQ_API_TOKEN")
+SOLIQ_QR_BASE_URL = env("SOLIQ_QR_BASE_URL")
+
+# FCM push (TD-15) [OWNER:O-7]
+FCM_USE_MOCK = env("FCM_USE_MOCK")
+FCM_CREDENTIALS_FILE = env("FCM_CREDENTIALS_FILE")
+
+# Billing / paywall (TD-8)
+BILLING_TRIAL_GRACE_DAYS = env("BILLING_TRIAL_GRACE_DAYS")
+BILLING_DUNNING_DAYS = env("BILLING_DUNNING_DAYS")
+PLATFORM_PAYMENTS_USE_MOCK = env("PLATFORM_PAYMENTS_USE_MOCK")
+PLATFORM_CLICK_SERVICE_ID = env("PLATFORM_CLICK_SERVICE_ID")
+PLATFORM_CLICK_MERCHANT_ID = env("PLATFORM_CLICK_MERCHANT_ID")
+PLATFORM_CLICK_SECRET_KEY = env("PLATFORM_CLICK_SECRET_KEY")
+PLATFORM_PAYME_MERCHANT_ID = env("PLATFORM_PAYME_MERCHANT_ID")
+PLATFORM_PAYME_KEY = env("PLATFORM_PAYME_KEY")

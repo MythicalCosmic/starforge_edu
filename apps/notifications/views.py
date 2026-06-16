@@ -1,10 +1,158 @@
-from core.viewsets import TenantSafeModelViewSet
+from __future__ import annotations
 
-from .models import NotificationItem
-from .serializers import NotificationItemSerializer
+from drf_spectacular.utils import OpenApiExample, OpenApiResponse, extend_schema
+from rest_framework import status
+from rest_framework.decorators import action
+from rest_framework.response import Response
+
+from apps.notifications import selectors, services
+from apps.notifications.models import NotificationTemplate
+from apps.notifications.serializers import (
+    AnnouncementSerializer,
+    NotificationPreferenceSerializer,
+    NotificationSerializer,
+    NotificationTemplateSerializer,
+    PreferenceBulkUpsertSerializer,
+    UnreadCountSerializer,
+)
+from core.pagination import TimelinePagination
+from core.permissions import RolePermission
+from core.viewsets import TenantSafeAPIView, TenantSafeModelViewSet
 
 
-class NotificationItemViewSet(TenantSafeModelViewSet):
-    queryset = NotificationItem.objects.all()
-    serializer_class = NotificationItemSerializer
+class NotificationViewSet(TenantSafeModelViewSet):
+    """In-app feed + read receipts. A user sees ONLY their own rows (queryset
+    scoped to ``request.user`` — TD-5 read scoping in the selector)."""
+
+    serializer_class = NotificationSerializer
     resource = "notifications"
+    pagination_class = TimelinePagination
+    http_method_names = ["get", "post", "head", "options"]
+    filterset_fields = ("event_type", "read_at")
+    ordering_fields = ("created_at",)
+    # `read`, `read_all`, `unread_count` are own-row operations gated at :read.
+    required_perms = {
+        "list": "notifications:read",
+        "retrieve": "notifications:read",
+        "read": "notifications:read",
+        "read_all": "notifications:read",
+        "unread_count": "notifications:read",
+    }
+
+    def get_queryset(self):
+        # Schema introspection (drf-spectacular) hits this without an auth'd user.
+        if getattr(self, "swagger_fake_view", False):
+            return selectors.feed_for_user(user=self.request.user).none()
+        return selectors.feed_for_user(user=self.request.user)
+
+    @extend_schema(
+        summary="The current user's notification feed (own rows only)",
+        responses={200: NotificationSerializer(many=True)},
+        tags=["notifications"],
+    )
+    def list(self, request, *args, **kwargs):
+        return super().list(request, *args, **kwargs)
+
+    @extend_schema(
+        summary="Unread notification count for the current user",
+        responses={200: UnreadCountSerializer},
+        tags=["notifications"],
+    )
+    @action(detail=False, methods=["get"], url_path="unread-count")
+    def unread_count(self, request):
+        return Response({"count": selectors.unread_count(user=request.user)})
+
+    @extend_schema(
+        summary="Mark one notification read",
+        responses={200: OpenApiResponse(description="{read: bool}")},
+        tags=["notifications"],
+    )
+    @action(detail=True, methods=["post"])
+    def read(self, request, pk=None):
+        # get_object() runs against the own-rows queryset -> 404 on someone
+        # else's pk (read scoping for the detail mutation, not just the feed).
+        notification = self.get_object()
+        services.mark_read(user=request.user, notification_id=notification.pk)
+        # The row is now read (whether or not this call is the one that flipped it).
+        return Response({"read": True})
+
+    @extend_schema(
+        summary="Mark all of the current user's notifications read (one UPDATE)",
+        responses={200: OpenApiResponse(description="{updated: int}")},
+        tags=["notifications"],
+    )
+    @action(detail=False, methods=["post"], url_path="read-all")
+    def read_all(self, request):
+        return Response({"updated": services.mark_all_read(user=request.user)})
+
+
+class NotificationPreferencesView(TenantSafeAPIView):
+    """GET the current user's preference rows; PUT a bulk upsert."""
+
+    permission_classes = [RolePermission]
+    resource = "notifications"
+    required_perms = {"get": "notifications:read", "put": "notifications:read"}
+
+    @extend_schema(
+        summary="List the current user's notification preferences",
+        responses={200: NotificationPreferenceSerializer(many=True)},
+        tags=["notifications"],
+    )
+    def get(self, request):
+        prefs = selectors.preferences_for_user(user=request.user)
+        return Response(NotificationPreferenceSerializer(prefs, many=True).data)
+
+    @extend_schema(
+        summary="Bulk upsert the current user's notification preferences",
+        request=PreferenceBulkUpsertSerializer,
+        responses={200: NotificationPreferenceSerializer(many=True)},
+        tags=["notifications"],
+        examples=[
+            OpenApiExample(
+                "Disable SMS for payment completed",
+                value={
+                    "preferences": [
+                        {"event_type": "payments.payment_completed", "channel": "sms", "enabled": False}
+                    ]
+                },
+            )
+        ],
+    )
+    def put(self, request):
+        serializer = PreferenceBulkUpsertSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        prefs = services.upsert_preferences(user=request.user, rows=serializer.validated_data["preferences"])
+        return Response(NotificationPreferenceSerializer(prefs, many=True).data)
+
+
+class NotificationTemplateViewSet(TenantSafeModelViewSet):
+    """Template CRUD — director / IT only (notifications:write)."""
+
+    queryset = NotificationTemplate.objects.all()
+    serializer_class = NotificationTemplateSerializer
+    resource = "notifications"
+    filterset_fields = ("event_type", "channel", "locale", "is_active")
+    ordering_fields = ("event_type", "channel", "locale")
+
+
+class AnnouncementView(TenantSafeAPIView):
+    """POST a cohort announcement (fan-out via chunked rate-limited Celery)."""
+
+    permission_classes = [RolePermission]
+    resource = "notifications"
+    required_perms = {"post": "notifications:write"}
+
+    @extend_schema(
+        summary="Announce to every active member of a cohort",
+        request=AnnouncementSerializer,
+        responses={202: OpenApiResponse(description="{announcement_id, recipients, chunks}")},
+        tags=["notifications"],
+    )
+    def post(self, request):
+        serializer = AnnouncementSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        result = services.announce_cohort(
+            cohort_id=data["cohort"], title=data["title"], body=data["body"], actor=request.user
+        )
+        return Response(result, status=status.HTTP_202_ACCEPTED)

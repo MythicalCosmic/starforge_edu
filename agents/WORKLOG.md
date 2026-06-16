@@ -29,6 +29,92 @@ Every agent session **must** append an entry here before ending. Never edit or d
 <!-- entries begin below this line -->
 
 ---
+### [Day 3 · OWNER BUILD+INTEGRATION+REVIEW] Money, fiscal & messaging — 2026-06-16
+**Branch:** `day1-build`. Day 3 built from scratch (all 6 lanes A–F), integrated, reviewed,
+and fixed in one orchestrated session. **Final state: 674 passed / 3 skipped / 90% coverage
+on real Postgres; ruff + mypy (345 files) + makemigrations --check all clean.**
+
+**What shipped (TASKS §15/16/17/19 + parts of §22):**
+- **Finance** (apps/finance): FeeSchedule/Invoice/InvoiceLine/Discount/PaymentPlan/
+  PaymentAllocation/Refund/CashierShift; per-center invoice numbering + FX snapshot;
+  oldest-due-first exact-Decimal allocation; auto-issue-on-enrollment; sibling discounts;
+  cashier shifts; statement PDF (weasyprint→S3); late-payment-reminders beat task.
+- **Payments** (apps/payments + infrastructure/payments + infrastructure/fiscal): Click/Payme/
+  Uzum clients **mock-first** with a spec-compliant Payme JSON-RPC (tiyin, error bands
+  -31050..-31099/-31001/-31003/-32601/-32504, states 1/2/-1/-2, ms times, replay dedupe);
+  public-schema webhook intake (TD-6) resolving tenant by slug → schema_context → signature
+  verify; idempotency + replay protection; Soliq fiscalization (TD-7, mock); reconciliation +
+  receipt PDF; payment_completed/failed signals.
+- **Notifications** (apps/notifications + infrastructure/push): central dispatch() with a
+  16-event EventType enum, receivers bridging every Day-1/2/3 signal, SMS/email/push(FCM mock)/
+  in-app fan-out (TD-15 group_send), uz/ru/en templates, quiet hours, preferences, dedupe,
+  bulk announcements, bounce handling.
+- **Audit** (apps/audit): append-only AuditLog, signal-driven receivers for the TD-9 sensitive
+  models (credentials/PII masked), audit_log() helper, read-only cursor API + CSV export,
+  retention beat task.
+- **Billing/paywall** (apps/billing, SHARED_APPS): Plan/Subscription/UsageSnapshot,
+  SubscriptionGateMiddleware (402 on suspended tenants, allowlisted admin/auth/healthz/schema),
+  nightly metering + trial→active→past_due→suspended state machine, enforce_student_limit,
+  platform checkout (mock), dunning.
+- **Attack tests** (Lane F): Payme golden suite, webhook tampering/replay/wrong-tenant,
+  idempotency, allocation rounding, paywall, append-only, cross-tenant sweep.
+
+**Build process note (transient infra):** the build workflow hit Anthropic-side rate limits +
+a socket drop mid-run; resumed twice (completed lanes returned cached) to finish all six. Not a
+code issue.
+
+**Integration I did centrally** (lanes returned shared edits as `integration_needed`): wired
+billing into SHARED_APPS + the paywall middleware; added all provider/fiscal/push/billing env
+keys + settings; webhook + platform-billing public URLs; 3 finance CenterSettings knobs (+org/0007);
+the apps/ai `tokens_used_current_month` stub; the apps/students `enforce_student_limit` call; two
+apps/auth audit hooks; generated payments/0002 + org/0007 migrations centrally.
+
+**Bugs I found & fixed during review/integration (the load-bearing ones):**
+1. **LATENT PRODUCTION BUG (Day-2 AND Day-3): `_schema_name` task routing was wrong everywhere.**
+   Every fan-out task was called as `.delay(..., _schema_name=schema)`, passing it as a task
+   **kwarg** — but tenant-schemas-celery reads the schema from task **headers**, so the kwarg
+   leaked into the task signature (TypeError in eager tests; in production the tenant schema was
+   never activated). Fixed once for all tasks: `core/celery_base.py: SchemaHeaderTask` lifts the
+   kwarg into headers, wired via `CeleryApp(task_cls=...)`. This is why ~12 notification tests
+   plus the whole fan-out mechanism now work — and why Day-2's fan-out tasks would have silently
+   misbehaved in prod.
+2. **Notifications receivers never connected** — defined as nested functions and connected with
+   Django's default `weak=True`, so they were garbage-collected the moment each `_connect_*()`
+   returned. Fixed: `weak=False` on all 14. (Same class of bug the payments/finance *tests* hit
+   with weak lambdas — fixed there too.)
+3. **billing.enforce_student_limit crashed on `FakeTenant`** — `connection.tenant.pk` throws
+   inside `schema_context` (Celery/tests). Fixed to resolve the subscription by `schema_name`.
+4. **P0 (Lane F): webhook replays were never marked `DUPLICATE`** — `record_webhook_event`
+   returned the existing row without updating status, contradicting D3-B-6. Fixed.
+5. Quiet-hours SMS clobbered in eager mode (eta ignored) → deferred-delivery guard; notifications
+   feed `read` action not own-row-scoped (could 200 on another user's row) → `get_object()`;
+   audit write verbs returned 403 instead of 405 (perms ran before method check) → `initial()`
+   405 short-circuit; finance outstanding-balance 403'd parents (needs read_own) and cashier
+   shift perms; finance/payments/audit mypy correctness (DecimalField kwargs, Payme localized
+   messages, get_model typing).
+
+**Feedback for the Day-3 build agents (recurring themes — apply on Day 4):**
+- **Know your library's contract before you adopt its API everywhere.** The `_schema_name`
+  bug was copy-pasted across two days because nobody checked that tenant-schemas-celery uses
+  *headers*. One wrong assumption, repeated, became a latent prod bug a green test suite hid.
+- **Django signal receivers must use `weak=False` when defined in a local/nested scope** — both
+  the production receivers and several tests got GC-bitten. This bites silently (no error, just
+  "nothing happened").
+- **A green suite written by the same agent can still be measuring the wrong thing** — several
+  "failures" were test-measurement bugs (weak lambdas, missing `capture_on_commit`, missing
+  `public_tenant` fixture). When you assert a signal/side-effect fired, prove the *production*
+  path fired it, not a test artifact.
+- **Anything that reads `connection.tenant` must tolerate the `FakeTenant`** (no `pk`) that
+  `schema_context` installs — resolve tenants by `schema_name`.
+
+**Blocked (owner, all mock-first per TD-2):** real Click/Payme/Uzum creds [O-3/O-4/O-6], Soliq
+[O-5], FCM [O-7], billing plan pricing [O-12]. Live demo (Redis+worker+MinIO) not run here.
+**Skipped (3):** weasyprint + libmagic native-render tests (Windows; run on CI/Linux).
+**Handoff to Day 4:** AI (apps/ai) replaces the `tokens_used_current_month` stub; reports reuse
+the statement/receipt PDF pattern; realtime consumes the `notification.message` group payload
+(TD-15); control center consumes billing Plan/Subscription + UsageSnapshot.
+
+---
 ### [Day 2 · OWNER REVIEW] Independent review verdict + fixes — 2026-06-16
 **Branch / commits:** `day1-build` (Day-2 build committed `0be4aa1`; review fixes committed on top).
 
@@ -694,3 +780,178 @@ mathematically-correct realization of "first CLEAN, second REJECTED" is 0+0.6 th
 same assertions (`storage_used_bytes()` never exceeds quota). (2) Out-of-scope folder PK yields DRF's
 standard 400 `validation_error` (PrimaryKeyRelatedField does_not_exist); brief said "422/404 otherwise" as
 intent — test accepts 400/404/422 and asserts no LessonFile created.
+
+---
+### [Day 3 · Lane D] Audit trail (TD-9) — 2026-06-16
+**Branch / commits:** `day1-build` (Lane D worktree).
+**Shipped (apps/audit fully replaces the `AuditItem` placeholder):**
+- **`AuditLog` model** (`apps/audit/models.py`, migration `audit/0002`): actor (User SET_NULL,
+  related_name `+`) + `actor_repr` snapshot; `action` choices
+  create/update/delete/login/login_failed/logout/otp_request/otp_verify/impersonate/export (db_index);
+  `resource_type`/`resource_id`; `before`/`after` JSON null; `ip` (GenericIP); `user_agent` (512);
+  `created_at` (auto_now_add, db_index). **No `updated_at` — rows are immutable.** Composite index
+  `(resource_type, resource_id)` + `(actor,)` + the two db_index fields. Ordering `-created_at`.
+- **`audit_log()` helper** (`apps/audit/services.py`) — the single chokepoint:
+  `audit_log(*, actor=None, action, resource_type="", resource_id="", before=None, after=None,
+  request=None, ip=None, user_agent=None) -> AuditLog`. Extracts ip/ua from `request` (via
+  `core.utils.client_ip`/`user_agent`) when not passed; never raises on anonymous/None actor
+  (`actor_repr="anonymous"`/`""`, FK null). Masks `before`/`after` centrally. Also exports
+  `serialize_instance(instance, fields=None)` (JSON-safe field snapshot, FK→`<name>_id`),
+  `diff_snapshots(before, after)` (update rows store only changed keys), `mask_snapshot`,
+  `audit_log_on_commit(**kwargs)` (used by model receivers — insert scheduled via
+  `transaction.on_commit` so a rolled-back write is never recorded).
+- **Receivers** (`apps/audit/receivers.py`, wired in `AuditConfig.ready()` via
+  `connect_audit_receivers()`): `pre_save` (before-snapshot keyed `label:pk` in a thread-local),
+  `post_save` (create/update), `post_delete` on the **TD-9 model list** resolved with
+  `apps.get_model` + try/except `LookupError` (verified: all 7 resolve in the current tree). Stable
+  `dispatch_uid` per (model, signal) — no double-registration. **Auth-flow audit is signal-driven**:
+  receivers on `login_succeeded`/`login_failed`/`otp_requested`/`otp_verified`/`otp_failed` (the real
+  auth signals — there is NO `/auth/otp/*` endpoint anymore) write LOGIN / LOGIN_FAILED / OTP_REQUEST
+  / OTP_VERIFY rows. Logout + refresh-reuse have no signal → exact `audit_log()` snippets for
+  `apps/auth/services.py` are in **integration_needed** (orchestrator applies; I cannot edit auth).
+- **Read-only API** (`apps/audit/{views,serializers,urls,selectors}.py`): `AuditLogViewSet`
+  (List+Retrieve mixins, `http_method_names=["get","head","options"]` → PUT/PATCH/DELETE/POST **405**),
+  `TimelinePagination` (cursor on `-created_at`), `AuditLogFilter` (actor/action/resource_type/
+  resource_id/ts_from/ts_to), `audit:read` per-action, `select_related("actor")`. CSV **export**
+  `GET /api/v1/audit/export/` (same filters, streamed, `>50_000` rows → 400 `validation_error`, the
+  export itself audited as `action="export"`). Route ordered before the router so `export/` never
+  shadows `{id}/`.
+- **Retention beat** (`celery_tasks/audit_tasks.py`, registered in `celery_tasks/tasks.py`):
+  `cleanup_old_audit_logs` fans out per active Center → `cleanup_old_audit_logs_for_schema` deletes
+  >7y for `RETENTION_LONG_TYPES` {finance.Invoice, payments.Payment, finance.Refund, academics.Grade,
+  academics.ExamResult}, >1y otherwise; returns deleted count; idempotent by age.
+- **Read-only admin** (add/change/delete all denied) + **migration docstring** documenting the
+  append-only invariant and the prod `REVOKE UPDATE, DELETE ON audit_auditlog` runbook line ([OWNER:O-9]).
+**Tests** (`apps/audit/tests/test_audit.py`, 27): User create+update with before/after diff; delete row;
+RoleMembership audited; ProviderConfig credential masking; helper masking + ip/ua extraction +
+anonymous-safe + FK-id snapshot; login success/failure + OTP request/verify rows; 405 on
+PUT/PATCH/DELETE/POST; audit:read matrix (DIRECTOR/IT/SUPPORT/HEAD_OF_DEPT allow; TEACHER/STUDENT/CASHIER
+403; anon 401); cross-tenant `tenant_mismatch` + row isolation; filters; **cursor pagination stable
+under head inserts**; list query budget (≤8); CSV export streams+self-audits+over-cap 400+denied;
+retention 7y/1y cohorts (aged via `.update(created_at=...)`) + idempotent second run + fan-out count.
+**TASKS.md ticked:** §19 (all), §22 `cleanup_old_audit_logs`.
+**Deviations from plan:** (1) **Auth audit wired via signal receivers in MY app**, not `audit_log()`
+calls inside `apps/auth/services.py`, for login/otp (the published auth signals already carry
+actor/ip/ua) — cleaner and testable without touching an off-limits file. Logout + refresh-reuse have NO
+signal, so those two get explicit `audit_log()` snippets via integration_needed. (2) Migration index
+names + the `delete`→`O'chirish` choice label are the values `makemigrations` produces under the repo's
+`LANGUAGE_CODE="uz"` (verified zero drift for the audit app via the autodetector); only "Delete" has a
+shipped Uzbek translation. (3) Could not run the full suite/makemigrations centrally (shared DB + sibling
+lanes mid-build) — verified via `apps.populate()` import smoke + scoped autodetector drift check; ruff
+format+check clean on `apps/audit` + `celery_tasks/audit_tasks.py`.
+**Blocked:** prod DB-level REVOKE is `[OWNER:O-9]` (runbook line in the migration docstring; same role
+runs migrations+traffic+retention here, so the migration does not issue it).
+**Handoff notes / Publish (Lanes B/E + D4-E consume):**
+- **`audit_log()` signature** (above) — Lane B calls it for webhook anomalies; **Lane E** calls it for
+  `billing.Subscription` changes inside `schema_context(center.schema_name)` (the public-schema
+  Subscription cannot be a tenant post_save target — Lane D decision honored: helper exposed, E calls);
+  D4-E impersonation calls it with `action="impersonate"`.
+- **Audited model list (TD-9):** users.User, users.RoleMembership, finance.Invoice, payments.Payment,
+  academics.Grade, academics.ExamResult, payments.ProviderConfig — to be audited, your model must be on
+  this list (resolved lazily, so a new model can be added by appending to `AUDITED_MODELS`).
+- **Masking rules:** `MASKED_FIELDS = {national_id, medical_notes, password, click_secret_key,
+  payme_key, payme_test_key, uzum_api_key}` → stored as `"***"`. Add a field here if you introduce a
+  new credential/PII column on an audited model.
+- **Retention classes:** 7y for {finance.Invoice, payments.Payment, finance.Refund, academics.Grade,
+  academics.ExamResult}; 1y for everything else.
+
+---
+### [Day 3 · Lane D] Audit — verification pass + 1 bug fix — 2026-06-16
+**Branch / commits:** `day1-build` (Lane D worktree, follow-up review session).
+**Context:** Re-verified the full Lane D build against the DAY-3 §Lane-D contract end to end
+(model fields/constraints/indexes, helper signature, receiver model list + masking, read-only API,
+retention task, CSV export, append-only + cross-tenant tests). Everything matched the spec.
+**Bug fixed [in-lane]:** `AuditLogViewSet` (`apps/audit/views.py`) was a plain
+`ListModelMixin+RetrieveModelMixin+GenericViewSet` with **no `permission_classes`**. The project
+default is `DEFAULT_PERMISSION_CLASSES=[IsAuthenticated]` (NOT `RolePermission`), so the
+`resource = "audit"` declaration was never enforced — **any authenticated role could read the entire
+audit trail**, and the `test_list_denied_roles` (TEACHER/STUDENT/CASHIER → 403) assertion would have
+failed on a real run. Added `permission_classes = [RolePermission]` (matches every sibling Day-3
+viewset: notifications/finance APIViews all declare it explicitly). Also added an explicit
+`initial()` → `assert_tenant_context()` so the read-only viewset has the same public-schema guard as
+`AuditExportView` (it does not inherit `TenantSafeModelViewSet`). `RolePermission` and
+`assert_tenant_context` were already imported. ruff format+check clean; all audit modules byte-compile.
+**Deviations:** none new. **Blocked:** unchanged (`[OWNER:O-9]` DB-level REVOKE).
+**Handoff:** integration_needed unchanged from the prior entry — beat entry + the two
+`apps/auth/services.py` audit_log snippets (logout + refresh-reuse) still to be applied centrally.
+
+---
+### [Day 3 · Lane F] Attack & cross-tests (tests only) — 2026-06-16
+**Branch / commits:** `day1-build` (Lane F worktree).
+**Scope:** tests only — no app code edited. Audited the full D3-F-1..10 catalog (sibling
+lanes pre-wrote most files in their worktrees) against the REAL built interfaces, fixed one
+test bug, and found one P0 in Lane B's webhook replay code.
+**Files owned/verified (test fn counts; some parametrized):**
+- `apps/payments/tests/test_webhook_attacks.py` (9) — D3-F-1/2/3
+- `apps/payments/tests/test_idempotency_attack.py` (4) — D3-F-4
+- `apps/payments/tests/test_payme_spec.py` (20) + `fixtures/payme/*.json` (7) — D3-F-10
+- `apps/finance/tests/test_allocation_properties.py` (6, ×7 awkward Decimals) — D3-F-5
+- `apps/billing/tests/test_paywall_attack.py` (10) — D3-F-6
+- `apps/audit/tests/test_append_only_attack.py` (8) — D3-F-7
+- `apps/notifications/tests/test_preference_attack.py` (7) — D3-F-8
+- cross-tenant sweep (D3-F-9): finance(2) / payments(3) / audit(3) +
+  `apps/notifications/test_cross_tenant_sweep_day3.py`(2) (Lane C's `test_cross_tenant_day3.py`
+  is the basic one; the sweep uses a distinct filename to avoid clobbering an other-lane file).
+- shared harness: `apps/payments/tests/builders.py`, `_helpers.py`.
+**Test fix [in-lane]:** `test_checkout_endpoint_idempotency_header_one_payment` posted
+`{"invoice_id": ...}` but `CheckoutSerializer.invoice` is the field name → would have 400'd.
+Changed to `{"invoice": ...}`.
+**P0 FOUND (Lane B — apps/payments) — webhook replay never records `duplicate`:**
+`services.record_webhook_event` returns `(existing, False)` on a replayed `(provider,event_id)`
+but **never sets `existing.status = WebhookEvent.Status.DUPLICATE`** — contradicting its own
+docstring ("returns the existing row marked `duplicate`") and the D3-B-6 acceptance
+("replayed nonce → recorded as `duplicate`"). The Uzum view returns `{"status":"duplicate"}` in
+the response body but likewise leaves the row at its prior status; Click returns "Already
+processed". `test_click_complete_replay_duplicate_single_allocation` asserts the contracted
+`status=="duplicate"` and will RED-flag this until Lane B sets the status on replay (one-line:
+in `record_webhook_event`, when `existing` is found, `existing.status = DUPLICATE; existing.save(...)`
+before returning). The one-Payment / one-allocation halves of that test are correct and pass.
+**Contract ambiguities assumed (documented so the central run is predictable):**
+- D3-F-3 Payme "wrong-tenant slug": tests seed BOTH tenants' ProviderConfig with the same
+  `PAYME_KEY`, so HTTP Basic passes in B and the failure is the **account** error
+  (-31050..-31099) because A's invoice number doesn't exist in B — matching DAY-3.md's explicit
+  "(account error in -31050..-31099)" wording rather than a -32504 auth failure.
+- Click/Uzum webhook errors use the standard TD-18 envelope; Payme uses pure JSON-RPC (HTTP 200,
+  `error` member) — the documented Lane B exception. Tests assert accordingly.
+- Idempotency: eager Celery has no true concurrency, so D3-F-4 exercises the sequential-replay
+  contract (same key → same pk, count==1) + the raw unique-constraint IntegrityError as the
+  load-bearing backstop (per the DAY-3.md note).
+- Quiet-hours: eager `apply_async` ignores `eta`, so D3-F-8 monkeypatches
+  `deliver_single_channel.apply_async` to capture the eta == window-end (07:00 local) without
+  executing it — asserting the deferral contract, plus `provider_response.deferred_to` +
+  `skipped_quiet_hours` on the delivery row.
+- Append-only grep (D3-F-7) scans `apps/`+`core/` for `AuditLog.objects…update(/delete(` (zero
+  allowed) and permits `.delete(` only in `celery_tasks/audit_tasks.py` (retention, by
+  `created_at__lt` age). Verified zero offenders against the current tree.
+**Attack vectors covered (D3-F-1..10):** Click bad-sign→-1 + zero Payment rows; Payme wrong
+Basic→-32504 HTTP200 JSON-RPC error; Uzum bad HMAC→rejected WebhookEvent(status=rejected,
+signature_valid=False) + Uzum valid-HMAC control; Payme CreateTransaction replay→one Payment +
+identical response; Click complete replay→single allocation (+ duplicate-status P0 above);
+wrong-tenant slug→account-band error, no rows either schema; nonexistent + inactive slug→404
+envelope; idempotency-key reuse (service + endpoint + raw unique constraint)→one Payment;
+allocation rounding props over 7 awkward Decimals (1,000,000.01/3, 0.01, 100/3, max-18-digit
+boundary, sub-cent remainder): Σ==amount exactly, no over-credit, Decimal type + 2dp, status
+flip issued→partially_paid→paid, over-allocation→ValidationException, explicit-invoice targeting;
+paywall suspended→402 subscription_required, allowlist (login [AUTH PIVOT, not /auth/otp/*],
+password-reset-request, /healthz/live, /api/schema) reachable, active/trialing pass, missing-row
+passes (no fail-closed), other tenant unaffected, **suspended tenant's PUBLIC webhook still works**;
+audit PUT/PATCH/DELETE/POST→405 as director AND superuser + GET control + ORM grep; preference
+matrix (disabled SMS→in-app only, MockEskiz empty, skipped_pref recorded; default-on control) +
+quiet-hours eta + double-fire dedupe (one Notification, one SMS) + fan-out task-rerun idempotency
++ per-schema isolation; cross-tenant sweep over EVERY finance/payments/notifications/audit
+endpoint (tenant-A JWT on tenant-B host→401 tenant_mismatch) + rows-invisible-across-tenant +
+CSV-export isolation + provider-config credentials-never-echoed; Payme golden suite (auth,
+unknown-method -32601, amount-mismatch -31001, unknown-account band + `data`=field, unknown-txn
+-31003, state 1→2 / 1→-1 / 2→-2, ms times, account echo, tiyin math, idempotent create, second
+concurrent account -31099) driven by per-method fixtures.
+**Blocked / depends on shared wiring NOT yet applied (orchestrator must land before these RUN):**
+- **Lane B D3-B-5**: `config/urls_public.py` += `path("api/v1/webhooks/", include("apps.payments.webhook_urls"))`.
+  ALL webhook tests (test_webhook_attacks, test_payme_spec, the public-webhook half of the paywall
+  suite) post to the apex/`testserver` host → resolve via `urls_public.py`. Currently absent.
+- **Lane E D3-E-1/E-4**: `apps.billing` in SHARED_APPS + `SubscriptionGateMiddleware` at MIDDLEWARE
+  index 1. The entire `test_paywall_attack.py` depends on the middleware being active.
+- Tenant URLs for finance/payments/notifications/audit ARE already in `config/urls.py` (verified),
+  so the cross-tenant sweeps + tenant-side suites are unblocked.
+**Coverage:** Day-3 floor rises to 80% (TD-20) — the central run measures it; D3-F's duty to bump
+`--cov-fail-under` to 80 in `ci.yml` is a shared-file edit → flagged in integration_needed.
+**Handoff:** the one found vuln (duplicate-status P0) is a same-day `fix(payments)` for Lane B.

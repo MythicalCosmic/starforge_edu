@@ -14,7 +14,8 @@ FIELD_ENCRYPTION_KEY = base64.urlsafe_b64encode(b"starforge-dev-fieldenc-key-32b
 # Synchronous Celery in tests.
 CELERY_TASK_ALWAYS_EAGER = True
 CELERY_TASK_EAGER_PROPAGATES = True
-CELERY_TASK_CLS = "celery.app.task:Task"  # bypass tenant-schemas-celery in tests
+# Keep the real tenant-schemas-celery task base (config/celery.py wires
+# core.celery_base:SchemaHeaderTask); CeleryApp ignores CELERY_TASK_CLS anyway.
 
 # In-memory channel layer.
 CHANNEL_LAYERS = {"default": {"BACKEND": "channels.layers.InMemoryChannelLayer"}}
