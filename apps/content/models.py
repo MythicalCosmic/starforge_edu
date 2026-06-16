@@ -1,23 +1,169 @@
-"""Lesson content models — v1 scaffold.
+"""Content library models (TASKS §13, §23).
 
-Stub models live here only to prove the app loads + migrates. Replace with
-real domain models per feature ticket.
+A `ContentLibrary` (visibility-scoped) holds a Course → Module → ContentLesson
+hierarchy and/or `Folder`s; both anchor `LessonFile`s. Files move through the
+signed-URL upload state machine (pending → clean / rejected) — see
+`apps/content/services.py`.
 """
 
+from __future__ import annotations
+
 from django.db import models
+from django.db.models import Q
+from django.utils.translation import gettext_lazy as _
 
 
-class ContentItem(models.Model):
-    """Placeholder so the app has at least one migrated model."""
+class ContentLibrary(models.Model):
+    class Visibility(models.TextChoices):
+        TENANT = "tenant", _("Everyone in the center")
+        DEPARTMENT = "department", _("A department")
+        COHORT = "cohort", _("A cohort")
+        ROLE = "role", _("Specific roles")
 
     name = models.CharField(max_length=200)
-    notes = models.TextField(blank=True)
+    description = models.TextField(blank=True)
+    visibility = models.CharField(max_length=12, choices=Visibility.choices, default=Visibility.TENANT)
+    department = models.ForeignKey(
+        "org.Department", on_delete=models.SET_NULL, null=True, blank=True, related_name="libraries"
+    )
+    cohort = models.ForeignKey(
+        "cohorts.Cohort", on_delete=models.SET_NULL, null=True, blank=True, related_name="libraries"
+    )
+    allowed_roles = models.JSONField(default=list)  # role codes for visibility=role
     is_active = models.BooleanField(default=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        app_label = "content"
+        ordering = ("name",)
 
     def __str__(self) -> str:  # pragma: no cover
         return self.name
+
+
+class Course(models.Model):
+    library = models.ForeignKey(ContentLibrary, on_delete=models.CASCADE, related_name="courses")
+    subject = models.ForeignKey("academics.Subject", on_delete=models.PROTECT, related_name="courses")
+    title = models.CharField(max_length=200)
+    description = models.TextField(blank=True)
+    order = models.PositiveSmallIntegerField(default=0)
+
+    class Meta:
+        ordering = ("library", "order")
+
+    def __str__(self) -> str:  # pragma: no cover
+        return self.title
+
+
+class Module(models.Model):
+    course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name="modules")
+    title = models.CharField(max_length=200)
+    order = models.PositiveSmallIntegerField(default=0)
+
+    class Meta:
+        ordering = ("course", "order")
+        constraints = [
+            models.UniqueConstraint(fields=("course", "order"), name="module_unique_course_order"),
+        ]
+
+    def __str__(self) -> str:  # pragma: no cover
+        return self.title
+
+
+class ContentLesson(models.Model):
+    """Named to avoid clashing with `schedule.Lesson`."""
+
+    module = models.ForeignKey(Module, on_delete=models.CASCADE, related_name="lessons")
+    title = models.CharField(max_length=200)
+    description = models.TextField(blank=True)
+    order = models.PositiveSmallIntegerField(default=0)
+
+    class Meta:
+        ordering = ("module", "order")
+
+    def __str__(self) -> str:  # pragma: no cover
+        return self.title
+
+
+class Folder(models.Model):
+    library = models.ForeignKey(ContentLibrary, on_delete=models.CASCADE, related_name="folders")
+    parent = models.ForeignKey(
+        "self", on_delete=models.CASCADE, null=True, blank=True, related_name="children"
+    )
+    name = models.CharField(max_length=200)
+
+    class Meta:
+        ordering = ("library", "name")
+        constraints = [
+            models.UniqueConstraint(fields=("library", "parent", "name"), name="folder_unique_path"),
+        ]
+
+    def __str__(self) -> str:  # pragma: no cover
+        return self.name
+
+
+class LessonFile(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "pending", _("Pending")
+        CLEAN = "clean", _("Clean")
+        REJECTED = "rejected", _("Rejected")
+
+    lesson = models.ForeignKey(
+        ContentLesson, on_delete=models.CASCADE, null=True, blank=True, related_name="files"
+    )
+    folder = models.ForeignKey(Folder, on_delete=models.CASCADE, null=True, blank=True, related_name="files")
+    title = models.CharField(max_length=255)
+    s3_key = models.CharField(max_length=512, unique=True)
+    content_type = models.CharField(max_length=127)
+    size_bytes = models.BigIntegerField()
+    status = models.CharField(max_length=8, choices=Status.choices, default=Status.PENDING, db_index=True)
+    reject_reason = models.CharField(max_length=255, blank=True)
+    version = models.PositiveIntegerField(default=1)
+    previous_version = models.ForeignKey(
+        "self", on_delete=models.SET_NULL, null=True, blank=True, related_name="next_versions"
+    )
+    thumbnail_key = models.CharField(max_length=512, blank=True)
+    view_count = models.PositiveIntegerField(default=0)
+    download_count = models.PositiveIntegerField(default=0)
+    uploaded_by = models.ForeignKey(
+        "users.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(lesson__isnull=False) | Q(folder__isnull=False),
+                name="lessonfile_lesson_or_folder",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=("status",)),
+            models.Index(fields=("folder",)),
+            models.Index(fields=("lesson",)),
+        ]
+
+    def __str__(self) -> str:  # pragma: no cover
+        return f"{self.title} ({self.status})"
+
+
+class FileView(models.Model):
+    class Action(models.TextChoices):
+        VIEW = "view", _("View")
+        DOWNLOAD = "download", _("Download")
+
+    file = models.ForeignKey(LessonFile, on_delete=models.CASCADE, related_name="views")
+    user = models.ForeignKey("users.User", on_delete=models.CASCADE, related_name="+")
+    action = models.CharField(max_length=8, choices=Action.choices)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+        indexes = [models.Index(fields=("file", "created_at"))]
+
+    def __str__(self) -> str:  # pragma: no cover
+        return f"{self.file_id}:{self.action}"

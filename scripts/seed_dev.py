@@ -21,6 +21,64 @@ from apps.tenancy.models import Center  # noqa: E402
 from apps.tenancy.services import provision_center  # noqa: E402
 from apps.users.models import User  # noqa: E402
 
+# Dev storage bootstrap (D2-E-8): expire abandoned tmp uploads, allow browser PUT.
+_TMP_LIFECYCLE = {
+    "Rules": [
+        {
+            "ID": "expire-tmp-uploads",
+            "Filter": {"Prefix": "tmp/"},
+            "Status": "Enabled",
+            "Expiration": {"Days": 7},
+        }
+    ]
+}
+_DEV_CORS = {
+    "CORSRules": [
+        {
+            "AllowedMethods": ["PUT", "GET", "HEAD"],
+            "AllowedOrigins": ["*"],  # dev/MinIO only; prod CORS is [OWNER:O-9]
+            "AllowedHeaders": ["*"],
+            "MaxAgeSeconds": 3000,
+        }
+    ]
+}
+
+
+def bootstrap_dev_storage(client=None, *, bucket: str | None = None) -> bool:
+    """Create the dev bucket + tmp/ lifecycle + CORS if absent. Idempotent (a
+    re-run is a no-op); returns False (with a warning) if storage is unreachable
+    so `seed_dev` still succeeds without a running MinIO.
+
+    NOTE: upload keys are schema-first (`{schema}/tmp/...`), so the `tmp/` prefix
+    rule is a placeholder for the live cleanup; the validate task deletes the tmp
+    object on the happy path. A per-schema sweep is future work.
+    """
+    from typing import Any, cast
+
+    from django.conf import settings as dj_settings
+
+    opts = cast(dict[str, Any], dj_settings.STORAGES["default"]).get("OPTIONS", {})
+    bucket = bucket or opts.get("bucket_name")
+    if not bucket:
+        print("storage bootstrap skipped: no bucket configured (test/local FS storage)")
+        return False
+    if client is None:
+        from infrastructure.storage.s3_client import get_s3_client
+
+        client = get_s3_client()
+    try:
+        names = {b["Name"] for b in client.list_buckets().get("Buckets", [])}
+        if bucket not in names:
+            client.create_bucket(Bucket=bucket)
+            print(f"created bucket {bucket}")
+        client.put_bucket_lifecycle_configuration(Bucket=bucket, LifecycleConfiguration=_TMP_LIFECYCLE)
+        client.put_bucket_cors(Bucket=bucket, CORSConfiguration=_DEV_CORS)
+        print(f"storage bootstrap ok: bucket {bucket} (+ tmp lifecycle, CORS)")
+        return True
+    except Exception as exc:  # MinIO down / creds wrong — don't fail the whole seed
+        print(f"storage bootstrap skipped (storage unreachable): {exc}")
+        return False
+
 
 def _seed_demo_domain(actor: User) -> None:
     """Seed a small, idempotent people domain for manual testing (D1-LD-10)."""
@@ -101,6 +159,8 @@ def main() -> None:
         defaults={"name": "Platform", "slug": "platform"},
     )
     Domain.objects.get_or_create(domain="localhost", tenant=public_center, defaults={"is_primary": True})
+
+    bootstrap_dev_storage()
 
     # Platform staff live in the public schema (TD-3 / ADR-007) so the apex
     # /admin/ and the platform API work. Login is username+password.

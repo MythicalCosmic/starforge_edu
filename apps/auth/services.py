@@ -400,9 +400,17 @@ def rotate_refresh_token(raw_refresh: str) -> dict[str, str]:
 
 def _detect_refresh_reuse(raw_refresh: str) -> None:
     """If `raw_refresh` is a syntactically valid token whose jti is already
-    blacklisted, this is a replay — revoke all of that user's tokens. Only ever
-    acts on tokens minted for THIS schema (cross-tenant tokens must not revoke
-    a pk-colliding stranger's sessions)."""
+    blacklisted, this *may* be a replay-theft — revoke all of that user's tokens.
+    Only ever acts on tokens minted for THIS schema (cross-tenant tokens must not
+    revoke a pk-colliding stranger's sessions).
+
+    Crucially, theft is distinguished from legitimate invalidation by the `tv`
+    claim: rotation blacklists a token WITHOUT bumping `tv` (so a replayed
+    rotated token still carries the live `tv` = theft signal), whereas
+    logout-everywhere / password-change / role-change blacklist tokens AND bump
+    `tv`. A blacklisted token whose `tv` is already stale was killed by one of
+    those — re-nuking would also kill the fresh pair the user just received, so
+    we treat it as a plain expired token instead."""
     try:
         token = UntypedToken(raw_refresh)  # type: ignore[arg-type]  # signature + exp only
     except TokenError:
@@ -413,10 +421,14 @@ def _detect_refresh_reuse(raw_refresh: str) -> None:
     user_id = token.get("user_id")
     if not jti or not user_id:
         return
-    if BlacklistedToken.objects.filter(token__jti=jti).exists():
-        _revoke_all_refresh_tokens(user_id)
-        bump_token_version(user_id)
-        raise AuthenticationException(_("Refresh token reuse detected."), code="refresh_reused")
+    if not BlacklistedToken.objects.filter(token__jti=jti).exists():
+        return
+    user = User.objects.filter(pk=user_id).first()
+    if user is None or token.get("tv") != user.token_version:
+        return  # already invalidated by a tv bump — not theft
+    _revoke_all_refresh_tokens(user_id)
+    bump_token_version(user_id)
+    raise AuthenticationException(_("Refresh token reuse detected."), code="refresh_reused")
 
 
 def _revoke_all_refresh_tokens(user_id: int) -> None:

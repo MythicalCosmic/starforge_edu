@@ -29,6 +29,334 @@ Every agent session **must** append an entry here before ending. Never edit or d
 <!-- entries begin below this line -->
 
 ---
+### [Day 2 · Lane F] Cross-cutting tests + EOD gate — 2026-06-11
+**Shipped (verification lane — 338 passed, 2 skipped, 88.77% coverage on real Postgres):**
+- **Permission matrix extended** (`tests/test_permission_matrix.py`): +31 Day-2 cases (schedule/attendance/
+  academics/assignments/content × read-allow/read-deny/write-deny) → 52 cases total + the 3 fail-closed unit
+  tests. Deleting any Day-2 matrix row reddens it.
+- **Conflict property tests** (`apps/schedule/tests/test_conflict_properties.py`, 49): overlap table (disjoint,
+  touching-before/after, contained, spanning, identical, overlap-start/end) × room/teacher/cohort × BOTH the
+  service `check_conflicts` (409 grouping) AND the raw-ORM GiST exclusion (IntegrityError) + a cross-midnight
+  case. Touching edges (end == start) are NOT conflicts (half-open).
+- **Object-scope test** (`tests/test_object_scope.py`): non-director scoped to branch A → 403 on a branch-B
+  TimeSlot; director bypass → 200 (closes §26 object-scoping).
+- **Layering guard** (`tests/test_layering.py`): asserts ZERO `infrastructure.sms|email|ai` imports across
+  `apps/{schedule,attendance,academics,assignments,content}` — green (the domain stays emit-only).
+- **Shared in-memory S3 stub** (`tests/storage_stub.py` `InMemoryS3` + root-conftest `s3_stub` fixture) +
+  full-flow integration (`apps/content/tests/test_storage_flow.py`): pending→clean (copy+delete recorded) and
+  pending→rejected, plus a `@pytest.mark.minio` live round trip that auto-skips (set `STARFORGE_RUN_MINIO=1`
+  with compose to run). **D3-B / D4-B reuse `s3_stub`.**
+- **OpenAPI hardening**: registered `core.schema.TenantAwareJWTScheme` (OpenApiAuthenticationExtension) →
+  schema warnings **273 → 6, 0 errors**; added `queryset = Model.objects.none()` to the 6 content viewsets
+  (schema introspection vs user-scoped get_queryset) and excluded the undocumented `SubmissionViewSet`
+  list/create; renamed content `UploadUrlSerializer` → `ContentUploadUrlSerializer` (was colliding with the
+  assignments one — the only schema-correctness warning). Residual 6 warnings are cosmetic enum-name collisions
+  on `status` + two pre-existing Day-1 viewsets (DeviceViewSet, BranchViewSet) — out of Day-2 scope.
+**EOD gate — all green:**
+- `ruff check .` + `ruff format --check .` — clean (324 files).
+- `mypy apps core infrastructure config` — clean (292 files, cold cache). NOTE: `tests/test_auth_flows.py:301`
+  (Day-1) trips one factory-typing error only when `tests/` is added to the target; it is OUTSIDE the canonical
+  gate scope and not a Day-2 file.
+- `pytest -q` — **338 passed, 2 skipped** (weasyprint + libmagic real-render skip on Windows; CI/Linux runs them).
+- `pytest --cov=apps --cov=core --cov-fail-under=70` — **88.77%** (target ≥75 cleared; trending to TD-20's 80%).
+- Fresh-DB: `pytest --create-db` full run applies every Day-2 migration incl. **btree_gist** + provisions
+  tenant_a/tenant_b from scratch — green.
+- OpenAPI: `/api/schema/` generates with **0 errors** (6 cosmetic/Day-1 warnings, categorized above).
+- `makemigrations --check` — No changes detected.
+**TASKS.md ticked:** §26 (Day-2 matrix, object-scoping, isolation, query-count, conflict-property, layering,
+coverage, fresh-DB items) + the Day-2 Note.
+**Deviations from plan:** (1) cross-tenant isolation (D2-F-2) is covered by **per-lane** explicit tests
+(attendance/academics/assignments/content list cross-tenant + schedule iCal `tenant_mismatch` + Day-1
+`test_tenant_isolation`) rather than a router-introspection sweep — the router-derived endpoint-inventory helper
+was **not built** (a generic sweep 400s on endpoints needing setup; per-resource tests are more reliable). (2)
+the 10-step demo script is exercised by the automated suite, not run live here (needs Redis + a Celery worker +
+MinIO, none running on this box; `CELERY_TASK_ALWAYS_EAGER` covers task bodies in tests).
+**Blocked:** live demo against `demo.localhost` + the `@pytest.mark.minio` test need a running stack (owner).
+**Handoff notes:**
+- **time-machine adopted (TD-16 addition)** over freezegun (C-level patching, faster, fewer side effects) —
+  used for the correction-window (B), late-flag (D), and conflict-time tests. **D3+ lanes use time-machine,
+  not freezegun.** (Already in `pyproject.toml` dev deps.)
+- **`s3_stub` fixture** (root conftest) + `tests/storage_stub.InMemoryS3` is the shared storage harness — D3-B
+  payment-receipt + D4-B report tests reuse it.
+- New deps locked this lane's day: **weasyprint** (TD-14, Lane C), **time-machine** (TD-16). CI must `uv sync`
+  for weasyprint (GTK) + libmagic so the 2 skipped native-render tests run.
+
+---
+### [Day 2 · Lane E] Content + Storage — 2026-06-11
+**Shipped (all RUN on real Postgres — 18 Lane-E tests, 255/255 suite green, 1 skip):**
+- Models (`apps/content/models.py`, migration `content/0002` replaces `ContentItem`):
+  `ContentLibrary` (visibility tenant/department/cohort/role), `Course`/`Module`/`ContentLesson`
+  (named to avoid clashing with `schedule.Lesson`), `Folder`, `LessonFile`, `FileView`. **CheckConstraint
+  `lessonfile_lesson_or_folder`** (a file must attach to one or the other); unique `s3_key`, folder path,
+  module order.
+- Canonical signed-URL flow (`services.py`): `request_upload` (ext **and** declared content-type vs
+  `allowed_file_types`, size vs `max_upload_mb`, quota vs `storage_quota_gb` → 422 `file_type_not_allowed` /
+  `file_too_large` / `storage_quota_exceeded`; pending `LessonFile` + key **`{schema}/tmp/{uuid}/{filename}`** +
+  presigned PUT) → `confirm_upload` (409 `file_not_pending` if not pending; **no S3 call**, just enqueue) →
+  `validate_uploaded_file` (head_object size, ranged-GET first 8KB → `_sniff_mime` libmagic family check →
+  `rejected` on mismatch, else copy tmp→**`{schema}/content/{id}/{filename}`** + delete tmp + `clean`,
+  enqueue thumbnail) → `generate_thumbnail` (Pillow ≤320px JPEG → `.../thumb.jpg`). Both task bodies idempotent
+  (status / existing-thumb short-circuit).
+- Downloads: `download_url` (CLEAN only → 409 `file_not_clean`; **F()-increment** `download_count` + `FileView`,
+  TTL 300); `track_view` (F() `view_count` + `FileView`). Versioning: `create_new_version` (links
+  `previous_version`, `version+1`).
+- Selectors: `scoped_libraries`/`scoped_files` (director all; else tenant + department-membership + related-cohort
+  + role-allowlist via JSON `allowed_roles__contains` — drafts/other scopes 404, not 403); `storage_used_bytes()`
+  (sum of CLEAN sizes — D3-E billing meter).
+- Endpoints: libraries/courses/modules/lessons/folders CRUD (scoped); `POST /content/upload-url/`;
+  `/files/` list+retrieve + `/{id}/confirm|download-url|track-view|new-version/`.
+- `infrastructure/storage/s3_client.py` **+ `head_object`, `get_object_range`, `download_bytes`, `copy_object`,
+  `delete_object`** (additive). Celery `validate_uploaded_file` + `generate_thumbnail` in
+  `celery_tasks/content_tasks.py` (per-file, `_schema_name`, retry≤3 backoff), registered in aggregator.
+- `scripts/seed_dev.py` **`bootstrap_dev_storage()`** (idempotent create_bucket + tmp lifecycle + CORS;
+  best-effort — warns and continues if MinIO is down). Knobs: **added `storage_quota_gb` (null)** + serializer +
+  `org/0006`; **`allowed_file_types` default += `jpeg`,`webp`**; **reused `max_upload_mb`** as the size cap
+  (NOT a new `max_file_size_mb` — coordinated rename, see handoff). New factories: the 6 content models.
+**Tests:** allowlist/size/quota 422s, key-prefix==schema, confirm-non-pending 409, magic mismatch→rejected,
+valid→clean+moved, validate idempotent, thumbnail idempotent (Pillow real, JPEG magic), only-clean-downloadable,
+F() counters + FileView rows, **visibility matrix** (tenant/cohort visible; department/role/other-cohort hidden
+for a student), version chain, storage_used_bytes (clean-only), **seed bootstrap idempotent** (Mock client),
+upload-url perm, cross-tenant, files + libraries list query budgets (≤8). **1 SKIPPED elsewhere** = Lane C's
+weasyprint real-render. libmagic real sniff is CI/Linux only (Windows lacks the native lib) — unit tests
+monkeypatch `_sniff_mime`; the lazy `import magic` keeps the app loadable on Windows.
+**TASKS.md ticked:** §13 + §23 (all except antivirus / video transcode / AI summary — deferred).
+**Deviations from plan:** (1) **`max_file_size_mb` → reused existing `max_upload_mb`** (D1-B already had it;
+D2-D also uses it) — one knob, not two. (2) tmp-lifecycle prefix is `tmp/` per spec but our keys are
+**schema-first** (`{schema}/tmp/...`), so the dev lifecycle rule is a placeholder — abandoned-tmp cleanup
+relies on the validate task's delete on the happy path; a per-schema sweep is future work (flagged in
+`bootstrap_dev_storage` docstring). (3) reused Lane B's 422 `UnprocessableEntity` + Lane A's 409
+`ConflictException`. (4) `upload-url` is a root APIView (`/content/upload-url/`) per the spec path, not a
+`/files/` sub-action.
+**Blocked:** production S3 is `[OWNER:O-9]`; MinIO/mock path is complete per TD-2. CI must `uv sync` for the
+real libmagic sniff to run.
+**Handoff notes (D3-E / D4-E / D5-D consume):**
+- **Upload state machine** `pending → clean | rejected` + endpoints above are the **frontend contract (D5-D)**.
+- **`storage_used_bytes()`** (`apps.content.selectors`) — **D3-E** billing meters it; **D4-E** control center
+  displays it. Attachment/content keys are all **schema-first** (`{schema}/...`) for shared-bucket isolation.
+- New `s3_client` helpers: `head_object(key)→dict`, `get_object_range(key,start,end)→bytes`,
+  `download_bytes(key)→bytes`, `copy_object(src_key,dest_key)→key`, `delete_object(key)`, `upload_bytes` (Lane C).
+- Knobs: `allowed_file_types`, `max_upload_mb` (a.k.a. max_file_size_mb), `storage_quota_gb`.
+
+---
+### [Day 2 · Lane D] Assignments — 2026-06-11
+**Shipped (all RUN on real Postgres — 19 Lane-D tests, 237/237 suite green, 1 skip):**
+- Models `Assignment`/`Submission`/`SubmissionGrade` (`apps/assignments/models.py`, migration
+  `assignments/0002` replaces `AssignmentItem`): unique `(assignment, student, attempt_number)`;
+  check constraints (attempt>=1, score>=0); indexes `(cohort, due_at)`, `(assignment, student)`, status.
+- Services (`services.py`): `validate_and_presign_upload` (ext vs `allowed_file_types` → **422
+  `file_type_not_allowed`**; size vs `max_upload_mb` → **422 `file_too_large`**; key
+  **`{schema}/assignments/{uuid}/{filename}`**); `publish_assignment` (emits `assignment_published`);
+  `submit` (rejects draft/closed → 422, non-member → 422 `student_not_in_cohort`,
+  `attempt_number = last+1` past limit → **422 `resubmit_limit_exceeded`**, `is_late` vs `due_at + grace`);
+  `grade_submission` (score range, unknown rubric criterion → **422**, Σ rubric max_points > max_score →
+  **422**, emits `submission_graded`); `check_submission` → typed `PlagiarismResult(not_implemented, None)`;
+  `request_ai_feedback` (emits); `emit_due_soon_reminders` (24h window, `due_soon_sent_at` idempotency key).
+- Selectors: `scoped_assignments` (staff all; teacher own cohorts incl. drafts; student **published** own
+  cohorts — drafts/other cohorts 404, not a 403 leak); `scoped_submissions` (staff all; teacher own cohorts;
+  student own; `select_related("...grade")` — no N+1).
+- Endpoints: assignments CRUD + `/publish/`, `/upload-url/` (collection), `/{id}/submissions/` (GET teacher
+  list / POST student submit, method-gated), `/submissions/{id}/` retrieve + `/grade/` + `/request-ai-feedback/`
+  (202 queued).
+- Celery `send_due_soon_reminders` (fan-out per Center) in `celery_tasks/assignment_tasks.py`, registered in
+  aggregator + `CELERY_BEAT_SCHEDULE` (hourly). Knob **added: `assignment_max_resubmits` (2)** + serializer +
+  `org/0005`; `assignment_grace_minutes`/`allowed_file_types`/`max_upload_mb` already existed (D1-B).
+- New factories: `Assignment`, `Submission`.
+**Tests:** late-flag boundaries ×3 (time_machine `tick=False`; due+grace exact = on time), resubmit limit
+default+override, closed/non-member rejects, rubric unknown-criterion + sum-cap, grade score range, plagiarism
+stub typed, upload-url key-prefix + allowlist + oversize (presign monkeypatched — test settings have no S3
+OPTIONS), due-soon idempotent, **all four signals emitted**, draft-invisible (list + 404), cross-cohort submit
+404, student submit 201, assignment-create perm, cross-tenant, assignments + submissions list query budgets (≤8).
+All run.
+**TASKS.md ticked:** §12 (all except real AI feedback, deferred to D4-A).
+**Deviations from plan:** (1) the nested `submissions` action gates **method-specific** (GET→`assignments:write`
+teacher list, POST→`assignments:submit` student) behind a shared `assignments:read` floor, since one action name
+maps to one matrix code; submit additionally requires the user to have a `StudentProfile`. (2) reused Lane B's 422
+`UnprocessableEntity` for all submit/grade rejections (consistent envelope). (3) `SubmissionSerializer.grade` is a
+`SerializerMethodField` (not nested) so an ungraded submission serializes to null without `RelatedObjectDoesNotExist`.
+**Blocked:** none.
+**Handoff notes (D3-C / D4-A / D3-E consume):**
+- **Signals** (`apps.assignments.signals`, emit-only): `assignment_published(assignment_id, cohort_id, schema_name)`,
+  `assignment_due_soon(assignment_id, cohort_id, due_at, schema_name)`, `submission_graded(submission_id,
+  student_id, score, schema_name)` → **D3-C** notify; `ai_feedback_requested(submission_id, requested_by,
+  schema_name)` → **D4-A** AI, which writes **`SubmissionGrade.ai_feedback`** (field reserved, blank today).
+- **Attachment key convention `{schema_name}/assignments/{uuid}/{filename}`** via `presign_upload` — flag for
+  **D3-E** quota metering scope (all tenant blobs are schema-prefixed).
+- Matrix: **STUDENT now has `assignments:submit`**. Knobs: `assignment_grace_minutes`, `assignment_max_resubmits`,
+  `allowed_file_types`, `max_upload_mb`.
+
+---
+### [Day 2 · Lane C] Academics — 2026-06-11
+**Shipped (all RUN on real Postgres — 19 Lane-C tests + 1 skipped, 218/218 suite green, 1 skip):**
+- Models `Subject`/`Exam`/`ExamResult`/`Grade`/`Transcript` (`apps/academics/models.py`, migration
+  `academics/0002` replaces `AcademicItem`): unique `(exam, student)` result + `(student, subject, term)`
+  grade; check constraints (max_score>0, weight>0, score>=0); indexes per spec.
+- `apps/academics/grading.py` — pure `display_for(value_raw, scheme)`: letter A≥90/B≥80/C≥70/D≥60/F,
+  GPA = raw/25 (2dp), percentage = raw (1dp). Knob-driven, zero DB.
+- Services (`services.py`): `record_results` (upsert; score outside 0..max → **422 `score_out_of_range`**;
+  `grade_changed` emitted **once on overwrite**, never on first entry); `bulk_grade_import`
+  (`student_id,score,note` CSV; all-or-nothing — any bad row → **422 `csv_row_errors`** with row numbers,
+  zero written); `publish_exam`; `compute_term_grade` (weighted `100·Σ(score/max·weight)/Σweight` over
+  **published** results → `Grade` with `components` JSON + scheme `value_display`; `publish` flag);
+  `recompute_cohort_term`.
+- Transcripts (TD-14): `request_transcript` (pending + enqueue on commit) → Celery
+  `generate_transcript_pdf` (`celery_tasks/academics_tasks.py`, bind, max_retries=3, retry_backoff) →
+  `generate_transcript` body (idempotent: `done` short-circuits; pending→processing→done; uploads to
+  **`{schema}/transcripts/{id}.pdf`**). `render_transcript_pdf` **lazy-imports weasyprint** (GTK native
+  libs only needed there) and renders `templates/documents/transcript.html` (gettext, per-student
+  `preferred_language`). `presign_transcript` → signed `download_url` (TTL 600). `infrastructure/storage/
+  s3_client.py` gained `upload_bytes`.
+- Selectors: `scoped_grades` (staff all; teacher → cohorts they teach incl. drafts; parent/student →
+  **is_published=True** + self/children — publication gating); `scoped_transcripts`; `honor_roll` /
+  `academic_warnings` (knob-driven).
+- Endpoints: `subjects`/`exams` CRUD; `exams/{id}/results/` (GET+POST), `.../results/import-csv/` (multipart),
+  `.../publish/`; `grades/` (read, scoped+gated) + `grades/recompute/`; `transcripts/` (POST 202 pending,
+  GET status+download_url); `honor-roll/` + `warnings/` (staff-only).
+- Knobs: **added `honor_roll_min` (90) + `academic_warning_max` (60)** Decimals + serializer + `org/0004`;
+  `grading_scheme` already existed (D1-B). New dep **`weasyprint>=63`** (TD-14/16) in pyproject + uv.lock.
+- New factories: `Subject/Exam/ExamResult/Grade`.
+**Tests:** weighted-grade fixture (.2/.3/.5 → 92.000), unpublished-excluded, value_display ×3 schemes
+(knob-driven), letter-band pure, score-out-of-range 422, grade_changed once-on-overwrite, CSV atomic+row-errors,
+transcript lifecycle idempotent (S3 stubbed, `%PDF` magic), transcript POST 202 pending, publication gating
+(parent/student/teacher), teacher academics:read matrix, honor-roll knob flip + staff-only endpoint, exam-create
+perm, grades cross-tenant, grades+exams list query budgets (≤8). **1 SKIPPED:** `test_weasyprint_renders_real_pdf`
+(weasyprint GTK native libs absent on the Windows dev box — runs on CI/Linux; the lifecycle test covers the
+wiring via a stubbed renderer).
+**TASKS.md ticked:** §11 (all except AI exam-gen, deferred to D4-A).
+**Deviations from plan:** (1) **GET `/exams/{id}/results/` gated at `academics:write`** (not `:read`) — raw
+per-student scores are staff/teacher-facing; gating at read would leak a cohort's scores to the students/parents
+who also hold `academics:read`. Students/parents read grades via `/grades/` (scoped+gated). (2) **honor-roll /
+warnings are staff-only** (director/head/teacher) despite `academics:read` — same leak reasoning. (3) Added an
+optional `publish` flag to `compute_term_grade`/`recompute` (+recompute body) so the gating is exercised by real
+code paths; grades default unpublished. (4) `student_not_in_cohort`-style validations reuse the 422
+`UnprocessableEntity` introduced in Lane B. (5) weasyprint is **declared + locked but not synced locally** — the
+native render is CI-verified, Windows-skipped (honest: see SKIPPED above).
+**Blocked:** none. (CI must `uv sync` to install weasyprint + GTK for the skipped test to run.)
+**Handoff notes (D2-E / D3-D / D4-D consume):**
+- **`academics.Subject`** at `apps.academics.models` — D2-E FKs it (Lane E merges after C). `Exam`/`Grade`/
+  `Transcript` paths as above.
+- **Signal `academics.signals.grade_changed`** (emit-only): `send(sender=ExamResult, instance, old_score,
+  new_score, actor_id, schema_name)` — fires once per overwrite. **D3-D** audit consumes (TD-9: Grade + ExamResult).
+- **Transcript task** `celery_tasks.academics_tasks.generate_transcript_pdf` + **S3 key `{schema}/transcripts/
+  {id}.pdf`** — D4-D printing reuses the weasyprint→S3 pattern. `infrastructure.storage.s3_client.upload_bytes`
+  is the server-side upload helper.
+- **Knobs:** `grading_scheme`, `honor_roll_min` (90), `academic_warning_max` (60). Matrix: **TEACHER now has
+  `academics:read`** (Day-1 had only `academics:write`); STUDENT/PARENT `academics:read` was wired in Lane B.
+
+---
+### [Day 2 · Lane B] Attendance — 2026-06-11
+**Shipped (all RUN on real Postgres — 19 Lane-B tests, 199/199 suite green):**
+- Model `AttendanceRecord` (`apps/attendance/models.py`, migration `attendance/0002` replaces the
+  `AttendanceItem` placeholder): `student`/`lesson` PROTECT, `status` (present/absent/late/excused),
+  `arrived_at`, `note`, `marked_by` (User SET_NULL — null also = the auto sweep), `marked_at`,
+  `auto_marked`, `created_at`; **`UniqueConstraint(student, lesson)`** + indexes (lesson; student,created_at; status).
+- `mark_attendance(*, lesson, entries, actor)` (`services.py`): `update_or_create` upsert; actor must
+  teach the lesson (director/head_of_dept bypass) else **403 `not_lesson_teacher`**; each student must
+  hold an active `CohortMembership` else **422 `student_not_in_cohort`** (ids in `error.fields.students`);
+  a supplied `arrived_at` past `late_threshold_minutes` ⇒ `late` (== threshold stays `present`); edits past
+  `attendance_correction_window_hours` after `lesson.ends_at` ⇒ **403 `correction_window_expired`** unless director.
+- `auto_mark_absent()` beat body: for `scheduled` lessons with `starts_at <= now - auto_absent_after_minutes`,
+  `get_or_create` `absent` (`auto_marked=True`, `marked_by=None`) for active members lacking a record — idempotent
+  (created-flag), never overwrites an existing mark. Fan-out task `mark_absent_after_lesson` (per active Center)
+  in `celery_tasks/attendance_tasks.py`, registered in the aggregator + `CELERY_BEAT_SCHEDULE` (15 min).
+- Selectors (`selectors.py`): `scoped_records` (staff=director/head_of_dept → all; teacher → own lessons'
+  records; parent → guardian-linked children; student → own — `select_related("student__user","lesson")`);
+  `term_summary` (1 aggregate, scoped base → no leak); `cohort_dashboard` (1 aggregate query, ≤5 for the request).
+- Endpoints: `POST /attendance/lessons/{id}/mark/`, `GET /attendance/records/`(+`{id}`),
+  `GET /attendance/summary/?student=&term=`, `GET /attendance/cohorts/{id}/dashboard/?date_from=&date_to=`
+  (staff or teaching-teacher only — students/parents 403), `GET /attendance/export/?cohort=&term=`
+  (streaming `text/csv`: date,lesson,student,status,marked_by). `AttendanceFilter` (student/lesson/cohort/status/date range).
+- **Foundational (additive):** `core/exceptions.UnprocessableEntity` (422, code `unprocessable_entity`).
+- CenterSettings: **added `auto_absent_after_minutes` (default 30)** + serializer field + `org/0003`;
+  `late_threshold_minutes`/`attendance_correction_window_hours` already existed (D1-B) and are now consumed.
+- New factories: `CohortMembershipFactory`, `parents.ParentProfileFactory`/`GuardianFactory`, `attendance.AttendanceRecordFactory`.
+**Tests:** mark upsert (created/updated), teacher-of-other-cohort 403, student-not-in-cohort 422, late-threshold
+boundary (parametrized 10=present/11=late), knob-changes-behavior (DoD #2), correction-window (time_machine,
+teacher 403 / director ok), auto-absent idempotent double-run (0 dup records, 0 dup signals), auto-absent skips
+marked + future/cancelled, signal emitted manual+auto, summary math (hand-built 10), dashboard query budget (≤5,
+30 students), CSV shape, records scoping (student/parent/teacher), cross-tenant isolated + mark 404, records query budget (≤8). All run.
+**TASKS.md ticked:** §10 (all 10 items) · §22 `mark_absent_after_lesson`.
+**Deviations from plan:** (1) **Matrix correction (not silent):** STUDENT `attendance:read_self`→`attendance:read`
+and PARENT `attendance:read_own_children`→`attendance:read` — the gate checks `attendance:read`, so the
+`*_self`/`*_own_children` codes were dead; row-scoping now lives in `scoped_records` (the TD-5 mechanism the owner
+already applied to `students:read`). Academics codes changed the same way **pre-wiring Lane C** (selector + publication
+gate land in C). (2) `student_not_in_cohort` returns **422** (new `UnprocessableEntity`), distinct from 400 malformed
+input — DAY-2 Lane B acceptance asked for 422. (3) Correction-window test uses `time_machine.travel` with tokens minted
+INSIDE the travel window (else the 15-min access token reads as expired).
+**Blocked:** none.
+**Handoff notes (D3-C / Lane C / D4 consume):**
+- **`attendance.AttendanceRecord`** at `apps.attendance.models` is the FK/report target (D4-C `AttendanceConsumer`,
+  D4-B reports). Fields as above; one row per (student, lesson).
+- **Signal `attendance.signals.student_marked_absent`** (emit-only): `send(sender=AttendanceRecord, record_id, student_id,
+  lesson_id, auto: bool, schema_name)`. Fires once per record that *becomes* absent (manual mark or sweep). **D3-C** wires
+  guardian SMS/in-app off it — nothing in `apps/attendance` imports an sms/email/push adapter.
+- **Three knobs** (CenterSettings): `late_threshold_minutes` (10), `attendance_correction_window_hours` (24),
+  `auto_absent_after_minutes` (30). Changing a knob alters behavior with no code change (DoD #2).
+- `scoped_records(*, user, roles=None)` is the read-scoping helper; reuse the staff-set pattern in Lane C/D.
+
+---
+### [Day 2 · Lane A] Schedule (TD-12) — 2026-06-11
+**Shipped (all RUN on real Postgres — 15 tests, 180/180 suite green):**
+- Models `Term`, `TimeSlot`, `RecurrenceRule`, `Lesson` (`apps/schedule/models.py`). Migration
+  `schedule/0002` includes **`BtreeGistExtension()`** (first op) + three `ExclusionConstraint`s over
+  `tstzrange(starts_at, ends_at)` × equal room/teacher/cohort, conditioned on `status='scheduled'`.
+  btree_gist is trusted in PG13+, so the non-superuser tenant role installs it on its own db.
+- `materialize_rule` (dateutil `rrulestr`, holiday-skip via `org.BranchHoliday`, idempotent — replaces
+  only future/non-detached/attendance-free lessons; detached survive); `check_conflicts` (half-open
+  range overlap → touching edges allowed); `create_rule`/`update_rule` (validate rrule, clamp to term,
+  materialize, **409 `schedule_conflict`** with conflicting ids in `error.fields`); `cancel_occurrence`,
+  `move_occurrence` (detaches), `bulk_reschedule` (all-or-nothing rollback).
+- Endpoints: `terms`/`timeslots`/`rules`/`lessons` CRUD + `lessons/{id}/cancel|move`,
+  `rules/{id}/bulk-reschedule`, `ical-url/` (signed token) + `ical/<token>/` (AllowAny, tenant-bound,
+  `text/calendar` via `icalendar`). `LessonFilter` (cohort/teacher/room/status/term + date_from/to).
+- Celery `send_lesson_reminders` + `archive_completed_terms` (fan-out per active Center; bodies in
+  services: `emit_due_reminders` [reminder_sent_at = idempotency key], `archive_ended_term_lessons`).
+  Registered in `celery_tasks/tasks.py` aggregator + `CELERY_BEAT_SCHEDULE` (reminders 5 min, archival weekly).
+- Matrix: `REGISTRAR += schedule:*` (TEACHER/STUDENT/PARENT keep `schedule:read`).
+- **Foundational (additive):** `core/exceptions.StarforgeError` now accepts `fields=` and the handler
+  emits `error.fields` for any StarforgeError (so 409 conflicts carry conflicting lesson ids).
+- New deps: `icalendar` (TD-16). New factories: `TeacherProfileFactory`, `schedule.TermFactory`.
+**Tests:** materialize count+holiday-skip, idempotent, detached-survives, **raw-ORM exclusion
+IntegrityError**, conflict 409 (room/teacher/cohort, parametrized) + adjacent-allowed, bulk-reschedule
+rollback, iCal valid + cross-tenant `tenant_mismatch`, invalid-rrule, reminder idempotent+schema-scoped,
+archive, perm-denied, lessons-list query budget (≤8). All run.
+**Publish to WORKLOG (B/C consume):** `schedule.Lesson` (FK target for `attendance.AttendanceRecord`) and
+`schedule.Term` (FK target for `academics.Exam/Grade/Transcript`) at `apps.schedule.models`; field names
+as in the model. `check_conflicts(*, starts_at, ends_at, cohort_id, teacher_id, room_id=None,
+exclude_lesson_ids=())` → `{dimension: [ids]}`. Signals `lesson_reminder_due/lesson_cancelled/
+lesson_rescheduled` (emit-only). `CELERY_BEAT_SCHEDULE` dict exists in base.py (append your entries).
+btree_gist migration is in `schedule/0002` (later lanes' fresh-DB runs get it for free).
+
+---
+### [Day 2 · prep] Postgres up + RED MASTER fixed (165 green) — 2026-06-11
+**Context:** Starting Day 2. Got Postgres working (the 5432 server uses the default
+`postgres`/`root` superuser — created role `starforge`/`starforge` + db `starforge`; the
+project's default DATABASE_URL now works). **First time the suite has actually RUN.**
+`migrate_schemas --shared` succeeds on real Postgres 18.4 — the TD-3 / `db_constraint=False`
+SHARED-schema design is validated.
+
+**Master was RED when run (7 non-passing of 165 — committed but never executed without a DB).
+Fixed all, now 165/165 green, stable across 5 runs:**
+1. **Schema test-isolation (5 failures):** a `client_for(tenant)` request leaves
+   `connection.schema_name` on that tenant — django-tenants doesn't reset at request end — which
+   poisoned the next test's public-schema work (provisioning's "must be public" guard, platform
+   API, archive). Added an autouse `_reset_schema_to_public` fixture in `conftest.py`.
+2. **Refresh-reuse false-positive (real security/UX bug):** `change_password` blacklists the old
+   refresh + bumps `tv` and mints a fresh pair; presenting the old (now-blacklisted) refresh to
+   `/refresh/` tripped theft-detection, which revoked everything + bumped `tv` again, killing the
+   just-issued pair (401). Fix: `_detect_refresh_reuse` now only treats a blacklisted token as
+   theft when its `tv` is still current — rotation doesn't bump `tv` (real theft), but
+   logout/password-change/role-change do (legitimate invalidation, leave the fresh pair alone).
+3. **Non-string identifier (`test_throttle_survives_non_string_identifier`):** CharField silently
+   coerced a JSON int to a string → 202 instead of 400. Added `_StrictIdentifierMixin` to the two
+   reset serializers (reject non-string identifier with 400). Throttles already survived non-strings.
+4. (Observed + resolved by #2) a `test_provisioning` flake caused by the old reuse path polluting
+   the session-shared token-blacklist state.
+
+**Gates:** ruff, ruff format, mypy (272 files), `manage.py check`, full `pytest` (165) — all green.
+**Handoff:** Day-2 tests can and WILL be run (the Day-1 lesson). Baseline commit unchanged
+(`03e81ea`); these fixes are uncommitted on top for owner review.
+
+---
 ### [Day 1 · all lanes] Single-session full Day-1 build — 2026-06-11
 **Branch / commits:** `day1-build` (one integration branch, not 6 lane branches)
 **Build model deviation:** Day 1 was executed as ONE linear session in merge order

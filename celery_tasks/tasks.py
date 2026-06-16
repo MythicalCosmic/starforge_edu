@@ -11,9 +11,14 @@ import_default_modules, which runs after the Django fixup.
 """
 
 from celery_tasks import (  # noqa: F401
+    academics_tasks,
+    assignment_tasks,
+    attendance_tasks,
     cleanup_tasks,
+    content_tasks,
     notification_tasks,
     print_tasks,
     report_tasks,
+    schedule_tasks,
     tenancy_tasks,
 )

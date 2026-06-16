@@ -6,8 +6,9 @@ from datetime import date
 
 import factory
 
-from apps.cohorts.models import Cohort
+from apps.cohorts.models import Cohort, CohortMembership
 from apps.org.tests.factories import BranchFactory
+from apps.students.tests.factories import StudentProfileFactory
 
 
 class CohortFactory(factory.django.DjangoModelFactory[Cohort]):
@@ -19,3 +20,15 @@ class CohortFactory(factory.django.DjangoModelFactory[Cohort]):
     branch = factory.SubFactory(BranchFactory)
     start_date = date(2026, 1, 1)
     end_date = date(2026, 12, 31)
+
+
+class CohortMembershipFactory(factory.django.DjangoModelFactory[CohortMembership]):
+    """An ACTIVE membership by default (end_date is null)."""
+
+    class Meta:
+        model = CohortMembership
+
+    cohort = factory.SubFactory(CohortFactory)
+    student = factory.SubFactory(StudentProfileFactory)
+    start_date = date(2026, 1, 1)
+    end_date = None

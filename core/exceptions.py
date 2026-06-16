@@ -44,9 +44,16 @@ class StarforgeError(Exception):
     status_code: int = status.HTTP_400_BAD_REQUEST
     default_detail: StrOrPromise = _("Something went wrong.")
 
-    def __init__(self, detail: StrOrPromise | None = None, *, code: str | None = None) -> None:
+    def __init__(
+        self,
+        detail: StrOrPromise | None = None,
+        *,
+        code: str | None = None,
+        fields: dict[str, Any] | None = None,
+    ) -> None:
         self.detail: StrOrPromise = detail if detail is not None else self.default_detail
         self.code = code or self.code
+        self.fields = fields  # optional per-field detail (e.g. conflicting lesson ids)
         super().__init__(self.detail)
 
 
@@ -95,6 +102,16 @@ class ConflictException(StarforgeError):
     default_detail = _("Conflict with the current state.")
 
 
+class UnprocessableEntity(StarforgeError):
+    """422 — a well-formed request the server understands but cannot act on
+    (e.g. marking attendance for a student who is not an active member of the
+    lesson's cohort). Distinct from 400 `validation_error` (malformed input)."""
+
+    code = "unprocessable_entity"
+    status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
+    default_detail = _("The request could not be processed.")
+
+
 class AuthenticationException(StarforgeError):
     """401 with a stable code — used by TenantAwareJWTAuthentication (TD-1) for
     `tenant_mismatch` / `token_stale`, surfaced through the same envelope."""
@@ -125,11 +142,11 @@ def drf_exception_handler(exc: Exception, context: dict[str, Any]) -> Response |
         wait = getattr(exc, "wait", None)
         if wait is not None:
             headers["Retry-After"] = str(int(wait))
-        return Response(
-            {"error": {"code": exc.code, "detail": exc.detail}},
-            status=exc.status_code,
-            headers=headers or None,
-        )
+        body: dict[str, Any] = {"code": exc.code, "detail": exc.detail}
+        exc_fields = getattr(exc, "fields", None)
+        if exc_fields:
+            body["fields"] = exc_fields
+        return Response({"error": body}, status=exc.status_code, headers=headers or None)
 
     if isinstance(exc, PermissionDenied):
         return Response(

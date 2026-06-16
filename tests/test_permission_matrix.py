@@ -50,6 +50,41 @@ MATRIX_CASES = [
     (Role.REGISTRAR, "get", "/api/v1/parents/", True),
     (Role.PARENT, "get", "/api/v1/parents/", True),
     (Role.TEACHER, "get", "/api/v1/parents/", False),
+    # --- Day 2 ------------------------------------------------------------
+    # schedule (schedule:read; REGISTRAR/HEAD/DIRECTOR schedule:*)
+    (Role.DIRECTOR, "get", "/api/v1/schedule/lessons/", True),
+    (Role.TEACHER, "get", "/api/v1/schedule/lessons/", True),
+    (Role.STUDENT, "get", "/api/v1/schedule/lessons/", True),
+    (Role.CASHIER, "get", "/api/v1/schedule/lessons/", False),
+    (Role.REGISTRAR, "get", "/api/v1/schedule/terms/", True),
+    (Role.TEACHER, "post", "/api/v1/schedule/rules/", False),  # teacher has schedule:read only
+    (Role.STUDENT, "post", "/api/v1/schedule/rules/", False),
+    # attendance (TEACHER/HEAD attendance:*; STUDENT/PARENT attendance:read)
+    (Role.DIRECTOR, "get", "/api/v1/attendance/records/", True),
+    (Role.TEACHER, "get", "/api/v1/attendance/records/", True),
+    (Role.STUDENT, "get", "/api/v1/attendance/records/", True),
+    (Role.PARENT, "get", "/api/v1/attendance/records/", True),
+    (Role.CASHIER, "get", "/api/v1/attendance/records/", False),
+    (Role.STUDENT, "post", "/api/v1/attendance/lessons/1/mark/", False),  # no attendance:write
+    # academics (TEACHER academics:read+write; STUDENT/PARENT academics:read)
+    (Role.DIRECTOR, "get", "/api/v1/academics/grades/", True),
+    (Role.TEACHER, "get", "/api/v1/academics/grades/", True),
+    (Role.STUDENT, "get", "/api/v1/academics/grades/", True),
+    (Role.PARENT, "get", "/api/v1/academics/grades/", True),
+    (Role.CASHIER, "get", "/api/v1/academics/subjects/", False),
+    (Role.STUDENT, "post", "/api/v1/academics/subjects/", False),  # no academics:write
+    # assignments (TEACHER assignments:*; STUDENT assignments:read+submit)
+    (Role.DIRECTOR, "get", "/api/v1/assignments/", True),
+    (Role.TEACHER, "get", "/api/v1/assignments/", True),
+    (Role.STUDENT, "get", "/api/v1/assignments/", True),
+    (Role.CASHIER, "get", "/api/v1/assignments/", False),
+    (Role.STUDENT, "post", "/api/v1/assignments/", False),  # create needs assignments:write
+    # content (TEACHER/LIBRARIAN content:*; STUDENT content:read)
+    (Role.DIRECTOR, "get", "/api/v1/content/libraries/", True),
+    (Role.LIBRARIAN, "get", "/api/v1/content/libraries/", True),
+    (Role.STUDENT, "get", "/api/v1/content/files/", True),
+    (Role.CASHIER, "get", "/api/v1/content/files/", False),
+    (Role.STUDENT, "post", "/api/v1/content/upload-url/", False),  # needs content:write
 ]
 
 

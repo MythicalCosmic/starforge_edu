@@ -8,13 +8,14 @@ the connection level.
 from __future__ import annotations
 
 from datetime import time
+from decimal import Decimal
 
 from django.db import models
 from django.utils.translation import gettext_lazy as _
 
 
 def _default_allowed_file_types() -> list[str]:
-    return ["pdf", "mp4", "pptx", "docx", "mp3", "jpg", "png"]
+    return ["pdf", "mp4", "pptx", "docx", "mp3", "jpg", "jpeg", "png", "webp"]  # D2-E-2
 
 
 def _default_otp_channel_prefs() -> dict[str, bool]:
@@ -100,10 +101,19 @@ class CenterSettings(models.Model):
     grading_scheme = models.CharField(
         max_length=16, choices=GradingScheme.choices, default=GradingScheme.PERCENTAGE
     )
+    honor_roll_min = models.DecimalField(  # D2-C-2
+        max_digits=5, decimal_places=2, default=Decimal("90")
+    )
+    academic_warning_max = models.DecimalField(  # D2-C-2
+        max_digits=5, decimal_places=2, default=Decimal("60")
+    )
     late_threshold_minutes = models.PositiveSmallIntegerField(default=10)
     attendance_correction_window_hours = models.PositiveSmallIntegerField(default=24)
+    auto_absent_after_minutes = models.PositiveSmallIntegerField(default=30)  # D2-B-2
     assignment_grace_minutes = models.PositiveSmallIntegerField(default=0)
-    max_upload_mb = models.PositiveIntegerField(default=200)
+    assignment_max_resubmits = models.PositiveSmallIntegerField(default=2)  # D2-D-2
+    max_upload_mb = models.PositiveIntegerField(default=200)  # D2-E uses this as max_file_size_mb
+    storage_quota_gb = models.PositiveIntegerField(null=True, blank=True)  # D2-E-2 (null = unlimited)
     allowed_file_types = models.JSONField(default=_default_allowed_file_types)
     currency_primary = models.CharField(max_length=3, default="UZS")
     currency_secondary = models.CharField(max_length=3, default="USD")

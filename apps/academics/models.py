@@ -1,23 +1,151 @@
-"""Academics models — v1 scaffold.
+"""Academics models (TASKS §11): subjects, exams + results, computed term
+grades, and transcript jobs.
 
-Stub models live here only to prove the app loads + migrates. Replace with
-real domain models per feature ticket.
+Exam results roll up into a per-(student, subject, term) `Grade` whose
+`value_display` is rendered per the Center's grading scheme (TD-13). Transcripts
+are generated off-request by a Celery task (TD-14, weasyprint → S3).
 """
 
+from __future__ import annotations
+
 from django.db import models
+from django.db.models import Q
+from django.utils.translation import gettext_lazy as _
 
 
-class AcademicItem(models.Model):
-    """Placeholder so the app has at least one migrated model."""
-
+class Subject(models.Model):
     name = models.CharField(max_length=200)
-    notes = models.TextField(blank=True)
+    code = models.SlugField(max_length=50, unique=True)
+    department = models.ForeignKey(
+        "org.Department", on_delete=models.SET_NULL, null=True, blank=True, related_name="subjects"
+    )
+    description = models.TextField(blank=True)
     is_active = models.BooleanField(default=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        app_label = "academics"
+        ordering = ("name",)
 
     def __str__(self) -> str:  # pragma: no cover
-        return self.name
+        return f"{self.code}:{self.name}"
+
+
+class Exam(models.Model):
+    class Type(models.TextChoices):
+        MIDTERM = "midterm", _("Midterm")
+        FINAL = "final", _("Final")
+        QUIZ = "quiz", _("Quiz")
+        PROJECT = "project", _("Project")
+        ORAL = "oral", _("Oral")
+
+    subject = models.ForeignKey(Subject, on_delete=models.PROTECT, related_name="exams")
+    cohort = models.ForeignKey("cohorts.Cohort", on_delete=models.PROTECT, related_name="exams")
+    term = models.ForeignKey("schedule.Term", on_delete=models.PROTECT, related_name="exams")
+    type = models.CharField(max_length=10, choices=Type.choices)
+    title = models.CharField(max_length=200)
+    exam_date = models.DateField()
+    max_score = models.DecimalField(max_digits=6, decimal_places=2, default=100)
+    weight = models.DecimalField(max_digits=4, decimal_places=3, default=1)
+    is_published = models.BooleanField(default=False)
+    published_at = models.DateTimeField(null=True, blank=True)
+    created_by = models.ForeignKey(
+        "users.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("-exam_date",)
+        indexes = [
+            models.Index(fields=("cohort", "term")),
+            models.Index(fields=("subject", "term")),
+        ]
+        constraints = [
+            models.CheckConstraint(condition=Q(max_score__gt=0), name="exam_max_score_positive"),
+            models.CheckConstraint(condition=Q(weight__gt=0), name="exam_weight_positive"),
+        ]
+
+    def __str__(self) -> str:  # pragma: no cover
+        return f"{self.title} ({self.subject_id})"
+
+
+class ExamResult(models.Model):
+    exam = models.ForeignKey(Exam, on_delete=models.CASCADE, related_name="results")
+    student = models.ForeignKey(
+        "students.StudentProfile", on_delete=models.PROTECT, related_name="exam_results"
+    )
+    score = models.DecimalField(max_digits=6, decimal_places=2)
+    note = models.CharField(max_length=255, blank=True)
+    graded_by = models.ForeignKey(
+        "users.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    graded_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("-graded_at",)
+        constraints = [
+            models.UniqueConstraint(fields=("exam", "student"), name="examresult_unique_exam_student"),
+            models.CheckConstraint(condition=Q(score__gte=0), name="examresult_score_nonneg"),
+        ]
+
+    def __str__(self) -> str:  # pragma: no cover
+        return f"{self.exam_id}:{self.student_id}={self.score}"
+
+
+class Grade(models.Model):
+    """A computed per-(student, subject, term) term grade. `value_raw` is the
+    weighted 0-100 score; `value_display` is rendered per the active scheme."""
+
+    student = models.ForeignKey("students.StudentProfile", on_delete=models.PROTECT, related_name="grades")
+    subject = models.ForeignKey(Subject, on_delete=models.PROTECT, related_name="grades")
+    term = models.ForeignKey("schedule.Term", on_delete=models.PROTECT, related_name="grades")
+    value_raw = models.DecimalField(max_digits=6, decimal_places=3)
+    value_display = models.CharField(max_length=8)
+    components = models.JSONField(default=list)  # [{exam, title, score, max_score, weight}]
+    is_published = models.BooleanField(default=False)
+    published_at = models.DateTimeField(null=True, blank=True)
+    computed_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("-computed_at",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=("student", "subject", "term"), name="grade_unique_student_subject_term"
+            ),
+        ]
+        indexes = [models.Index(fields=("student", "term"))]
+
+    def __str__(self) -> str:  # pragma: no cover
+        return f"{self.student_id}:{self.subject_id}:{self.term_id}={self.value_display}"
+
+
+class Transcript(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "pending", _("Pending")
+        PROCESSING = "processing", _("Processing")
+        DONE = "done", _("Done")
+        FAILED = "failed", _("Failed")
+
+    student = models.ForeignKey(
+        "students.StudentProfile", on_delete=models.PROTECT, related_name="transcripts"
+    )
+    term = models.ForeignKey(
+        "schedule.Term", on_delete=models.PROTECT, null=True, blank=True, related_name="transcripts"
+    )  # null = full academic history
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
+    pdf_key = models.CharField(max_length=512, blank=True)
+    error = models.TextField(blank=True)
+    requested_by = models.ForeignKey(
+        "users.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    generated_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+
+    def __str__(self) -> str:  # pragma: no cover
+        return f"transcript#{self.pk}:{self.status}"

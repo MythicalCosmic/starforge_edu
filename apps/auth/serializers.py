@@ -20,11 +20,23 @@ class PasswordChangeSerializer(serializers.Serializer):
     new_password = serializers.CharField(max_length=128, trim_whitespace=False)
 
 
-class PasswordResetRequestSerializer(serializers.Serializer):
+class _StrictIdentifierMixin(serializers.Serializer):
+    """Reject a non-string `identifier` with 400 instead of letting CharField
+    silently coerce a JSON int/float to a string (the throttles already survive
+    non-strings; the request itself must still be a 400, not a 202)."""
+
+    def to_internal_value(self, data):
+        raw = data.get("identifier") if isinstance(data, dict) else None
+        if raw is not None and not isinstance(raw, str):
+            raise serializers.ValidationError({"identifier": ["Must be a string."]})
+        return super().to_internal_value(data)
+
+
+class PasswordResetRequestSerializer(_StrictIdentifierMixin, serializers.Serializer):
     identifier = serializers.CharField(max_length=255)  # phone or email on file
 
 
-class PasswordResetConfirmSerializer(serializers.Serializer):
+class PasswordResetConfirmSerializer(_StrictIdentifierMixin, serializers.Serializer):
     identifier = serializers.CharField(max_length=255)
     code = serializers.CharField(min_length=4, max_length=12)
     new_password = serializers.CharField(max_length=128, trim_whitespace=False)

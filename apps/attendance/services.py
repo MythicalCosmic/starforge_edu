@@ -1,1 +1,162 @@
-"""Attendance write-side services. Wire orchestrations as needs emerge."""
+"""Attendance write services (TASKS §10, §22).
+
+`mark_attendance` is the single teacher-facing write path (upsert, late
+threshold, correction window); `auto_mark_absent` is the beat-task body that
+back-fills `absent` no-shows. Both are emit-only — nothing here imports an
+sms/email/push adapter (D3-C wires guardian dispatch off `student_marked_absent`).
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+
+from django.db import transaction
+from django.utils import timezone
+from django.utils.translation import gettext_lazy as _
+
+from apps.attendance.models import AttendanceRecord
+from apps.attendance.signals import student_marked_absent
+from apps.cohorts.models import CohortMembership
+from apps.org.selectors import get_center_settings
+from apps.schedule.models import Lesson
+from core.exceptions import PermissionException, UnprocessableEntity
+from core.permissions import Role
+from core.utils import current_schema
+
+# Roles that may mark ANY lesson's attendance regardless of who teaches it.
+MARK_BYPASS_ROLES = {Role.DIRECTOR, Role.HEAD_OF_DEPT}
+
+
+def _roles_of(user) -> set[str]:
+    return {m.role for m in user.role_memberships.filter(revoked_at__isnull=True)}
+
+
+def _assert_can_mark(lesson: Lesson, actor, roles: set[str]) -> None:
+    """Actor must teach the lesson, unless director/head_of_dept (TD-5 bypass)."""
+    if actor.is_superuser or roles & MARK_BYPASS_ROLES:
+        return
+    if lesson.teacher.user_id == actor.id:
+        return
+    raise PermissionException(
+        _("Only the lesson's teacher can mark its attendance."), code="not_lesson_teacher"
+    )
+
+
+def _assert_within_correction_window(lesson: Lesson, actor, roles: set[str], settings) -> None:
+    """Edits past `attendance_correction_window_hours` after the lesson ends are
+    rejected — only a director may correct beyond the window (D2-B-3)."""
+    if actor.is_superuser or Role.DIRECTOR in roles:
+        return
+    window = dt.timedelta(hours=settings.attendance_correction_window_hours)
+    if timezone.now() > lesson.ends_at + window:
+        raise PermissionException(
+            _("The correction window for this lesson has closed."),
+            code="correction_window_expired",
+        )
+
+
+def _resolve_status(entry: dict, lesson: Lesson, settings) -> str:
+    """A supplied `arrived_at` decides present-vs-late: arriving more than
+    `late_threshold_minutes` after the lesson start is `late`, exactly at the
+    threshold is still `present` (boundary inclusive of on-time)."""
+    arrived_at = entry.get("arrived_at")
+    if arrived_at is not None:
+        cutoff = lesson.starts_at + dt.timedelta(minutes=settings.late_threshold_minutes)
+        return AttendanceRecord.Status.LATE if arrived_at > cutoff else AttendanceRecord.Status.PRESENT
+    return entry["status"]
+
+
+def _emit_absent(record: AttendanceRecord, *, auto: bool, schema: str) -> None:
+    transaction.on_commit(
+        lambda: student_marked_absent.send(
+            sender=AttendanceRecord,
+            record_id=record.pk,
+            student_id=record.student_id,
+            lesson_id=record.lesson_id,
+            auto=auto,
+            schema_name=schema,
+        )
+    )
+
+
+@transaction.atomic
+def mark_attendance(*, lesson: Lesson, entries: list[dict], actor) -> dict:
+    """Upsert attendance for `lesson`. `entries` are dicts with `student` (a
+    StudentProfile), `status`, optional `arrived_at`/`note`. Returns
+    `{created, updated, records}`."""
+    settings = get_center_settings()
+    roles = _roles_of(actor)
+    _assert_can_mark(lesson, actor, roles)
+    _assert_within_correction_window(lesson, actor, roles, settings)
+
+    student_ids = [e["student"].pk for e in entries]
+    active_ids = set(
+        CohortMembership.objects.filter(
+            cohort_id=lesson.cohort_id, student_id__in=student_ids, end_date__isnull=True
+        ).values_list("student_id", flat=True)
+    )
+    not_members = [sid for sid in student_ids if sid not in active_ids]
+    if not_members:
+        raise UnprocessableEntity(
+            _("One or more students are not active members of this lesson's cohort."),
+            code="student_not_in_cohort",
+            fields={"students": not_members},
+        )
+
+    schema = current_schema()
+    created = updated = 0
+    records: list[AttendanceRecord] = []
+    for entry in entries:
+        status_value = _resolve_status(entry, lesson, settings)
+        record, was_created = AttendanceRecord.objects.update_or_create(
+            student=entry["student"],
+            lesson=lesson,
+            defaults={
+                "status": status_value,
+                "arrived_at": entry.get("arrived_at"),
+                "note": entry.get("note", ""),
+                "marked_by": actor,
+                "auto_marked": False,
+            },
+        )
+        created += int(was_created)
+        updated += int(not was_created)
+        records.append(record)
+        if status_value == AttendanceRecord.Status.ABSENT:
+            _emit_absent(record, auto=False, schema=schema)
+    return {"created": created, "updated": updated, "records": records}
+
+
+def auto_mark_absent() -> int:
+    """Beat-task body (TASKS §22): for every `scheduled` lesson that started at
+    least `auto_absent_after_minutes` ago, create `absent` records for active
+    cohort members who have none. Idempotent via `get_or_create`'s created flag —
+    a re-run makes zero new rows and emits zero duplicate signals, and a student
+    already marked (e.g. `present`) is never overwritten. Runs under the active
+    tenant schema."""
+    settings = get_center_settings()
+    cutoff = timezone.now() - dt.timedelta(minutes=settings.auto_absent_after_minutes)
+    schema = current_schema()
+    created = 0
+    lessons = Lesson.objects.filter(status=Lesson.Status.SCHEDULED, starts_at__lte=cutoff)
+    for lesson in lessons:
+        member_ids = CohortMembership.objects.filter(
+            cohort_id=lesson.cohort_id, end_date__isnull=True
+        ).values_list("student_id", flat=True)
+        already = set(AttendanceRecord.objects.filter(lesson=lesson).values_list("student_id", flat=True))
+        for student_id in member_ids:
+            if student_id in already:
+                continue
+            record, was_created = AttendanceRecord.objects.get_or_create(
+                student_id=student_id,
+                lesson=lesson,
+                defaults={
+                    "status": AttendanceRecord.Status.ABSENT,
+                    "auto_marked": True,
+                    "marked_by": None,
+                },
+            )
+            if was_created:
+                created += 1
+                _emit_absent(record, auto=True, schema=schema)
+    return created

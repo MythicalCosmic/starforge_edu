@@ -43,6 +43,18 @@ def _clear_cache():
     cache.clear()
 
 
+@pytest.fixture(autouse=True)
+def _reset_schema_to_public():
+    """A client request through TenantMainMiddleware leaves connection.schema_name
+    on that tenant — django-tenants does not reset it at request end. Without this,
+    a test that ran a tenant-host request poisons the NEXT test's public-schema
+    work (provisioning guards on 'must be public', platform API, archive), causing
+    order-dependent failures. Reset to public before every test."""
+    from django.db import connection
+
+    connection.set_schema_to_public()
+
+
 def _get_tenant(slug):
     from apps.tenancy.models import Center
 
@@ -156,3 +168,12 @@ def sms_outbox():
 
     MockEskizClient.outbox.clear()
     return MockEskizClient.outbox
+
+
+@pytest.fixture
+def s3_stub(monkeypatch):
+    """In-memory S3 (TESTING.md / D2-F-4): patches every content S3 helper onto a
+    recording stub. Reused by storage, payment-receipt, and report tests."""
+    from tests.storage_stub import InMemoryS3
+
+    return InMemoryS3().install(monkeypatch)

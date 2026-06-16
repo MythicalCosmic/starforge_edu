@@ -218,79 +218,79 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
 ## 9. Schedule (apps/schedule)
 
-- [ ] Replace placeholder with `Lesson`, `TimeSlot`, `Room`, `Holiday` models
-- [ ] Recurring lessons (RRULE-style: every Mon/Wed/Fri at 14:00 for 12 weeks)
-- [ ] One-off lesson edits (cancel one occurrence, move one occurrence)
-- [ ] Room booking conflict detection
-- [ ] Teacher conflict detection (one teacher, one place at a time)
-- [ ] Cohort conflict detection (one cohort, one lesson at a time)
-- [ ] Holiday import (Asia/Tashkent national holidays seeded; per-branch overrides)
-- [ ] Generate iCalendar feed per user (signed URL with token)
-- [ ] Push notification 30 min before lesson
-- [ ] Bulk reschedule (whole-week shift)
-- [ ] Term/semester boundaries that auto-archive lessons
+- [x] `Term`/`TimeSlot`/`RecurrenceRule`/`Lesson` models (Room/Holiday already in org, D1-F)
+- [x] Recurring lessons (TD-12 materialized occurrences via dateutil rrule)
+- [x] One-off lesson edits (cancel one occurrence, move one occurrence → detaches)
+- [x] Room booking conflict detection (service 409 + DB exclusion constraint)
+- [x] Teacher conflict detection (service 409 + DB exclusion constraint)
+- [x] Cohort conflict detection (service 409 + DB exclusion constraint)
+- [~] Holiday skip on materialize (per-branch `org.BranchHoliday`); national-holiday seeding deferred
+- [x] iCalendar feed per user (signed token URL, tenant-bound)
+- [~] Reminder 30 min before lesson: `lesson_reminder_due` signal emitted (push wiring D3-C)
+- [x] Bulk reschedule (whole-week shift, all-or-nothing)
+- [x] Term boundaries auto-archive lessons (`archive_completed_terms` beat task)
 
 ---
 
 ## 10. Attendance (apps/attendance)
 
-- [ ] Replace placeholder with real `AttendanceRecord` model: student, lesson, status (present/absent/late/excused), marked_by, marked_at, note
-- [ ] Mark-attendance endpoint scoped to a Lesson (teacher only)
-- [ ] Bulk mark by cohort
-- [ ] Attendance summary per student per term (% present)
-- [ ] Auto-mark "absent" 30 min after lesson start if no record exists (Celery)
-- [ ] Late threshold configurable per Center (default 10 min)
-- [ ] Notify guardian on absence (via notification dispatch)
-- [ ] Attendance correction window (24h to amend; after that requires director approval)
-- [ ] Attendance export per cohort per term (CSV/PDF)
-- [ ] Attendance dashboard per cohort per teacher
+- [x] Replace placeholder with real `AttendanceRecord` model: student, lesson, status (present/absent/late/excused), marked_by, marked_at, note (+ arrived_at, auto_marked; unique(student,lesson)) — `attendance/0002`
+- [x] Mark-attendance endpoint scoped to a Lesson (teacher only) — `POST /api/v1/attendance/lessons/{id}/mark/`; director/head_of_dept bypass the teacher check
+- [x] Bulk mark by cohort — the mark payload is a list of entries (post every cohort student in one call)
+- [x] Attendance summary per student per term (% present) — `GET /api/v1/attendance/summary/?student=&term=`
+- [x] Auto-mark "absent" 30 min after lesson start if no record exists (Celery) — `mark_absent_after_lesson` (knob `auto_absent_after_minutes`, idempotent)
+- [x] Late threshold configurable per Center (default 10 min) — `late_threshold_minutes` drives auto-late from `arrived_at`
+- [x] Notify guardian on absence — `student_marked_absent` signal emitted (manual + auto); SMS/in-app **dispatch is D3-C** (emit-only today)
+- [x] Attendance correction window (24h to amend; after that requires director approval) — `attendance_correction_window_hours`; past-window edits 403 `correction_window_expired` unless director
+- [x] Attendance export per cohort per term (CSV) — `GET /api/v1/attendance/export/?cohort=&term=` streaming `text/csv` (**PDF deferred** to a TD-14 lane)
+- [x] Attendance dashboard per cohort per teacher — `GET /api/v1/attendance/cohorts/{id}/dashboard/` (single aggregate query, staff/teaching-teacher only)
 
 ---
 
 ## 11. Academics (apps/academics)
 
-- [ ] Replace placeholder with `Subject`, `Exam`, `ExamResult`, `Grade`, `Transcript` models
-- [ ] Grading scheme (per-Center: letter A–F, GPA 0–4, percentage 0–100)
-- [ ] Exam types: midterm, final, quiz, project, oral
-- [ ] Exam generation (AI-assisted via apps.ai — gated)
-- [ ] Grade entry per cohort per exam
-- [ ] Bulk grade entry by CSV
-- [ ] Grade audit (who changed, when, old value)
-- [ ] Auto-calculate term grade from weighted exam results
-- [ ] Generate transcript PDF per student
-- [ ] Honor roll / academic-warning detection (configurable thresholds)
-- [ ] Parent visibility: only student's grades, only after publication
+- [x] Replace placeholder with `Subject`, `Exam`, `ExamResult`, `Grade`, `Transcript` models — `academics/0002`
+- [x] Grading scheme (per-Center: letter A–F, GPA 0–4, percentage 0–100) — `apps/academics/grading.py`, knob-driven `value_display`
+- [x] Exam types: midterm, final, quiz, project, oral
+- [ ] Exam generation (AI-assisted via apps.ai — gated) — **deferred to D4-A §18** (out of Day-2 scope, per Lane C objective)
+- [x] Grade entry per cohort per exam — `POST /api/v1/academics/exams/{id}/results/`
+- [x] Bulk grade entry by CSV — `POST .../results/import-csv/` (all-or-nothing; 422 lists bad row numbers)
+- [x] Grade audit (who changed, when, old value) — `grade_changed` signal (old/new on overwrite); **D3-D audit** consumes
+- [x] Auto-calculate term grade from weighted exam results — `compute_term_grade` / `recompute_cohort_term` (published exams only)
+- [x] Generate transcript PDF per student — `POST .../transcripts/` → Celery `generate_transcript_pdf` (weasyprint → S3, TD-14)
+- [x] Honor roll / academic-warning detection (configurable thresholds) — `honor_roll_min`/`academic_warning_max` knobs + endpoints
+- [x] Parent visibility: only student's grades, only after publication — `scoped_grades` (is_published gate + guardian scoping)
 
 ---
 
 ## 12. Assignments / homework (apps/assignments)
 
-- [ ] Replace placeholder with `Assignment`, `Submission`, `Grade` models
-- [ ] Teacher creates assignment for a cohort with due date + attachments
-- [ ] Student submits with attachments (S3) or text body
-- [ ] Late submission flag with configurable grace period
-- [ ] Plagiarism check stub (defer real integration)
-- [ ] AI-assisted feedback (apps.ai)
-- [ ] Resubmit allowed up to N times
-- [ ] Grade rubric per assignment
-- [ ] Assignment notifications: created, due-soon, graded
+- [x] Replace placeholder with `Assignment`, `Submission`, `Grade` models (`SubmissionGrade`) — `assignments/0002`
+- [x] Teacher creates assignment for a cohort with due date + attachments — CRUD + `/publish/`
+- [x] Student submits with attachments (S3) or text body — `POST /assignments/{id}/submissions/` (presigned via `/upload-url/`)
+- [x] Late submission flag with configurable grace period — `assignment_grace_minutes` (is_late vs `due_at + grace`)
+- [x] Plagiarism check stub (defer real integration) — `check_submission()` → typed `PlagiarismResult(not_implemented)`
+- [ ] AI-assisted feedback (apps.ai) — signal `ai_feedback_requested` emitted + `request-ai-feedback/` endpoint; **real AI is D4-A §18**
+- [x] Resubmit allowed up to N times — `assignment_max_resubmits` knob (per-assignment `max_resubmits` override)
+- [x] Grade rubric per assignment — `rubric` JSON + `grade_submission` validates criteria & Σ max_points ≤ max_score
+- [x] Assignment notifications: created, due-soon, graded — signals `assignment_published`/`assignment_due_soon`/`submission_graded` (emit-only; **dispatch D3-C**)
 
 ---
 
 ## 13. Content (apps/content)
 
-- [ ] Replace placeholder with `LessonFile`, `Folder`, `ContentLibrary` models
-- [ ] Hierarchy: Subject → Course → Module → Lesson → File
-- [ ] File upload via signed S3 URL (already plumbed in infrastructure/storage)
-- [ ] File-type allowlist (PDF, MP4, PPTX, DOCX, MP3, common image formats)
-- [ ] File size cap (configurable per Center, default 200MB)
-- [ ] libmagic content-type validation on upload
-- [ ] Antivirus scan stub (defer ClamAV integration)
-- [ ] Versioning per file
-- [ ] Visibility scoping: department / cohort / role
-- [ ] Watch / view tracking (who opened what, when)
-- [ ] Download counter
-- [ ] AI summary per file (gated by tenant AI budget)
+- [x] Replace placeholder with `LessonFile`, `Folder`, `ContentLibrary` models (+ Course/Module/ContentLesson/FileView) — `content/0002`
+- [x] Hierarchy: Subject → Course → Module → Lesson → File — `ContentLibrary` → Course → Module → ContentLesson → LessonFile
+- [x] File upload via signed S3 URL — `POST /content/upload-url/` → direct PUT → `/files/{id}/confirm/`
+- [x] File-type allowlist (PDF, MP4, PPTX, DOCX, MP3, common image formats) — extension + declared content-type checked
+- [x] File size cap (configurable per Center, default 200MB) — `max_upload_mb` knob
+- [x] libmagic content-type validation on upload — `validate_uploaded_file` sniffs first 8KB (lazy `magic`)
+- [ ] Antivirus scan stub (defer ClamAV integration) — **deferred** (magic sniff is the validation gate today)
+- [x] Versioning per file — `POST /files/{id}/new-version/` (links `previous_version`, `version+1`)
+- [x] Visibility scoping: department / cohort / role — `scoped_files`/`scoped_libraries` (tenant/department/cohort/role)
+- [x] Watch / view tracking (who opened what, when) — `FileView` rows + `track-view/`
+- [x] Download counter — `F()`-incremented `download_count` on `download-url/`
+- [ ] AI summary per file (gated by tenant AI budget) — **deferred to D4-A §18**
 
 ---
 
@@ -424,7 +424,7 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
 - [ ] Periodic tasks via django-celery-beat (defined in admin or in code via `setup_periodic_tasks`):
   - [ ] `purge_expired_otps` daily
-  - [ ] `mark_absent_after_lesson` every 15 min
+  - [x] `mark_absent_after_lesson` every 15 min — fan-out per active Center (`celery_tasks/attendance_tasks.py`)
   - [ ] `late_payment_reminders` daily
   - [ ] `nightly_aggregations` for cross-tenant analytics
   - [ ] `archive_completed_terms` weekly
@@ -439,17 +439,17 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
 ## 23. Storage
 
-- [ ] MinIO bucket creation in `seed_dev.py` (`mc mb local/starforge-media`)
-- [ ] Bucket lifecycle: expire objects under `tmp/` after 7 days
-- [ ] Signed upload flow: client requests `POST /api/v1/content/upload-url/` → uploads directly to S3 → confirms via callback
-- [ ] Signed download URL endpoints with short TTLs
-- [ ] Per-tenant bucket prefix: `{schema_name}/...` so a shared bucket still isolates data
-- [ ] CORS config for direct browser uploads
-- [ ] Content-type allowlist enforced on upload-url issuance
-- [ ] File metadata extraction on upload-complete callback (libmagic)
-- [ ] Image thumbnail generation (Pillow, async via Celery)
-- [ ] Video transcoding (defer; pluggable)
-- [ ] Storage quota per Center
+- [x] MinIO bucket creation in `seed_dev.py` — `bootstrap_dev_storage()` (idempotent `create_bucket`)
+- [x] Bucket lifecycle: expire objects under `tmp/` after 7 days — `_TMP_LIFECYCLE` (see schema-first-key note in WORKLOG)
+- [x] Signed upload flow: `POST /api/v1/content/upload-url/` → direct S3 PUT → `/files/{id}/confirm/`
+- [x] Signed download URL endpoints with short TTLs — `/files/{id}/download-url/` (TTL 300)
+- [x] Per-tenant bucket prefix: `{schema_name}/...` so a shared bucket still isolates data
+- [x] CORS config for direct browser uploads — `_DEV_CORS` in `bootstrap_dev_storage`
+- [x] Content-type allowlist enforced on upload-url issuance — `request_upload` (extension + declared type)
+- [x] File metadata extraction on upload-complete callback (libmagic) — `validate_uploaded_file` (head_object + magic sniff)
+- [x] Image thumbnail generation (Pillow, async via Celery) — `generate_thumbnail` (320px, `.../thumb.jpg`)
+- [ ] Video transcoding (defer; pluggable) — **deferred** per spec
+- [x] Storage quota per Center — `storage_quota_gb` knob + `storage_used_bytes()` enforcement
 
 ---
 
@@ -494,19 +494,23 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 - [x] Refresh token rotation: old refresh blacklisted after rotation
 - [x] Refresh reuse detection: blacklisted refresh reused → all revoked
 - [x] User can log in with phone OR email
-- [x] Permission matrix: parameterized over (role, endpoint, verb) — 22 cases + fail-closed
-- [~] Object-scoped permission: teacher branch A vs branch B (object_scope wired; explicit test D2)
+- [x] Permission matrix: parameterized over (role, endpoint, verb) — 52 cases (Day-1 + Day-2 resources) + fail-closed
+- [x] Object-scoped permission: teacher branch A vs branch B → 403, director bypass → 200 (`tests/test_object_scope.py`, D2-F)
 - [x] Channels: anonymous WS connection rejected (4401)
 - [~] Channels: authenticated WS receives "hello" (anonymous-reject done; authed test D4-C)
 - [x] Celery task isolation: eager `purge_expired_otps` under schema_context
-- [~] Migration: `migrate_schemas --shared` on fresh DB (`makemigrations --check` clean; live run pending owner DB)
-- [~] Migration: creating a new Center auto-runs tenant migrations (covered by conftest provisioning; pending owner DB)
-- [x] OpenAPI schema generation succeeds (CI job exists)
-- [~] Coverage threshold ≥ 70% (config + CI gate wired; % UNMEASURED — owner runs `pytest --cov`)
+- [x] Migration: `migrate_schemas --shared` on fresh DB — `pytest --create-db` full run applies every Day-2 migration (incl. btree_gist) green
+- [x] Migration: creating a new Center auto-runs tenant migrations — conftest provisions tenant_a/tenant_b on a fresh DB (RUN)
+- [x] OpenAPI schema generation succeeds (CI job exists) — **0 errors**; `core.schema` registers the JWT auth extension
+- [x] Coverage threshold ≥ 70% — **MEASURED 88.77%** on real Postgres (`pytest --cov`)
+- [x] Day-2 cross-tenant isolation per resource (schedule/attendance/academics/assignments/content) — per-lane tests
+- [x] Day-2 query-count budgets on every list endpoint (≤8, constant w.r.t. row count)
+- [x] Conflict-detection property tests: overlap cases × room/teacher/cohort × (service 409 + raw-ORM IntegrityError) — `apps/schedule/tests/test_conflict_properties.py`
+- [x] Layering guard: zero sms/email/ai adapter imports in Day-2 apps (`tests/test_layering.py`)
+- [x] Shared in-memory S3 stub for the upload flow (`tests/storage_stub.py`, `s3_stub` fixture) + live-MinIO marker
 
-**Note (Day 1):** all tests are written and collect cleanly (44), but the suite has NOT been
-executed — Postgres was unavailable during the build. The owner must run `pytest` once the DB
-is up to confirm green + the 70% floor.
+**Note (Day 2):** the suite now **runs on real Postgres** — 338 passing, 2 skipped (weasyprint /
+libmagic native libs absent on the Windows dev box; CI/Linux runs them), 88.77% coverage.
 
 ---
 

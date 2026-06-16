@@ -75,6 +75,7 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         # rooms, working hours, settings knobs) — never write it.
         "org:read",
         "attendance:*",
+        "academics:read",  # D2-C-7: pairs with academics:write (Day-1 asymmetry fix)
         "academics:write",
         "assignments:*",
         "schedule:read",
@@ -85,9 +86,10 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         # (read_self semantics live in selectors, not the gate — TD-5).
         "students:read",
         "schedule:read",
-        "attendance:read_self",
-        "academics:read_self",
+        "attendance:read",  # row-scoped to self in apps/attendance/selectors.py
+        "academics:read",  # row-scoped to self + publication gate in apps/academics/selectors.py
         "assignments:read",
+        "assignments:submit",  # D2-D-6: students submit their own work
         "content:read",
     },
     Role.PARENT: {
@@ -96,8 +98,8 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "students:read",
         "parents:read",
         "students:read_own_children",
-        "attendance:read_own_children",
-        "academics:read_own_children",
+        "attendance:read",  # row-scoped to guardian-linked children in selectors
+        "academics:read",  # row-scoped to children + publication gate in selectors
         "finance:read_own",
         "schedule:read",
         "notifications:read",
@@ -107,7 +109,14 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
     Role.LIBRARIAN: {"content:*", "students:read", "cohorts:read"},
     Role.SECURITY: {"attendance:write", "users:read"},
     Role.IT: {"users:read", "audit:read", "org:*"},
-    Role.REGISTRAR: {"students:*", "users:write", "cohorts:*", "parents:*", "teachers:read"},
+    Role.REGISTRAR: {
+        "students:*",
+        "users:write",
+        "cohorts:*",
+        "parents:*",
+        "teachers:read",
+        "schedule:*",
+    },
     Role.SUPPORT: {"users:read", "audit:read"},
 }
 

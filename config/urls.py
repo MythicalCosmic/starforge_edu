@@ -4,6 +4,8 @@ from django.contrib import admin
 from django.urls import include, path
 from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, SpectacularSwaggerView
 
+import core.schema  # noqa: F401 — registers the OpenAPI auth extension (TD-1)
+
 api_v1_patterns = [
     path("auth/", include("apps.auth.urls")),
     path("users/", include("apps.users.urls")),

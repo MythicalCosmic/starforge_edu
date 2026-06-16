@@ -293,6 +293,22 @@ CELERY_BEAT_SCHEDULE = {
         "task": "celery_tasks.cleanup_tasks.purge_expired_otps",
         "schedule": 60 * 60 * 24,  # daily
     },
+    "send-lesson-reminders": {
+        "task": "celery_tasks.schedule_tasks.send_lesson_reminders",
+        "schedule": 60 * 5,  # every 5 min (D2-A-7)
+    },
+    "archive-completed-terms": {
+        "task": "celery_tasks.schedule_tasks.archive_completed_terms",
+        "schedule": 60 * 60 * 24 * 7,  # weekly
+    },
+    "mark-absent-after-lesson": {
+        "task": "celery_tasks.attendance_tasks.mark_absent_after_lesson",
+        "schedule": 60 * 15,  # every 15 min (D2-B-7)
+    },
+    "send-due-soon-reminders": {
+        "task": "celery_tasks.assignment_tasks.send_due_soon_reminders",
+        "schedule": 60 * 60,  # hourly (D2-D-7)
+    },
 }
 
 # ---------------------------------------------------------------------------
