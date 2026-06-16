@@ -83,6 +83,7 @@ MATRIX_CASES = [
     (Role.DIRECTOR, "get", "/api/v1/content/libraries/", True),
     (Role.LIBRARIAN, "get", "/api/v1/content/libraries/", True),
     (Role.STUDENT, "get", "/api/v1/content/files/", True),
+    (Role.PARENT, "get", "/api/v1/content/files/", True),  # cohort visibility incl. guardian-linked parents
     (Role.CASHIER, "get", "/api/v1/content/files/", False),
     (Role.STUDENT, "post", "/api/v1/content/upload-url/", False),  # needs content:write
 ]

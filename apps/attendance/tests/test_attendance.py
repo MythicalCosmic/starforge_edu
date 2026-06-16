@@ -139,6 +139,34 @@ def test_late_threshold_boundary(tenant_a, user_in, minutes_late, expected):
         assert result["records"][0].status == expected
 
 
+@pytest.mark.parametrize("submitted", [Status.EXCUSED, Status.ABSENT])
+def test_arrived_at_never_clobbers_excused_or_absent(tenant_a, user_in, submitted):
+    """An explicit excused/absent is stored verbatim even when `arrived_at` is
+    within the present/late window — `arrived_at` only reshapes present-vs-late."""
+    teacher_user = user_in(tenant_a, roles=["teacher"])
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        profile = TeacherProfileFactory(user=teacher_user, branch=branch)
+        starts_at = timezone.now() - timedelta(hours=1)
+        lesson = _make_lesson(branch=branch, teacher=profile, starts_at=starts_at)
+        (student,) = _enroll(lesson.cohort, branch=branch)
+        result = mark_attendance(
+            lesson=lesson,
+            entries=[
+                {
+                    "student": student,
+                    "status": submitted,
+                    # On-time arrival (<= cutoff): would resolve to PRESENT if it
+                    # leaked through, so any clobber would be visible here.
+                    "arrived_at": starts_at + timedelta(minutes=5),
+                }
+            ],
+            actor=teacher_user,
+        )
+        assert result["records"][0].status == submitted
+        assert AttendanceRecord.objects.get(lesson=lesson, student=student).status == submitted
+
+
 def test_late_threshold_knob_changes_behavior_no_code_change(tenant_a, user_in):
     """DoD #2 — bumping `late_threshold_minutes` shifts the boundary alone."""
     teacher_user = user_in(tenant_a, roles=["teacher"])
@@ -168,6 +196,71 @@ def test_late_threshold_knob_changes_behavior_no_code_change(tenant_a, user_in):
             actor=teacher_user,
         )
         assert result["records"][0].status == Status.PRESENT
+
+
+def test_correction_window_knob_changes_behavior_no_code_change(tenant_a, user_in):
+    """DoD #2 — bumping `attendance_correction_window_hours` lets a teacher edit
+    that was blocked at the default window succeed at the SAME frozen time."""
+    teacher_user = user_in(tenant_a, roles=["teacher"])
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        profile = TeacherProfileFactory(user=teacher_user, branch=branch)
+        starts_at = _aware(2026, 6, 1, 10)
+        lesson = _make_lesson(
+            branch=branch, teacher=profile, starts_at=starts_at, ends_at=starts_at + timedelta(hours=1)
+        )
+        (student,) = _enroll(lesson.cohort, branch=branch)
+
+    # 25h after the lesson ended — outside the default 24h window.
+    with time_machine.travel(_aware(2026, 6, 2, 12)), schema_context(tenant_a.schema_name):
+        with pytest.raises(PermissionException) as exc:
+            mark_attendance(
+                lesson=lesson,
+                entries=[{"student": student, "status": Status.PRESENT}],
+                actor=teacher_user,
+            )
+        assert exc.value.code == "correction_window_expired"
+
+        # Bump the knob; the same edit at the same frozen time now succeeds.
+        from django.core.cache import cache
+
+        settings = CenterSettings.load()
+        settings.attendance_correction_window_hours = 72
+        settings.save(update_fields=["attendance_correction_window_hours"])
+        cache.clear()
+
+        result = mark_attendance(
+            lesson=lesson,
+            entries=[{"student": student, "status": Status.PRESENT}],
+            actor=teacher_user,
+        )
+        assert (result["created"], result["updated"]) == (1, 0)
+        assert AttendanceRecord.objects.get(lesson=lesson, student=student).status == Status.PRESENT
+
+
+def test_auto_absent_knob_changes_behavior_no_code_change(tenant_a):
+    """DoD #2 — lowering `auto_absent_after_minutes` sweeps a more-recent lesson
+    that the default 30-min grace window would have skipped."""
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        profile = TeacherProfileFactory(branch=branch)
+        # Started 20 min ago: inside the default 30-min grace → not swept.
+        starts_at = timezone.now() - timedelta(minutes=20)
+        lesson = _make_lesson(branch=branch, teacher=profile, starts_at=starts_at)
+        _enroll(lesson.cohort, n=1, branch=branch)
+
+        assert auto_mark_absent() == 0
+        assert AttendanceRecord.objects.filter(lesson=lesson).count() == 0
+
+        from django.core.cache import cache
+
+        settings = CenterSettings.load()
+        settings.auto_absent_after_minutes = 10  # now 20-min-old lesson is past cutoff
+        settings.save(update_fields=["auto_absent_after_minutes"])
+        cache.clear()
+
+        assert auto_mark_absent() == 1
+        assert AttendanceRecord.objects.get(lesson=lesson).status == Status.ABSENT
 
 
 def test_correction_window_expired_teacher_403_director_ok(tenant_a, user_in, as_user):
@@ -361,6 +454,25 @@ def test_dashboard_query_budget(tenant_a, user_in, as_user, django_assert_max_nu
     assert resp.status_code == 200
     assert len(body["students"]) == 30
     assert body["rate"] == 100.0
+
+
+def test_dashboard_bad_date_returns_400_not_500(tenant_a, user_in, as_user):
+    """A malformed ?date_from surfaces as the TD-18 400 envelope, not an
+    uncaught ORM-level 500."""
+    director = user_in(tenant_a, roles=["director"])
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        cohort: Any = CohortFactory(branch=branch)
+        cohort_id = cohort.id
+
+    client = as_user(tenant_a, director)
+    resp = client.get(f"/api/v1/attendance/cohorts/{cohort_id}/dashboard/?date_from=garbage")
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "invalid_query_param"
+
+    # A well-formed ISO datetime still works.
+    ok = client.get(f"/api/v1/attendance/cohorts/{cohort_id}/dashboard/?date_from=2026-06-01T00:00:00Z")
+    assert ok.status_code == 200
 
 
 # --------------------------------------------------------------------------- #

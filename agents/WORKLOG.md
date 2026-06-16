@@ -29,6 +29,69 @@ Every agent session **must** append an entry here before ending. Never edit or d
 <!-- entries begin below this line -->
 
 ---
+### [Day 2 · OWNER REVIEW] Independent review verdict + fixes — 2026-06-16
+**Branch / commits:** `day1-build` (Day-2 build committed `0be4aa1`; review fixes committed on top).
+
+**Verdict for the Day-2 agent — read before Day 3.**
+Strong build. Independently re-verified the agents' claim on real Postgres: **338 passed / 2
+skipped / 88.77%** matched exactly — the first time a day's "it's green" claim held up on a
+clean re-run, which is the Day-1 lesson landing. Architecture, layering, idempotency design,
+the materialized-occurrence scheduler, and the canonical storage flow are all genuinely good.
+A 13-agent adversarial review (7 reviewers + verification) found **0 blockers, 6 majors, ~16
+minors** — no dead-on-arrival code this time. All 6 majors + the security/correctness-relevant
+minors are fixed (5 parallel app-scoped agents); suite is now **378 passed / 2 skipped / 90%**,
+ruff+mypy+makemigrations --check clean.
+
+**The 6 majors (all real authorization/correctness gaps a passing suite missed):**
+1. **Teacher iCal feed leaked the whole school's schedule** — `scoped_lessons` treated TEACHER
+   as blanket staff, so a teacher's personal calendar (and the lessons list) returned every
+   tenant lesson. The iCal test only used a director, so it never caught it.
+2. **Schedule scoping diverged from every other app** — schedule scoped students/parents via the
+   denormalized `current_cohort` FK while attendance/academics/assignments/content all use the
+   active `CohortMembership` join. A multi-cohort student saw lessons for one cohort but was
+   marked/assigned across all. Fixed together with #1 in one `scoped_lessons` rewrite.
+3. **`arrived_at` silently overrode an explicit `excused`/`absent` mark** as present/late —
+   corrupting exactly the excused-vs-present distinction the attendance-% and honor-roll math
+   depend on.
+4. **Any teacher could enter/overwrite/publish another cohort's exam results** — `ExamViewSet`
+   had no `get_queryset` scoping (only the grade *read* path was gated), so the write path was
+   tenant-wide. Now cohort-scoped via `scoped_exams`.
+5. **Parents were locked out of content** despite the documented cohort-visibility contract —
+   `Role.PARENT` had no `content:read`, making the selector's parent-guardian branch dead code.
+6. **Storage quota was bypassable** — `request_upload` counted only CLEAN files, so N back-to-back
+   pending uploads each saw the same total and passed; quota was never re-checked at validate.
+   Now re-validated at the CLEAN-flip chokepoint.
+
+**Systemic feedback (same themes as Day 1 — watch these on Day 3):**
+- **A green suite is not a scoped suite.** Every major was an *authorization/visibility* gap that
+  unit tests passed over because no test asserted the negative case from the *other* role's seat
+  (teacher-vs-teacher, parent-vs-content, cross-cohort exam writes). When you add a `get_queryset`
+  scope, you owe a test that a wrong-seat actor gets 404 — not just that the right one gets 200.
+- **Scope every write path, not just reads.** #4 and the content upload-url/les/folder minor are
+  both "reads scoped, writes wide." Mirror the read scoping on create/update.
+- **Keep scoping sources consistent across apps** (#2). One canonical membership source
+  (`CohortMembership`, `end_date__isnull=True`) — never the denormalized convenience FK for
+  authorization decisions.
+- **Idempotency guards belong on every signal emitter** (cancel re-emit, grade_changed no-op),
+  not only the periodic tasks — Day-3 audit/notify will consume these and double-fire otherwise.
+
+**Minors also fixed:** flattened `schedule_conflict` `error.fields` to the documented shape;
+move/cancel guards on non-scheduled lessons; iCal token TTL + `token_version` binding;
+attendance dashboard date-param validation (was a 500); two more attendance knob-flip tests;
+assignment rubric-cap at authoring time, publish-reopen guard, concurrent-submit 409, attachment
+key tenant-prefix + filename sanitization; tmp-object cleanup on reject + per-schema lifecycle
+prefix; exact-MIME sniff; thumbnail served via signed URL not raw key; teacher-scoped
+honor-roll/warnings; cross-tenant tests on assignment action endpoints; a fan-out `_schema_name`
+routing test. **`Role.PARENT += content:read`** is the only shared-file (core/permissions.py)
+change — recorded here per the no-silent-deviations rule.
+
+**Blocked (owner):** live 10-step demo + `@pytest.mark.minio` round-trip need a running
+Redis+worker+MinIO stack; weasyprint/libmagic native-render tests skip on Windows (run on CI).
+**Handoff to Day 3:** academic-engine signals are emit-only and their signatures are pinned by
+capture-receiver tests — Day-3 notifications/audit wire the consumers. `s3_stub` fixture +
+`storage_used_bytes()` are ready for payments-receipt and billing-metering reuse.
+
+---
 ### [Day 2 · Lane F] Cross-cutting tests + EOD gate — 2026-06-11
 **Shipped (verification lane — 338 passed, 2 skipped, 88.77% coverage on real Postgres):**
 - **Permission matrix extended** (`tests/test_permission_matrix.py`): +31 Day-2 cases (schedule/attendance/
@@ -603,3 +666,31 @@ already exist on this machine with different credentials; check before installin
 **Handoff to Day 2:** the auth contract above is final — build against `login/` and the
 reset flow; `required_perms`/`resource` + scoped selectors is the permission pattern; Lane B/F
 test inventories in earlier entries are superseded by the files listed in the fix commits.
+
+---
+### [Day 2 · Lane E review fixes] content visibility, quota, tmp lifecycle, scoped writes, MIME, thumbnail-url — 2026-06-16
+**Scope:** apps/content (+ shared core/permissions.py & tests/test_permission_matrix.py for the PARENT fix only).
+**Shipped:**
+- PARENT granted `content:read` (cohort visibility includes guardian-linked parents per DAY-2.md D2-E-6);
+  the gate now matches the selector's parent branch (`_related_cohort_ids` was previously dead via the API);
+  covered by matrix row + selector test. Decision recorded here per the review mandate.
+- Storage quota re-validated inside `validate_uploaded_file` at the moment the file becomes CLEAN
+  (still PENDING so `storage_used_bytes()` excludes it) — closes the sequential-batch / concurrent bypass
+  where N back-to-back `request_upload` calls each saw the same unchanged CLEAN total. Cheap early gate kept.
+- `_reject` now `delete_object`s the orphaned tmp blob (mirrors the happy path); `seed_dev` lifecycle
+  rebuilt as one `{schema}/tmp/` expire rule per Center (the bare `tmp/` prefix never matched real keys).
+- `ContentUploadUrlSerializer` lesson/folder querysets scoped to `scoped_libraries(user)` — scoped reads
+  now have symmetric scoped writes; an out-of-scope folder/lesson PK is invalid (no cross-scope seeding).
+- MIME sniff tightened: compares against the exact `_EXT_MIME` set for the file's extension (falls back to
+  family for extensions not in the map), so PNG-as-JPEG / docx-as-pdf no longer pass as family-equal.
+- `LessonFileSerializer` drops raw `thumbnail_key`; adds a TTL-limited (300s) signed `thumbnail_url`
+  SerializerMethodField (null when no thumbnail), mirroring the download-url signing.
+**Tests added (apps/content/tests/test_content.py):** quota batch-bypass, reject tmp-delete, exact-MIME
+reject + pass, positive department-membership, positive role-allowlist, parent-sees-childs-cohort,
+upload-url out-of-scope reject + in-scope accept, thumbnail-url-not-key. Matrix: PARENT GET /content/files/ True.
+**Deviations:** (1) Quota test uses two 0.6 GB pending files with NO pre-existing CLEAN file (quota 1 GB) —
+the brief's "existing 0.6 GB + two 0.6 GB" overshoots on the FIRST validate (0.6+0.6=1.2>1.0), so the
+mathematically-correct realization of "first CLEAN, second REJECTED" is 0+0.6 then 0.6+0.6. Same control,
+same assertions (`storage_used_bytes()` never exceeds quota). (2) Out-of-scope folder PK yields DRF's
+standard 400 `validation_error` (PrimaryKeyRelatedField does_not_exist); brief said "422/404 otherwise" as
+intent — test accepts 400/404/422 and asserts no LessonFile created.

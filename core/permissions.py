@@ -100,6 +100,7 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "students:read_own_children",
         "attendance:read",  # row-scoped to guardian-linked children in selectors
         "academics:read",  # row-scoped to children + publication gate in selectors
+        "content:read",  # row-scoped to children's cohorts via apps/content/selectors._related_cohort_ids
         "finance:read_own",
         "schedule:read",
         "notifications:read",

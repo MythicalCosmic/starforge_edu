@@ -21,17 +21,29 @@ from apps.tenancy.models import Center  # noqa: E402
 from apps.tenancy.services import provision_center  # noqa: E402
 from apps.users.models import User  # noqa: E402
 
+
 # Dev storage bootstrap (D2-E-8): expire abandoned tmp uploads, allow browser PUT.
-_TMP_LIFECYCLE = {
-    "Rules": [
-        {
-            "ID": "expire-tmp-uploads",
-            "Filter": {"Prefix": "tmp/"},
-            "Status": "Enabled",
-            "Expiration": {"Days": 7},
-        }
-    ]
-}
+def _tmp_lifecycle_config() -> dict:
+    """One expire-tmp rule per Center schema, matching the schema-first key
+    layout (`{schema}/tmp/...`, see services.request_upload). A bare `tmp/`
+    prefix never matched the real keys, so abandoned/rejected tmp blobs never
+    expired. Idempotent: re-running rebuilds the same rule set from the current
+    Center list. A new Center created after bootstrap needs a re-run (or the
+    per-schema sweep task) to be covered — acceptable for dev seeding."""
+    schemas = sorted(Center.objects.values_list("schema_name", flat=True))
+    return {
+        "Rules": [
+            {
+                "ID": f"expire-tmp-uploads-{schema}",
+                "Filter": {"Prefix": f"{schema}/tmp/"},
+                "Status": "Enabled",
+                "Expiration": {"Days": 7},
+            }
+            for schema in schemas
+        ]
+    }
+
+
 _DEV_CORS = {
     "CORSRules": [
         {
@@ -45,13 +57,14 @@ _DEV_CORS = {
 
 
 def bootstrap_dev_storage(client=None, *, bucket: str | None = None) -> bool:
-    """Create the dev bucket + tmp/ lifecycle + CORS if absent. Idempotent (a
-    re-run is a no-op); returns False (with a warning) if storage is unreachable
-    so `seed_dev` still succeeds without a running MinIO.
+    """Create the dev bucket + per-schema tmp lifecycle + CORS if absent.
+    Idempotent (a re-run is a no-op); returns False (with a warning) if storage
+    is unreachable so `seed_dev` still succeeds without a running MinIO.
 
-    NOTE: upload keys are schema-first (`{schema}/tmp/...`), so the `tmp/` prefix
-    rule is a placeholder for the live cleanup; the validate task deletes the tmp
-    object on the happy path. A per-schema sweep is future work.
+    Upload keys are schema-first (`{schema}/tmp/...`), so the lifecycle config
+    carries one expire-tmp rule per Center schema (see `_tmp_lifecycle_config`);
+    the validate task also deletes the tmp object on both the happy and reject
+    paths. A per-schema sweep task is the future hardening for crashed validates.
     """
     from typing import Any, cast
 
@@ -71,7 +84,9 @@ def bootstrap_dev_storage(client=None, *, bucket: str | None = None) -> bool:
         if bucket not in names:
             client.create_bucket(Bucket=bucket)
             print(f"created bucket {bucket}")
-        client.put_bucket_lifecycle_configuration(Bucket=bucket, LifecycleConfiguration=_TMP_LIFECYCLE)
+        client.put_bucket_lifecycle_configuration(
+            Bucket=bucket, LifecycleConfiguration=_tmp_lifecycle_config()
+        )
         client.put_bucket_cors(Bucket=bucket, CORSConfiguration=_DEV_CORS)
         print(f"storage bootstrap ok: bucket {bucket} (+ tmp lifecycle, CORS)")
         return True

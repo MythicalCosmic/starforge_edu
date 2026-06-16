@@ -8,7 +8,7 @@ from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 
 from apps.academics import selectors, services
-from apps.academics.models import Exam, Subject
+from apps.academics.models import Subject
 from apps.academics.serializers import (
     CsvImportSerializer,
     ExamResultSerializer,
@@ -42,7 +42,6 @@ class SubjectViewSet(TenantSafeModelViewSet):
 
 
 class ExamViewSet(TenantSafeModelViewSet):
-    queryset = Exam.objects.select_related("subject", "cohort", "term")
     serializer_class = ExamSerializer
     resource = "academics"
     required_perms = {
@@ -56,6 +55,12 @@ class ExamViewSet(TenantSafeModelViewSet):
     }
     filterset_fields = ("subject", "cohort", "term", "type", "is_published")
     ordering_fields = ("exam_date",)
+
+    def get_queryset(self):
+        # Cohort-scoped: a TEACHER only reaches exams of cohorts they teach, so
+        # list/retrieve/update AND the results/import_csv/publish actions (all via
+        # self.get_object()) 404 for out-of-cohort exams. Staff/superuser see all.
+        return selectors.scoped_exams(user=self.request.user, roles=get_user_roles(self.request))
 
     @extend_schema(methods=["GET"], responses=ExamResultSerializer(many=True), tags=["academics"])
     @extend_schema(
@@ -200,7 +205,7 @@ class HonorRollView(TenantSafeAPIView):
     def get(self, request):
         _assert_report_access(request)
         term_id = _require_int(request, "term")
-        grades = selectors.honor_roll(term_id=term_id)
+        grades = selectors.honor_roll(term_id=term_id, user=request.user, roles=get_user_roles(request))
         return Response(GradeSerializer(grades, many=True).data)
 
 
@@ -217,7 +222,9 @@ class WarningsView(TenantSafeAPIView):
     def get(self, request):
         _assert_report_access(request)
         term_id = _require_int(request, "term")
-        grades = selectors.academic_warnings(term_id=term_id)
+        grades = selectors.academic_warnings(
+            term_id=term_id, user=request.user, roles=get_user_roles(request)
+        )
         return Response(GradeSerializer(grades, many=True).data)
 
 

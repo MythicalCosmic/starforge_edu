@@ -32,8 +32,10 @@ class AttendanceRecordSerializer(serializers.ModelSerializer):
 
 
 class AttendanceMarkEntrySerializer(serializers.Serializer):
-    """One row of the `mark` payload. `status` may be overridden to `late` by the
-    service when `arrived_at` exceeds the late threshold."""
+    """One row of the `mark` payload. When `status` is `present`/`late`, the
+    service recomputes present-vs-late from `arrived_at` (over the late threshold
+    → `late`). An explicit `excused`/`absent` is stored verbatim — `arrived_at`
+    never overrides it."""
 
     student = serializers.PrimaryKeyRelatedField(queryset=StudentProfile.objects.all())
     status = serializers.ChoiceField(choices=AttendanceRecord.Status.choices)

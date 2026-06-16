@@ -14,7 +14,7 @@ from django_tenants.utils import schema_context
 from apps.cohorts.tests.factories import CohortFactory
 from apps.org.models import BranchHoliday
 from apps.org.tests.factories import BranchFactory, RoomFactory
-from apps.schedule import services
+from apps.schedule import selectors, services
 from apps.schedule.models import Lesson
 from apps.schedule.tests.factories import TermFactory
 from apps.teachers.tests.factories import TeacherProfileFactory
@@ -128,7 +128,8 @@ def test_conflict_overlap_raises_409(tenant_a, dimension):
         with pytest.raises(ConflictException) as exc:
             _make_rule(other, rrule="FREQ=WEEKLY;BYDAY=MO", start=date(2026, 7, 6), end=date(2026, 7, 6))
         assert exc.value.code == "schedule_conflict"
-        assert dimension in (exc.value.fields or {})["conflicts"]
+        # D2-A-3: conflicting ids sit directly under error.fields[dimension].
+        assert dimension in (exc.value.fields or {})
 
 
 def test_adjacent_lessons_allowed(tenant_a):
@@ -205,6 +206,194 @@ def test_invalid_rrule_rejected(tenant_a):
         assert exc.value.code == "invalid_rrule"
 
 
+# --- role scoping (D2-A-6 teacher, multi-cohort student/parent) ---
+
+
+def _make_one_lesson(*, ctx, title, start=None):
+    start = start or (timezone.now() + timedelta(days=1))
+    return Lesson.objects.create(
+        term=ctx["term"],
+        cohort=ctx["cohort"],
+        teacher=ctx["teacher"],
+        room=ctx["room"],
+        title=title,
+        starts_at=start,
+        ends_at=start + timedelta(hours=1),
+    )
+
+
+def test_teacher_ical_feed_excludes_other_teachers_lesson(tenant_a, user_in):
+    """D2-A-6: a teacher's personal feed shows only their own taught lessons,
+    never another teacher's — the existing feed test only used a director."""
+    teacher_a_user = user_in(tenant_a, roles=["teacher"])
+    teacher_b_user = user_in(tenant_a, roles=["teacher"])
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        prof_a = TeacherProfileFactory(user=teacher_a_user, branch=branch)
+        prof_b = TeacherProfileFactory(user=teacher_b_user, branch=branch)
+        term = TermFactory()
+        ctx_a = {"term": term, "cohort": CohortFactory(branch=branch), "teacher": prof_a, "room": None}
+        ctx_b = {"term": term, "cohort": CohortFactory(branch=branch), "teacher": prof_b, "room": None}
+        lesson_a = _make_one_lesson(ctx=ctx_a, title="A-taught")
+        lesson_b = _make_one_lesson(ctx=ctx_b, title="B-taught")
+
+        feed_ids = set(
+            services.lessons_for_token(services.ical_token_for(teacher_a_user)).values_list("id", flat=True)
+        )
+        assert lesson_a.id in feed_ids
+        assert lesson_b.id not in feed_ids
+
+
+def test_student_sees_lessons_from_both_active_cohorts(tenant_a, user_in):
+    """A multi-cohort student (active membership in A and B via the enroll
+    service) must see lessons from BOTH cohorts — the schedule lane now scopes
+    via active CohortMembership like attendance/assignments/content."""
+    from apps.cohorts.services import enroll_student_in_cohort
+    from apps.students.tests.factories import StudentProfileFactory
+
+    student_user = user_in(tenant_a, roles=["student"])
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        term = TermFactory()
+        student: Any = StudentProfileFactory(user=student_user, branch=branch)
+        cohort_a: Any = CohortFactory(branch=branch)
+        cohort_b: Any = CohortFactory(branch=branch)
+        enroll_student_in_cohort(cohort=cohort_a, student=student)
+        enroll_student_in_cohort(cohort=cohort_b, student=student)
+        # Distinct teachers per cohort so the two concurrent lessons don't trip the
+        # teacher-overlap exclusion constraint.
+        ctx_a = {
+            "term": term,
+            "cohort": cohort_a,
+            "teacher": TeacherProfileFactory(branch=branch),
+            "room": None,
+        }
+        ctx_b = {
+            "term": term,
+            "cohort": cohort_b,
+            "teacher": TeacherProfileFactory(branch=branch),
+            "room": None,
+        }
+        lesson_a = _make_one_lesson(ctx=ctx_a, title="cohort-A")
+        lesson_b = _make_one_lesson(ctx=ctx_b, title="cohort-B")
+
+        visible = set(selectors.scoped_lessons(user=student_user).values_list("id", flat=True))
+        assert {lesson_a.id, lesson_b.id} <= visible
+
+
+def test_parent_sees_childs_active_cohort_lessons(tenant_a, user_in):
+    """Parent variant of the membership-join scoping: a parent sees the lessons
+    of their child's active cohorts."""
+    from apps.cohorts.services import enroll_student_in_cohort
+    from apps.parents.tests.factories import GuardianFactory, ParentProfileFactory
+    from apps.students.tests.factories import StudentProfileFactory
+
+    parent_user = user_in(tenant_a, roles=["parent"])
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        term = TermFactory()
+        parent = ParentProfileFactory(user=parent_user)
+        student: Any = StudentProfileFactory(branch=branch)
+        GuardianFactory(parent=parent, student=student)
+        cohort: Any = CohortFactory(branch=branch)
+        other_cohort: Any = CohortFactory(branch=branch)
+        enroll_student_in_cohort(cohort=cohort, student=student)
+        # Distinct teachers so the two concurrent lessons don't trip the
+        # teacher-overlap exclusion constraint.
+        ctx = {"term": term, "cohort": cohort, "teacher": TeacherProfileFactory(branch=branch), "room": None}
+        ctx_other = {
+            "term": term,
+            "cohort": other_cohort,
+            "teacher": TeacherProfileFactory(branch=branch),
+            "room": None,
+        }
+        mine = _make_one_lesson(ctx=ctx, title="child-cohort")
+        not_mine = _make_one_lesson(ctx=ctx_other, title="unrelated")
+
+        visible = set(selectors.scoped_lessons(user=parent_user).values_list("id", flat=True))
+        assert mine.id in visible
+        assert not_mine.id not in visible
+
+
+# --- one-off op guards ---
+
+
+def test_move_rejects_non_scheduled_lesson(tenant_a):
+    with schema_context(tenant_a.schema_name):
+        ctx = _setup()
+        rule = _make_rule(ctx)
+        lesson = rule.lessons.order_by("starts_at").first()
+        services.cancel_occurrence(lesson, reason="snow day")
+        lesson.refresh_from_db()
+        with pytest.raises(ConflictException) as exc:
+            services.move_occurrence(lesson, starts_at=_aware(2026, 8, 3, 9), ends_at=_aware(2026, 8, 3, 10))
+        assert exc.value.code == "lesson_not_scheduled"
+
+
+def test_cancel_is_idempotent_no_re_emit(tenant_a, django_capture_on_commit_callbacks):
+    received: list[int] = []
+
+    def _recv(sender, lesson_id, **kw):
+        received.append(lesson_id)
+
+    services.lesson_cancelled.connect(_recv)
+    try:
+        with schema_context(tenant_a.schema_name):
+            ctx = _setup()
+            rule = _make_rule(ctx)
+            lesson = rule.lessons.order_by("starts_at").first()
+            with django_capture_on_commit_callbacks(execute=True):
+                services.cancel_occurrence(lesson, reason="first")
+            lesson.refresh_from_db()
+            assert lesson.status == Lesson.Status.CANCELLED
+            assert lesson.cancel_reason == "first"
+            # Second cancel: short-circuits — no re-save (reason unchanged) and no
+            # second on_commit emit.
+            with django_capture_on_commit_callbacks(execute=True):
+                services.cancel_occurrence(lesson, reason="second")
+            lesson.refresh_from_db()
+            assert lesson.cancel_reason == "first"
+        assert received == [lesson.pk]
+    finally:
+        services.lesson_cancelled.disconnect(_recv)
+
+
+# --- iCal token TTL + token_version ---
+
+
+def test_ical_token_invalid_after_token_version_bump(tenant_a, user_in):
+    from core.exceptions import AuthenticationException
+
+    user = user_in(tenant_a, roles=["director"])
+    with schema_context(tenant_a.schema_name):
+        ctx = _setup()
+        _make_rule(ctx)
+        token = services.ical_token_for(user)
+        # Works before the bump.
+        assert services.lessons_for_token(token) is not None
+        # Logout-all / password-change bumps token_version → outstanding feed dies.
+        user.token_version += 1
+        user.save(update_fields=["token_version"])
+        with pytest.raises(AuthenticationException) as exc:
+            services.lessons_for_token(token)
+        assert exc.value.code == "authentication_failed"
+
+
+def test_ical_token_expired_rejected(tenant_a, user_in, monkeypatch):
+    from core.exceptions import AuthenticationException
+
+    user = user_in(tenant_a, roles=["director"])
+    with schema_context(tenant_a.schema_name):
+        ctx = _setup()
+        _make_rule(ctx)
+        token = services.ical_token_for(user)
+        # Force an expired window so signing.loads(max_age=...) rejects the token.
+        monkeypatch.setattr(services, "ICAL_TOKEN_MAX_AGE", timedelta(seconds=-1))
+        with pytest.raises(AuthenticationException) as exc:
+            services.lessons_for_token(token)
+        assert exc.value.code == "authentication_failed"
+
+
 # --- API surface ---
 
 
@@ -216,7 +405,19 @@ def test_rules_create_requires_write(tenant_a, as_role):
     assert resp.status_code == 403
 
 
-def test_reminder_task_idempotent_and_schema_scoped(tenant_a):
+def _make_due_lesson(ctx, *, title="Soon"):
+    now = timezone.now()
+    return Lesson.objects.create(
+        term=ctx["term"],
+        cohort=ctx["cohort"],
+        teacher=ctx["teacher"],
+        title=title,
+        starts_at=now + timedelta(minutes=30),
+        ends_at=now + timedelta(minutes=90),
+    )
+
+
+def test_reminder_task_idempotent_and_schema_scoped(tenant_a, tenant_b):
     from apps.schedule.services import emit_due_reminders
     from apps.schedule.signals import lesson_reminder_due
 
@@ -225,19 +426,16 @@ def test_reminder_task_idempotent_and_schema_scoped(tenant_a):
     def _recv(sender, lesson_id, **kw):
         received.append(lesson_id)
 
+    # A due lesson in tenant_b that must stay untouched when the task runs under
+    # tenant_a — emit_due_reminders is schema-scoped via the active connection.
+    with schema_context(tenant_b.schema_name):
+        b_lesson = _make_due_lesson(_setup(), title="OtherTenant")
+
     lesson_reminder_due.connect(_recv)
     try:
         with schema_context(tenant_a.schema_name):
             ctx = _setup()
-            now = timezone.now()
-            lesson = Lesson.objects.create(
-                term=ctx["term"],
-                cohort=ctx["cohort"],
-                teacher=ctx["teacher"],
-                title="Soon",
-                starts_at=now + timedelta(minutes=30),
-                ends_at=now + timedelta(minutes=90),
-            )
+            lesson = _make_due_lesson(ctx)
             assert emit_due_reminders() == 1
             lesson.refresh_from_db()
             assert lesson.reminder_sent_at is not None
@@ -245,6 +443,12 @@ def test_reminder_task_idempotent_and_schema_scoped(tenant_a):
         assert received == [lesson.pk]
     finally:
         lesson_reminder_due.disconnect(_recv)
+
+    # tenant_b's lesson was never seen or stamped by the tenant_a run.
+    assert b_lesson.pk not in received
+    with schema_context(tenant_b.schema_name):
+        b_lesson.refresh_from_db()
+        assert b_lesson.reminder_sent_at is None
 
 
 def test_archive_ended_term_lessons(tenant_a):

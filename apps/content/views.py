@@ -159,7 +159,7 @@ class ContentUploadUrlView(TenantSafeAPIView):
         tags=["content"],
     )
     def post(self, request):
-        serializer = ContentUploadUrlSerializer(data=request.data)
+        serializer = ContentUploadUrlSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
         result = services.request_upload(

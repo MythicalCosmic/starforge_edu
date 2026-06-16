@@ -73,6 +73,15 @@ class Exam(models.Model):
 
 
 class ExamResult(models.Model):
+    """A per-(exam, student) raw score.
+
+    `graded_at` uses `auto_now`, so it tracks the LAST-MODIFIED time (it is reset
+    on every overwrite), not the original first-graded timestamp. Audit/transcript
+    consumers must treat it as "last edited", not "first entered" — the
+    `grade_changed` signal (services.record_results) carries the change event when
+    the original-entry moment matters.
+    """
+
     exam = models.ForeignKey(Exam, on_delete=models.CASCADE, related_name="results")
     student = models.ForeignKey(
         "students.StudentProfile", on_delete=models.PROTECT, related_name="exam_results"
@@ -82,7 +91,7 @@ class ExamResult(models.Model):
     graded_by = models.ForeignKey(
         "users.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
     )
-    graded_at = models.DateTimeField(auto_now=True)
+    graded_at = models.DateTimeField(auto_now=True)  # last-modified (auto_now), not first-graded
 
     class Meta:
         ordering = ("-graded_at",)

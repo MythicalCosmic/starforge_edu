@@ -189,6 +189,38 @@ def test_grade_changed_emitted_once_on_overwrite(tenant_a, django_capture_on_com
         grade_changed.disconnect(_recv)
 
 
+def test_grade_changed_not_emitted_on_identical_reentry(tenant_a, django_capture_on_commit_callbacks):
+    """Re-POSTing the SAME score is a no-op and must emit zero signals (no audit
+    churn for D3-D)."""
+    received: list[dict] = []
+
+    def _recv(sender, **kwargs):
+        received.append(kwargs)
+
+    grade_changed.connect(_recv)
+    try:
+        with schema_context(tenant_a.schema_name):
+            branch = BranchFactory()
+            exam: Any = ExamFactory(max_score=Decimal("100"))
+            student: Any = StudentProfileFactory(branch=branch)
+
+            with django_capture_on_commit_callbacks(execute=True):
+                services.record_results(
+                    exam=exam, rows=[{"student": student, "score": Decimal("70")}], actor=None
+                )
+            assert received == []  # first entry does NOT emit
+
+            # Re-enter the identical score → updated (was_created False) but no change.
+            with django_capture_on_commit_callbacks(execute=True):
+                result = services.record_results(
+                    exam=exam, rows=[{"student": student, "score": Decimal("70")}], actor=None
+                )
+            assert result["updated"] == 1  # update_or_create still touched the row
+            assert received == []  # ...but no grade_changed because score is unchanged
+    finally:
+        grade_changed.disconnect(_recv)
+
+
 # --------------------------------------------------------------------------- #
 # CSV import
 # --------------------------------------------------------------------------- #
@@ -354,6 +386,77 @@ def test_teacher_grade_read_allowed_matrix(tenant_a, as_role):
 
 
 # --------------------------------------------------------------------------- #
+# exam write-path cohort scoping (D2-C-? — teacher can only touch own cohort)
+# --------------------------------------------------------------------------- #
+
+
+def test_exam_results_write_path_teacher_cohort_scoped(tenant_a, user_in, as_user):
+    """A teacher of cohort A cannot reach cohort B's exam: GET/POST on the
+    results / import-csv / publish actions 404 (via get_object()), while the
+    owning-cohort teacher and a director succeed."""
+    owner_teacher_user = user_in(tenant_a, roles=["teacher"])
+    other_teacher_user = user_in(tenant_a, roles=["teacher"])
+    director = user_in(tenant_a, roles=["director"])
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        owner_profile = TeacherProfileFactory(user=owner_teacher_user, branch=branch)
+        other_profile = TeacherProfileFactory(user=other_teacher_user, branch=branch)
+        owned_cohort = CohortFactory(branch=branch, name="Owned", primary_teacher=owner_profile)
+        # The other teacher teaches an UNRELATED cohort (so they hold the role but
+        # not access to the exam under test).
+        CohortFactory(branch=branch, name="Other", primary_teacher=other_profile)
+
+        subject = SubjectFactory()
+        term: Any = TermFactory()
+        exam: Any = ExamFactory(subject=subject, cohort=owned_cohort, term=term, max_score=Decimal("100"))
+        student: Any = StudentProfileFactory(branch=branch)
+        CohortMembershipFactory(cohort=owned_cohort, student=student)
+        exam_id, student_id = exam.id, student.id
+
+    base = f"/api/v1/academics/exams/{exam_id}"
+    rows = [{"student": student_id, "score": "85"}]
+
+    # --- out-of-cohort teacher: 404 on every write action ---
+    other = as_user(tenant_a, other_teacher_user)
+    assert other.get(f"{base}/results/").status_code == 404
+    assert other.post(f"{base}/results/", rows, format="json").status_code == 404
+    csv_payload = io.BytesIO(b"student_id,score\nX,85\n")
+    csv_payload.name = "r.csv"
+    assert (
+        other.post(f"{base}/results/import-csv/", {"file": csv_payload}, format="multipart").status_code
+        == 404
+    )
+    assert other.post(f"{base}/publish/").status_code == 404
+
+    # --- owning-cohort teacher: results action succeeds ---
+    owner = as_user(tenant_a, owner_teacher_user)
+    assert owner.get(f"{base}/results/").status_code == 200
+    assert owner.post(f"{base}/results/", rows, format="json").status_code == 200
+
+    # --- director (staff): tenant-wide, publish succeeds ---
+    director_client = as_user(tenant_a, director)
+    assert director_client.get(f"{base}/results/").status_code == 200
+    assert director_client.post(f"{base}/publish/").status_code == 200
+
+
+def test_exam_list_teacher_cohort_scoped(tenant_a, user_in, as_user):
+    """List is scoped too: a teacher sees only exams of cohorts they teach."""
+    teacher_user = user_in(tenant_a, roles=["teacher"])
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        profile = TeacherProfileFactory(user=teacher_user, branch=branch)
+        mine = CohortFactory(branch=branch, name="Mine", primary_teacher=profile)
+        theirs = CohortFactory(branch=branch, name="Theirs")
+        term: Any = TermFactory()
+        my_exam: Any = ExamFactory(cohort=mine, term=term)
+        ExamFactory(cohort=theirs, term=term)
+        my_exam_id = my_exam.id
+
+    body = as_user(tenant_a, teacher_user).get("/api/v1/academics/exams/").json()
+    assert {e["id"] for e in body["results"]} == {my_exam_id}
+
+
+# --------------------------------------------------------------------------- #
 # honor roll knob
 # --------------------------------------------------------------------------- #
 
@@ -394,6 +497,59 @@ def test_honor_roll_endpoint_staff_only(tenant_a, user_in, as_user):
     assert student_resp.status_code == 403
     director_resp = as_user(tenant_a, director).get(f"/api/v1/academics/honor-roll/?term={term_id}")
     assert director_resp.status_code == 200
+
+
+def test_honor_roll_and_warnings_teacher_cohort_scoped(tenant_a, user_in, as_user):
+    """Honor-roll / warnings mirror grade scoping for TEACHER: a teacher sees only
+    students in cohorts they teach; a director stays tenant-wide."""
+    teacher_user = user_in(tenant_a, roles=["teacher"])
+    director = user_in(tenant_a, roles=["director"])
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        profile = TeacherProfileFactory(user=teacher_user, branch=branch)
+        my_cohort = CohortFactory(branch=branch, name="Mine", primary_teacher=profile)
+        other_cohort = CohortFactory(branch=branch, name="Other")
+        subject = SubjectFactory()
+        term: Any = TermFactory()
+
+        # Honor-roll candidate (>=90) in MY cohort, and one in another cohort.
+        mine = StudentProfileFactory(branch=branch)
+        CohortMembershipFactory(cohort=my_cohort, student=mine)
+        mine_grade: Any = GradeFactory(
+            student=mine, subject=subject, term=term, value_raw=Decimal("95"), is_published=True
+        )
+        theirs = StudentProfileFactory(branch=branch)
+        CohortMembershipFactory(cohort=other_cohort, student=theirs)
+        GradeFactory(student=theirs, subject=subject, term=term, value_raw=Decimal("96"), is_published=True)
+
+        # Warning candidates (<=60), one per cohort.
+        mine_warn = StudentProfileFactory(branch=branch)
+        CohortMembershipFactory(cohort=my_cohort, student=mine_warn)
+        mine_warn_grade: Any = GradeFactory(
+            student=mine_warn, subject=subject, term=term, value_raw=Decimal("55"), is_published=True
+        )
+        theirs_warn = StudentProfileFactory(branch=branch)
+        CohortMembershipFactory(cohort=other_cohort, student=theirs_warn)
+        GradeFactory(
+            student=theirs_warn, subject=subject, term=term, value_raw=Decimal("50"), is_published=True
+        )
+
+        term_id = term.id
+        mine_grade_id, mine_warn_id = mine_grade.id, mine_warn_grade.id
+
+    teacher = as_user(tenant_a, teacher_user)
+    director_client = as_user(tenant_a, director)
+
+    honor = teacher.get(f"/api/v1/academics/honor-roll/?term={term_id}").json()
+    assert {g["id"] for g in honor} == {mine_grade_id}  # teacher: own cohort only
+    warn = teacher.get(f"/api/v1/academics/warnings/?term={term_id}").json()
+    assert {g["id"] for g in warn} == {mine_warn_id}
+
+    # Director sees the whole tenant (both cohorts).
+    director_honor = director_client.get(f"/api/v1/academics/honor-roll/?term={term_id}").json()
+    assert len(director_honor) == 2
+    director_warn = director_client.get(f"/api/v1/academics/warnings/?term={term_id}").json()
+    assert len(director_warn) == 2
 
 
 # --------------------------------------------------------------------------- #

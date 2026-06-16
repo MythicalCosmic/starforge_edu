@@ -52,7 +52,8 @@ def _emit_grade_changed(result: ExamResult, old_score, new_score, actor, schema:
 def record_results(*, exam: Exam, rows: list[dict], actor=None) -> dict:
     """Upsert `[{student, score, note?}]` for `exam`. Scores outside
     `0..max_score` abort the whole batch with **422**. Overwriting an existing
-    result emits `grade_changed` exactly once (never on first entry)."""
+    result with a DIFFERENT score emits `grade_changed` exactly once (never on
+    first entry, and never when the score is unchanged)."""
     field_errors: dict[str, list[str]] = {}
     for index, row in enumerate(rows):
         score = row["score"]
@@ -78,7 +79,9 @@ def record_results(*, exam: Exam, rows: list[dict], actor=None) -> dict:
         created += int(was_created)
         updated += int(not was_created)
         results.append(result)
-        if not was_created:
+        # Only emit on an actual change — re-entering an identical score is a
+        # no-op and must not produce audit churn (D3-D consumes grade_changed).
+        if not was_created and old_score != result.score:
             _emit_grade_changed(result, old_score, result.score, actor, schema)
     return {"created": created, "updated": updated, "results": results}
 

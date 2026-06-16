@@ -18,6 +18,9 @@ from core.exceptions import ConflictException, ValidationException
 from core.utils import current_schema
 
 ICAL_SALT = "schedule.ical"
+# A leaked feed URL grants the user's schedule until the token expires; bound to
+# token_version so password-change / logout-all also revokes outstanding feeds.
+ICAL_TOKEN_MAX_AGE = dt.timedelta(days=30)
 
 
 # ---------------------------------------------------------------------------
@@ -106,9 +109,7 @@ def materialize_rule(rule: RecurrenceRule) -> list[Lesson]:
             exclude_lesson_ids=[lf.id for lf in kept],
         )
         if conflicts:
-            raise ConflictException(
-                _("Schedule conflict."), code="schedule_conflict", fields={"conflicts": conflicts}
-            )
+            raise ConflictException(_("Schedule conflict."), code="schedule_conflict", fields=conflicts)
         to_create.append(
             Lesson(
                 rule=rule,
@@ -167,6 +168,10 @@ def update_rule(rule: RecurrenceRule, **data) -> RecurrenceRule:
 
 @transaction.atomic
 def cancel_occurrence(lesson: Lesson, *, reason: str = "", actor=None) -> Lesson:
+    # Idempotent: a re-cancel (client retry / double-click) must not re-save or
+    # re-emit lesson_cancelled, else D3-C fires duplicate cancellation notices.
+    if lesson.status == Lesson.Status.CANCELLED:
+        return lesson
     lesson.status = Lesson.Status.CANCELLED
     lesson.cancel_reason = reason
     lesson.save(update_fields=["status", "cancel_reason", "updated_at"])
@@ -181,6 +186,11 @@ def cancel_occurrence(lesson: Lesson, *, reason: str = "", actor=None) -> Lesson
 
 @transaction.atomic
 def move_occurrence(lesson: Lesson, *, starts_at, ends_at, actor=None) -> Lesson:
+    # Only a scheduled lesson can be moved: a cancelled/archived lesson neither
+    # conflicts nor blocks others (constraints are status='scheduled'-scoped), so
+    # moving it would be a silent no-op state change that still detaches + emits.
+    if lesson.status != Lesson.Status.SCHEDULED:
+        raise ConflictException(_("Only a scheduled lesson can be moved."), code="lesson_not_scheduled")
     if ends_at <= starts_at:
         raise ValidationException(_("ends_at must be after starts_at."), code="invalid_times")
     conflicts = check_conflicts(
@@ -192,9 +202,7 @@ def move_occurrence(lesson: Lesson, *, starts_at, ends_at, actor=None) -> Lesson
         exclude_lesson_ids=[lesson.id],
     )
     if conflicts:
-        raise ConflictException(
-            _("Schedule conflict."), code="schedule_conflict", fields={"conflicts": conflicts}
-        )
+        raise ConflictException(_("Schedule conflict."), code="schedule_conflict", fields=conflicts)
     old_start = lesson.starts_at
     lesson.starts_at = starts_at
     lesson.ends_at = ends_at
@@ -233,9 +241,7 @@ def bulk_reschedule(rule: RecurrenceRule, *, shift_minutes: int, actor=None) -> 
             exclude_lesson_ids=moved_ids,
         )
         if conflicts:
-            raise ConflictException(
-                _("Schedule conflict."), code="schedule_conflict", fields={"conflicts": conflicts}
-            )
+            raise ConflictException(_("Schedule conflict."), code="schedule_conflict", fields=conflicts)
         lesson.starts_at = new_start
         lesson.ends_at = new_end
     for lesson in lessons:
@@ -249,7 +255,9 @@ def bulk_reschedule(rule: RecurrenceRule, *, shift_minutes: int, actor=None) -> 
 
 
 def ical_token_for(user) -> str:
-    return signing.dumps({"user_id": user.pk, "schema": current_schema()}, salt=ICAL_SALT)
+    return signing.dumps(
+        {"user_id": user.pk, "schema": current_schema(), "tv": user.token_version}, salt=ICAL_SALT
+    )
 
 
 def lessons_for_token(token: str):
@@ -260,13 +268,17 @@ def lessons_for_token(token: str):
     from core.exceptions import AuthenticationException
 
     try:
-        data = signing.loads(token, salt=ICAL_SALT)
+        data = signing.loads(token, salt=ICAL_SALT, max_age=ICAL_TOKEN_MAX_AGE)
     except signing.BadSignature as exc:
+        # SignatureExpired is a BadSignature subclass — expired tokens land here too.
         raise AuthenticationException(_("Invalid feed token."), code="authentication_failed") from exc
     if data.get("schema") != current_schema():
         raise AuthenticationException(_("This feed belongs to a different center."), code="tenant_mismatch")
     user = User.objects.filter(pk=data.get("user_id")).first()
     if user is None:
+        raise AuthenticationException(_("Invalid feed token."), code="authentication_failed")
+    # token_version mismatch ⇒ password-change / logout-all revoked this feed.
+    if data.get("tv") != user.token_version:
         raise AuthenticationException(_("Invalid feed token."), code="authentication_failed")
     try:
         return scoped_lessons(user=user).order_by("starts_at")

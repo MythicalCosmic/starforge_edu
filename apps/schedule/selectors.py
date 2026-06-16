@@ -9,7 +9,7 @@ from django.db.models import QuerySet
 from apps.schedule.models import Lesson
 from core.permissions import Role
 
-STAFF_ROLES = {Role.DIRECTOR, Role.HEAD_OF_DEPT, Role.REGISTRAR, Role.IT, Role.TEACHER}
+STAFF_ROLES = {Role.DIRECTOR, Role.HEAD_OF_DEPT, Role.REGISTRAR, Role.IT}
 
 
 def check_conflicts(
@@ -56,8 +56,16 @@ def scoped_lessons(*, user, roles: set[str] | None = None) -> QuerySet[Lesson]:
         roles = {m.role for m in user.role_memberships.filter(revoked_at__isnull=True)}
     if roles & STAFF_ROLES:
         return qs
-    if Role.PARENT in roles:  # children's cohort lessons
-        return qs.filter(cohort__current_students__guardians__parent__user=user).distinct()
-    if Role.STUDENT in roles:  # own cohort lessons
-        return qs.filter(cohort__current_students__user=user).distinct()
+    if Role.TEACHER in roles:  # D2-A-6: own taught lessons only
+        return qs.filter(teacher__user=user)
+    if Role.PARENT in roles:  # children's active-cohort lessons
+        return qs.filter(
+            cohort__memberships__student__guardians__parent__user=user,
+            cohort__memberships__end_date__isnull=True,
+        ).distinct()
+    if Role.STUDENT in roles:  # own active-cohort lessons (may be multiple cohorts)
+        return qs.filter(
+            cohort__memberships__student__user=user,
+            cohort__memberships__end_date__isnull=True,
+        ).distinct()
     return qs.none()

@@ -56,14 +56,23 @@ def _assert_within_correction_window(lesson: Lesson, actor, roles: set[str], set
 
 
 def _resolve_status(entry: dict, lesson: Lesson, settings) -> str:
-    """A supplied `arrived_at` decides present-vs-late: arriving more than
-    `late_threshold_minutes` after the lesson start is `late`, exactly at the
-    threshold is still `present` (boundary inclusive of on-time)."""
+    """Resolve the stored status for one entry.
+
+    The present-vs-late computation only applies when the teacher submitted
+    `present` or `late`: a supplied `arrived_at` then decides present-vs-late —
+    arriving more than `late_threshold_minutes` after the lesson start is `late`,
+    exactly at the threshold is still `present` (boundary inclusive of on-time).
+    An explicit `excused`/`absent` is preserved verbatim and never clobbered by
+    `arrived_at`."""
     arrived_at = entry.get("arrived_at")
-    if arrived_at is not None:
+    submitted = entry["status"]
+    if arrived_at is not None and submitted in (
+        AttendanceRecord.Status.PRESENT,
+        AttendanceRecord.Status.LATE,
+    ):
         cutoff = lesson.starts_at + dt.timedelta(minutes=settings.late_threshold_minutes)
         return AttendanceRecord.Status.LATE if arrived_at > cutoff else AttendanceRecord.Status.PRESENT
-    return entry["status"]
+    return submitted
 
 
 def _emit_absent(record: AttendanceRecord, *, auto: bool, schema: str) -> None:

@@ -150,6 +150,20 @@ def _filename_of(s3_key: str) -> str:
     return s3_key.rsplit("/", 1)[-1]
 
 
+def _ext_of(filename: str) -> str:
+    return filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+
+
+def _sniff_matches(*, sniffed: str, declared: str, ext: str) -> bool:
+    """The libmagic sniff must match the exact MIME(s) allowed for the file's
+    extension (D2-E-4); fall back to the declared family for extensions not in
+    `_EXT_MIME` (no exact map to enforce)."""
+    expected = _EXT_MIME.get(ext)
+    if expected is not None:
+        return sniffed in expected
+    return sniffed.split("/")[0] == declared.split("/")[0]
+
+
 def validate_uploaded_file(file_id: int) -> str:
     """Task body: sniff the uploaded object, reject on mismatch/oversize, else
     move tmp→content and mark clean (enqueuing a thumbnail for images).
@@ -165,11 +179,22 @@ def validate_uploaded_file(file_id: int) -> str:
         return _reject(file, "Uploaded object exceeds the size limit.")
     file.size_bytes = actual_size
 
-    sniffed = _sniff_mime(get_object_range(file.s3_key, start=0, end=8191))
-    if sniffed.split("/")[0] != file.content_type.split("/")[0]:
-        return _reject(file, f"Content sniff '{sniffed}' does not match declared '{file.content_type}'.")
+    # Re-validate the quota at the authoritative chokepoint: `file` is still
+    # PENDING so storage_used_bytes() (CLEAN only) excludes it, making
+    # `current_clean + actual_size` the correct prospective total. This closes
+    # the sequential-batch / concurrent bypass that request_upload alone misses.
+    if settings.storage_quota_gb is not None:
+        from apps.content.selectors import storage_used_bytes
+
+        quota_bytes = settings.storage_quota_gb * 1024 * 1024 * 1024
+        if storage_used_bytes() + actual_size > quota_bytes:
+            return _reject(file, "Uploaded object would exceed the storage quota.")
 
     filename = _filename_of(file.s3_key)
+    sniffed = _sniff_mime(get_object_range(file.s3_key, start=0, end=8191))
+    if not _sniff_matches(sniffed=sniffed, declared=file.content_type, ext=_ext_of(filename)):
+        return _reject(file, f"Content sniff '{sniffed}' does not match declared '{file.content_type}'.")
+
     final_key = f"{current_schema()}/content/{file.pk}/{filename}"
     copy_object(src_key=file.s3_key, dest_key=final_key)
     delete_object(file.s3_key)
@@ -188,6 +213,9 @@ def _reject(file: LessonFile, reason: str) -> str:
     file.status = LessonFile.Status.REJECTED
     file.reject_reason = reason[:255]
     file.save(update_fields=["status", "reject_reason", "size_bytes", "updated_at"])
+    # Mirror the happy path: drop the orphaned tmp object so rejected blobs do
+    # not accumulate in the shared bucket (the lifecycle rule is a placeholder).
+    delete_object(file.s3_key)
     return file.status
 
 

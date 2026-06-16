@@ -6,6 +6,7 @@ import django_filters
 from django.db.models import Q
 from django.http import StreamingHttpResponse
 from django.shortcuts import get_object_or_404
+from django.utils.dateparse import parse_datetime
 from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema
 from rest_framework.response import Response
 
@@ -127,8 +128,8 @@ class CohortDashboardView(TenantSafeAPIView):
         self._authorize(request, cohort_id)
         data = selectors.cohort_dashboard(
             cohort_id=cohort_id,
-            date_from=request.query_params.get("date_from") or None,
-            date_to=request.query_params.get("date_to") or None,
+            date_from=_parse_dt(request, "date_from"),
+            date_to=_parse_dt(request, "date_to"),
         )
         return Response(data)
 
@@ -216,3 +217,20 @@ def _require_int(request, name: str) -> int:
             code="invalid_query_param",
             fields={name: ["This query parameter is required."]},
         ) from exc
+
+
+def _parse_dt(request, name: str):
+    """Parse an optional `date_from`/`date_to` ISO datetime query param. Returns
+    `None` when absent; raises a 400 `ValidationException` on a malformed value so
+    a bad input surfaces as the TD-18 envelope instead of an ORM-level 500."""
+    raw = request.query_params.get(name)
+    if not raw:
+        return None
+    parsed = parse_datetime(raw)
+    if parsed is None:
+        raise ValidationException(
+            f"Query parameter '{name}' must be a valid ISO 8601 datetime.",
+            code="invalid_query_param",
+            fields={name: ["Enter a valid ISO 8601 datetime."]},
+        )
+    return parsed

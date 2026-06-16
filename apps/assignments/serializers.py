@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
 
 from apps.assignments.models import Assignment, Submission, SubmissionGrade
+from core.exceptions import UnprocessableEntity
 
 
 class AssignmentSerializer(serializers.ModelSerializer):
@@ -35,6 +37,26 @@ class AssignmentSerializer(serializers.ModelSerializer):
             if not isinstance(row["max_points"], int) or row["max_points"] < 0:
                 raise serializers.ValidationError("'max_points' must be a non-negative integer.")
         return rubric
+
+    def validate(self, attrs):
+        # Reject a rubric whose Σ max_points exceeds max_score at authoring time
+        # (create/update), not silently at grade time — otherwise every grading
+        # attempt would fail permanently with rubric_exceeds_max_score. The
+        # grade-time check is kept as a defence-in-depth backstop.
+        rubric = attrs.get("rubric", getattr(self.instance, "rubric", None)) or []
+        max_score = attrs.get("max_score", getattr(self.instance, "max_score", None))
+        if max_score is not None and rubric:
+            rubric_cap = sum(int(row.get("max_points", 0)) for row in rubric)
+            if rubric_cap > max_score:
+                # 422 (not 400) — the input is well-formed but the rubric cannot
+                # be acted on; mirrors the grade-time rubric_exceeds_max_score
+                # code so clients branch uniformly.
+                raise UnprocessableEntity(
+                    _("The rubric's total points exceed the assignment's max score."),
+                    code="rubric_exceeds_max_score",
+                    fields={"rubric": [f"Σ max_points {rubric_cap} > max_score {max_score}."]},
+                )
+        return attrs
 
 
 class SubmissionGradeSerializer(serializers.ModelSerializer):

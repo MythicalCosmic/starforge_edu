@@ -113,16 +113,20 @@ def _pending_file(folder, *, content_type="application/pdf", size=1000) -> Any:
     )
 
 
-def _stub_validate_s3(monkeypatch, *, sniff, copies):
+def _stub_validate_s3(monkeypatch, *, sniff, copies, content_length=1000, deletes=None):
     def _copy(*, src_key, dest_key):
         copies.append(dest_key)
         return dest_key
 
-    monkeypatch.setattr(services, "head_object", lambda key: {"ContentLength": 1000})
+    def _delete(key):
+        if deletes is not None:
+            deletes.append(key)
+
+    monkeypatch.setattr(services, "head_object", lambda key: {"ContentLength": content_length})
     monkeypatch.setattr(services, "get_object_range", lambda key, **kw: b"binarymagic")
     monkeypatch.setattr(services, "_sniff_mime", lambda buf: sniff)
     monkeypatch.setattr(services, "copy_object", _copy)
-    monkeypatch.setattr(services, "delete_object", lambda key: None)
+    monkeypatch.setattr(services, "delete_object", _delete)
 
 
 def test_magic_mismatch_rejected(tenant_a, monkeypatch):
@@ -159,6 +163,63 @@ def test_validate_task_idempotent(tenant_a, monkeypatch):
         services.validate_uploaded_file(file.id)
         services.validate_uploaded_file(file.id)  # already clean → short-circuit
         assert len(copies) == 1
+
+
+def test_reject_deletes_tmp_object(tenant_a, monkeypatch):
+    """Reject path mirrors the happy path: the orphaned tmp blob is deleted so
+    rejected uploads do not linger in the shared bucket (D2-E-8)."""
+    copies: list[str] = []
+    deletes: list[str] = []
+    _stub_validate_s3(monkeypatch, sniff="image/png", copies=copies, deletes=deletes)
+    with schema_context(tenant_a.schema_name):
+        file = _pending_file(FolderFactory(), content_type="application/pdf")
+        tmp_key = file.s3_key
+        result = services.validate_uploaded_file(file.id)
+        assert result == LessonFile.Status.REJECTED
+        assert copies == []  # nothing moved
+        assert deletes == [tmp_key]  # tmp object swept
+
+
+def test_sniff_must_match_exact_mime_not_just_family(tenant_a, monkeypatch):
+    """A PNG declared as image/jpeg (same family) is rejected: the sniff is
+    compared against the exact MIME set for the .jpg extension, not just the
+    top-level family (D2-E-4)."""
+    copies: list[str] = []
+    _stub_validate_s3(monkeypatch, sniff="image/png", copies=copies)
+    with schema_context(tenant_a.schema_name):
+        folder: Any = FolderFactory()
+        # filename ext is .jpeg (sniff/content_type say jpeg) but bytes sniff png.
+        file = LessonFile.objects.create(
+            folder=folder,
+            title="img",
+            s3_key="tenant_a/tmp/abc/photo.jpeg",
+            content_type="image/jpeg",
+            size_bytes=1000,
+            status=LessonFile.Status.PENDING,
+        )
+        result = services.validate_uploaded_file(file.id)
+        assert result == LessonFile.Status.REJECTED
+        file.refresh_from_db()
+        assert "does not match" in file.reject_reason
+        assert copies == []  # nothing moved
+
+
+def test_sniff_exact_match_passes(tenant_a, monkeypatch):
+    """The matching exact MIME (png bytes for a .png declared image/png) cleans."""
+    copies: list[str] = []
+    _stub_validate_s3(monkeypatch, sniff="image/png", copies=copies)
+    with schema_context(tenant_a.schema_name):
+        folder: Any = FolderFactory()
+        file = LessonFile.objects.create(
+            folder=folder,
+            title="img",
+            s3_key="tenant_a/tmp/abc/photo.png",
+            content_type="image/png",
+            size_bytes=1000,
+            status=LessonFile.Status.PENDING,
+        )
+        result = services.validate_uploaded_file(file.id)
+        assert result == LessonFile.Status.CLEAN
 
 
 # --------------------------------------------------------------------------- #
@@ -222,6 +283,12 @@ def test_counters_f_expression(tenant_a, user_in, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 
+def _file(lib) -> int:
+    folder = FolderFactory(library=lib)
+    created: Any = LessonFileFactory(folder=folder, status=LessonFile.Status.CLEAN)
+    return created.id
+
+
 def test_visibility_matrix_per_role(tenant_a, user_in):
     from apps.cohorts.tests.factories import CohortFactory, CohortMembershipFactory
     from apps.students.tests.factories import StudentProfileFactory
@@ -233,11 +300,6 @@ def test_visibility_matrix_per_role(tenant_a, user_in):
         cohort = CohortFactory(branch=branch)
         student = StudentProfileFactory(user=student_user, branch=branch)
         CohortMembershipFactory(cohort=cohort, student=student)
-
-        def _file(lib) -> int:
-            folder = FolderFactory(library=lib)
-            created: Any = LessonFileFactory(folder=folder, status=LessonFile.Status.CLEAN)
-            return created.id
 
         tenant_file = _file(ContentLibraryFactory(visibility="tenant"))
         cohort_file = _file(ContentLibraryFactory(visibility="cohort", cohort=cohort))
@@ -254,6 +316,68 @@ def test_visibility_matrix_per_role(tenant_a, user_in):
         assert cohort_file in visible
         assert dept_file not in visible  # student has no dept membership
         assert role_file not in visible  # student is not a teacher
+        assert other_cohort_file not in visible
+
+
+def test_visibility_positive_department_membership(tenant_a, user_in):
+    """A user with a DEPARTMENT RoleMembership sees a department-visibility
+    library (positive department_id__in branch), but not another department's."""
+    from apps.users.models import RoleMembership
+
+    user = user_in(tenant_a, roles=["teacher"])
+    with schema_context(tenant_a.schema_name):
+        branch: Any = BranchFactory()
+        my_dept: Any = DepartmentFactory(branch=branch)
+        other_dept: Any = DepartmentFactory(branch=branch)
+        RoleMembership.objects.create(user=user, branch=branch, department=my_dept, role="teacher")
+
+        my_dept_file = _file(ContentLibraryFactory(visibility="department", department=my_dept))
+        other_dept_file = _file(ContentLibraryFactory(visibility="department", department=other_dept))
+
+        visible = set(selectors.scoped_files(user=user, roles={"teacher"}).values_list("id", flat=True))
+        assert my_dept_file in visible
+        assert other_dept_file not in visible
+
+
+def test_visibility_positive_role_allowlist(tenant_a, user_in):
+    """A user whose role is in allowed_roles sees a role-visibility library
+    (positive allowed_roles__contains JSONField containment branch)."""
+    student_user = user_in(tenant_a, roles=["student"])
+    with schema_context(tenant_a.schema_name):
+        allowed_file = _file(ContentLibraryFactory(visibility="role", allowed_roles=["student"]))
+        not_allowed_file = _file(ContentLibraryFactory(visibility="role", allowed_roles=["teacher"]))
+
+        visible = set(
+            selectors.scoped_files(user=student_user, roles={"student"}).values_list("id", flat=True)
+        )
+        assert allowed_file in visible
+        assert not_allowed_file not in visible
+
+
+def test_visibility_parent_sees_childs_cohort_only(tenant_a, user_in):
+    """Exercises the previously-dead parent branch of _related_cohort_ids: a
+    Guardian-linked parent sees their child's cohort-visibility file and NOT an
+    unrelated cohort's file (DAY-2.md D2-E-6 cohort visibility incl. parents)."""
+    from apps.cohorts.tests.factories import CohortFactory, CohortMembershipFactory
+    from apps.parents.tests.factories import GuardianFactory, ParentProfileFactory
+    from apps.students.tests.factories import StudentProfileFactory
+
+    parent_user = user_in(tenant_a, roles=["parent"])
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        cohort = CohortFactory(branch=branch)
+        student = StudentProfileFactory(branch=branch)
+        CohortMembershipFactory(cohort=cohort, student=student)
+        parent = ParentProfileFactory(user=parent_user)
+        GuardianFactory(parent=parent, student=student)
+
+        cohort_file = _file(ContentLibraryFactory(visibility="cohort", cohort=cohort))
+        other_cohort_file = _file(
+            ContentLibraryFactory(visibility="cohort", cohort=CohortFactory(branch=branch))
+        )
+
+        visible = set(selectors.scoped_files(user=parent_user, roles={"parent"}).values_list("id", flat=True))
+        assert cohort_file in visible
         assert other_cohort_file not in visible
 
 
@@ -284,6 +408,51 @@ def test_storage_used_bytes_sums_clean_only(tenant_a):
         LessonFileFactory(folder=folder, size_bytes=2500, status=LessonFile.Status.CLEAN)
         LessonFileFactory(folder=folder, size_bytes=9999, status=LessonFile.Status.PENDING)  # excluded
         assert selectors.storage_used_bytes() == 3500
+
+
+def test_quota_rechecked_at_validate_blocks_pending_batch_bypass(tenant_a, monkeypatch):
+    """Two 0.6 GB pending uploads each pass the cheap request_upload gate (each
+    sees only the unchanged CLEAN total — pending siblings do not count), but the
+    SECOND is REJECTED when it validates: the quota is re-checked at the
+    authoritative chokepoint, so storage_used_bytes() never exceeds the 1 GB
+    quota (closes the sequential-batch bypass, D3-E meter)."""
+    from django.core.cache import cache
+
+    _stub_s3(monkeypatch)
+    point_six_gb = 600 * 1024 * 1024  # 0.6 GB each; quota is 1 GB
+    quota_bytes = 1024**3
+    with schema_context(tenant_a.schema_name):
+        settings = CenterSettings.load()
+        settings.storage_quota_gb = 1
+        # Per-file limit must clear 0.6 GB so the QUOTA (not max_upload_mb) governs.
+        settings.max_upload_mb = 1000
+        settings.save(update_fields=["storage_quota_gb", "max_upload_mb"])
+        cache.clear()
+
+        folder: Any = FolderFactory()
+
+        # Both pending requests pass: each sees the same 0 CLEAN total; the
+        # other still-pending sibling is excluded from storage_used_bytes().
+        f1 = services.request_upload(
+            filename="a.pdf", content_type="application/pdf", size_bytes=point_six_gb, folder=folder
+        )["file"]
+        f2 = services.request_upload(
+            filename="b.pdf", content_type="application/pdf", size_bytes=point_six_gb, folder=folder
+        )["file"]
+
+        copies: list[str] = []
+        _stub_validate_s3(monkeypatch, sniff="application/pdf", copies=copies, content_length=point_six_gb)
+
+        # f1: 0 CLEAN + 0.6 GB ≤ 1 GB → clean.
+        assert services.validate_uploaded_file(f1.id) == LessonFile.Status.CLEAN
+        assert selectors.storage_used_bytes() == point_six_gb
+
+        # f2: 0.6 GB CLEAN + 0.6 GB = 1.2 GB > 1 GB → rejected at validate.
+        assert services.validate_uploaded_file(f2.id) == LessonFile.Status.REJECTED
+        f2.refresh_from_db()
+        assert "quota" in f2.reject_reason.lower()
+        # CLEAN bytes never exceeded the quota.
+        assert selectors.storage_used_bytes() <= quota_bytes
 
 
 # --------------------------------------------------------------------------- #
@@ -320,6 +489,65 @@ def test_upload_url_requires_write(tenant_a, as_role):
     client, _ = as_role(Role.STUDENT)  # content:read only
     resp = client.post("/api/v1/content/upload-url/", {}, format="json")
     assert resp.status_code == 403
+
+
+def test_upload_url_rejects_out_of_scope_folder(tenant_a, as_role, monkeypatch):
+    """A content:write holder cannot attach a file into a library they cannot
+    see: the upload-url serializer scopes lesson/folder to scoped_libraries, so
+    a folder in an out-of-scope cohort library is invalid (scoped writes)."""
+    from apps.cohorts.tests.factories import CohortFactory
+    from core.permissions import Role
+
+    _stub_s3(monkeypatch)
+    client, _ = as_role(Role.TEACHER)  # content:* but visibility-scoped reads
+    with schema_context(tenant_a.schema_name):
+        branch: Any = BranchFactory()
+        other_cohort = CohortFactory(branch=branch)
+        # A folder inside a cohort library the teacher is not a member of.
+        hidden_folder: Any = FolderFactory(
+            library=ContentLibraryFactory(visibility="cohort", cohort=other_cohort)
+        )
+        hidden_id = hidden_folder.id
+        before = LessonFile.objects.count()
+
+    resp = client.post(
+        "/api/v1/content/upload-url/",
+        {
+            "filename": "x.pdf",
+            "content_type": "application/pdf",
+            "size_bytes": 1000,
+            "folder": hidden_id,
+        },
+        format="json",
+    )
+    assert resp.status_code in (400, 404, 422)
+    with schema_context(tenant_a.schema_name):
+        assert LessonFile.objects.count() == before  # nothing created
+
+
+def test_upload_url_accepts_in_scope_folder(tenant_a, as_role, monkeypatch):
+    """A content:write holder CAN attach into a tenant-visibility library they
+    can see (positive path for the scoped lesson/folder queryset)."""
+    from core.permissions import Role
+
+    _stub_s3(monkeypatch)
+    client, _ = as_role(Role.TEACHER)
+    with schema_context(tenant_a.schema_name):
+        visible_folder: Any = FolderFactory(library=ContentLibraryFactory(visibility="tenant"))
+        visible_id = visible_folder.id
+
+    resp = client.post(
+        "/api/v1/content/upload-url/",
+        {
+            "filename": "x.pdf",
+            "content_type": "application/pdf",
+            "size_bytes": 1000,
+            "folder": visible_id,
+        },
+        format="json",
+    )
+    assert resp.status_code == 200
+    assert "file_id" in resp.json()
 
 
 def test_files_cross_tenant_isolated(tenant_a, tenant_b, user_in, as_user):
@@ -373,3 +601,28 @@ def test_library_clean_file_round_trip_api(tenant_a, user_in, as_user, monkeypat
     assert dl.json()["expires_in"] == 300
     with schema_context(tenant_a.schema_name):
         assert LessonFile.objects.get(pk=file_id).download_count == 1
+
+
+def test_serializer_hides_thumbnail_key_and_signs_url(tenant_a, user_in, as_user, monkeypatch):
+    """The raw schema-prefixed thumbnail_key is never serialized; clients get a
+    TTL-limited signed thumbnail_url instead (mirrors download_url)."""
+    import infrastructure.storage.s3_client as s3_client
+
+    monkeypatch.setattr(s3_client, "presign_download", lambda key, **kw: f"https://signed/{key}")
+    director = user_in(tenant_a, roles=["director"])
+    with schema_context(tenant_a.schema_name):
+        with_thumb: Any = LessonFileFactory(
+            status=LessonFile.Status.CLEAN,
+            content_type="image/png",
+            thumbnail_key="tenant_a/content/7/thumb.jpg",
+        )
+        no_thumb: Any = LessonFileFactory(status=LessonFile.Status.CLEAN)
+        with_id, no_id = with_thumb.id, no_thumb.id
+
+    client = as_user(tenant_a, director)
+    detail = client.get(f"/api/v1/content/files/{with_id}/").json()
+    assert "thumbnail_key" not in detail  # raw key never exposed
+    assert detail["thumbnail_url"] == "https://signed/tenant_a/content/7/thumb.jpg"
+
+    no_detail = client.get(f"/api/v1/content/files/{no_id}/").json()
+    assert no_detail["thumbnail_url"] is None  # no thumbnail → null, not signed

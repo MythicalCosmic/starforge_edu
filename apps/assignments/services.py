@@ -12,8 +12,9 @@ import uuid
 from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
+from pathlib import PurePosixPath
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
@@ -26,7 +27,7 @@ from apps.assignments.signals import (
 )
 from apps.cohorts.models import CohortMembership
 from apps.org.selectors import get_center_settings
-from core.exceptions import UnprocessableEntity
+from core.exceptions import ConflictException, UnprocessableEntity
 from core.utils import current_schema
 from infrastructure.storage.s3_client import presign_upload
 
@@ -39,6 +40,16 @@ def validate_and_presign_upload(*, filename: str, content_type: str, size_bytes:
     """Validate against the `allowed_file_types` / `max_upload_mb` knobs (TD-13)
     and return a presigned PUT URL + the tenant-prefixed key."""
     settings = get_center_settings()
+    # Sanitize to a basename: a filename containing '/' / '\' / '..' would
+    # otherwise escape the per-upload {uuid}/ isolation when interpolated into
+    # the key (still within {schema}/assignments/, but not cross-tenant).
+    filename = PurePosixPath(filename.replace("\\", "/")).name
+    if not filename or filename in {".", ".."}:
+        raise UnprocessableEntity(
+            _("That filename is not allowed."),
+            code="invalid_filename",
+            fields={"filename": ["Filename must be a non-empty basename."]},
+        )
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     if ext not in {e.lower() for e in settings.allowed_file_types}:
         raise UnprocessableEntity(
@@ -64,19 +75,29 @@ def validate_and_presign_upload(*, filename: str, content_type: str, size_bytes:
 
 @transaction.atomic
 def publish_assignment(*, assignment: Assignment, actor=None) -> Assignment:
-    if assignment.status != Assignment.Status.PUBLISHED:
-        assignment.status = Assignment.Status.PUBLISHED
-        assignment.published_at = timezone.now()
-        assignment.save(update_fields=["status", "published_at", "updated_at"])
-        schema = current_schema()
-        transaction.on_commit(
-            lambda: assignment_published.send(
-                sender=Assignment,
-                assignment_id=assignment.pk,
-                cohort_id=assignment.cohort_id,
-                schema_name=schema,
-            )
+    # Only DRAFT -> PUBLISHED. Publishing an already-PUBLISHED assignment is a
+    # no-op; a CLOSED assignment must NOT silently reopen + re-emit
+    # assignment_published (which would re-notify students — D3-C consumer).
+    if assignment.status == Assignment.Status.PUBLISHED:
+        return assignment
+    if assignment.status != Assignment.Status.DRAFT:
+        raise UnprocessableEntity(
+            _("Only a draft assignment can be published."),
+            code="assignment_not_draft",
+            fields={"status": [f"Cannot publish from status '{assignment.status}'."]},
         )
+    assignment.status = Assignment.Status.PUBLISHED
+    assignment.published_at = timezone.now()
+    assignment.save(update_fields=["status", "published_at", "updated_at"])
+    schema = current_schema()
+    transaction.on_commit(
+        lambda: assignment_published.send(
+            sender=Assignment,
+            assignment_id=assignment.pk,
+            cohort_id=assignment.cohort_id,
+            schema_name=schema,
+        )
+    )
     return assignment
 
 
@@ -99,6 +120,20 @@ def submit(
             _("You are not an active member of this assignment's cohort."),
             code="student_not_in_cohort",
             fields={"student": ["Not an active cohort member."]},
+        )
+
+    # Attachment keys come straight from the client (presigned earlier). Reject
+    # any key not under this tenant's prefix so a student cannot persist
+    # cross-tenant-shaped (or other-student) S3 references that a future
+    # download / quota flow would inherit.
+    keys = list(attachment_keys or [])
+    prefix = f"{current_schema()}/assignments/"
+    bad = [k for k in keys if not isinstance(k, str) or not k.startswith(prefix)]
+    if bad:
+        raise UnprocessableEntity(
+            _("One or more attachment keys are not valid for this tenant."),
+            code="invalid_attachment_key",
+            fields={"attachment_keys": [f"Keys must start with '{prefix}'."]},
         )
 
     settings = get_center_settings()
@@ -124,14 +159,25 @@ def submit(
 
     grace = timedelta(minutes=settings.assignment_grace_minutes)
     is_late = timezone.now() > assignment.due_at + grace
-    return Submission.objects.create(
-        assignment=assignment,
-        student=student,
-        text=text,
-        attachments=list(attachment_keys or []),
-        is_late=is_late,
-        attempt_number=attempt_number,
-    )
+    try:
+        with transaction.atomic():
+            return Submission.objects.create(
+                assignment=assignment,
+                student=student,
+                text=text,
+                attachments=keys,
+                is_late=is_late,
+                attempt_number=attempt_number,
+            )
+    except IntegrityError as exc:
+        # Two concurrent submits for the same (assignment, student) computed the
+        # same attempt_number; the UniqueConstraint catches the loser. Surface a
+        # clean 409 instead of a 500. (Nested atomic so the outer transaction
+        # isn't poisoned by the broken savepoint.)
+        raise ConflictException(
+            _("A concurrent submission was detected. Please retry."),
+            code="submission_conflict",
+        ) from exc
 
 
 # ---------------------------------------------------------------------------

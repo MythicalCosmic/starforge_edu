@@ -28,7 +28,7 @@ from apps.org.models import CenterSettings
 from apps.org.tests.factories import BranchFactory
 from apps.students.tests.factories import StudentProfileFactory
 from apps.teachers.tests.factories import TeacherProfileFactory
-from core.exceptions import UnprocessableEntity
+from core.exceptions import ConflictException, UnprocessableEntity
 
 pytestmark = pytest.mark.django_db
 
@@ -112,6 +112,98 @@ def test_submit_rejects_closed_and_non_member(tenant_a):
         assert exc2.value.code == "student_not_in_cohort"
 
 
+def test_publish_does_not_reopen_closed_assignment(tenant_a):
+    """D2-D review: publish must only transition DRAFT->PUBLISHED. A CLOSED
+    assignment must NOT silently reopen + re-emit assignment_published."""
+    received: list[int] = []
+
+    def _recv(sender, assignment_id, **kw):
+        received.append(assignment_id)
+
+    assignment_published.connect(_recv)
+    try:
+        with schema_context(tenant_a.schema_name):
+            branch = BranchFactory()
+            cohort = CohortFactory(branch=branch)
+            closed: Any = AssignmentFactory(cohort=cohort, status=Assignment.Status.CLOSED)
+            with pytest.raises(UnprocessableEntity) as exc:
+                services.publish_assignment(assignment=closed)
+            assert exc.value.code == "assignment_not_draft"
+            closed.refresh_from_db()
+            assert closed.status == Assignment.Status.CLOSED  # unchanged
+        assert received == []  # no re-notify
+    finally:
+        assignment_published.disconnect(_recv)
+
+
+def test_publish_already_published_is_noop(tenant_a):
+    """Re-publishing a PUBLISHED assignment is a silent no-op (no re-emit)."""
+    received: list[int] = []
+
+    def _recv(sender, assignment_id, **kw):
+        received.append(assignment_id)
+
+    assignment_published.connect(_recv)
+    try:
+        with schema_context(tenant_a.schema_name):
+            branch = BranchFactory()
+            cohort = CohortFactory(branch=branch)
+            published: Any = AssignmentFactory(cohort=cohort, status=Assignment.Status.PUBLISHED)
+            result = services.publish_assignment(assignment=published)
+            assert result.status == Assignment.Status.PUBLISHED
+        assert received == []
+    finally:
+        assignment_published.disconnect(_recv)
+
+
+def test_submit_rejects_foreign_tenant_attachment_key(tenant_a):
+    """D2-D review: attachment_keys must be under this tenant's prefix; a key
+    shaped like another tenant's path is rejected with a stable 422 code."""
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        cohort = CohortFactory(branch=branch)
+        student = _member(cohort, branch)
+        assignment: Any = AssignmentFactory(cohort=cohort)
+
+        # A key under another tenant's prefix.
+        with pytest.raises(UnprocessableEntity) as exc:
+            services.submit(
+                assignment=assignment,
+                student=student,
+                attachment_keys=["tenant_b/assignments/abc/essay.pdf"],
+            )
+        assert exc.value.code == "invalid_attachment_key"
+
+        # A correctly-prefixed key for this tenant is accepted.
+        good_key = f"{tenant_a.schema_name}/assignments/{'a' * 32}/essay.pdf"
+        sub = services.submit(assignment=assignment, student=student, attachment_keys=[good_key])
+        assert sub.attachments == [good_key]
+
+
+def test_concurrent_submit_integrity_error_is_clean_conflict(tenant_a, monkeypatch):
+    """D2-D review: a unique-constraint collision on (assignment, student,
+    attempt_number) must surface a clean 409 ConflictException, not a 500."""
+    from django.db import IntegrityError
+
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        cohort = CohortFactory(branch=branch)
+        student = _member(cohort, branch)
+        assignment: Any = AssignmentFactory(cohort=cohort)
+
+        # Simulate the loser of a race: create() raises IntegrityError.
+        from apps.assignments.models import Submission
+
+        def _boom(*args, **kwargs):
+            raise IntegrityError("duplicate key value violates unique constraint")
+
+        monkeypatch.setattr(Submission.objects, "create", _boom)
+        with pytest.raises(ConflictException) as exc:
+            services.submit(assignment=assignment, student=student)
+        assert exc.value.code == "submission_conflict"
+        assert exc.value.status_code == 409
+
+
 # --------------------------------------------------------------------------- #
 # rubric validation
 # --------------------------------------------------------------------------- #
@@ -145,6 +237,31 @@ def test_rubric_validation_unknown_criterion_and_sum_cap(tenant_a):
         with pytest.raises(UnprocessableEntity) as exc2:
             services.grade_submission(submission=sub2, score=Decimal("90"), rubric_scores=[])
         assert exc2.value.code == "rubric_exceeds_max_score"
+
+
+def test_rubric_sum_cap_rejected_at_create(tenant_a, user_in, as_user):
+    """D2-D review: a rubric whose Σ max_points exceed max_score must be rejected
+    at authoring time (422), not only when a teacher later tries to grade."""
+    teacher_user = user_in(tenant_a, roles=["teacher"])
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        teacher_profile = TeacherProfileFactory(user=teacher_user, branch=branch)
+        cohort: Any = CohortFactory(branch=branch, primary_teacher=teacher_profile)
+        cohort_id = cohort.id
+
+    resp = as_user(tenant_a, teacher_user).post(
+        "/api/v1/assignments/",
+        {
+            "cohort": cohort_id,
+            "title": "Bad rubric",
+            "due_at": (timezone.now() + timedelta(days=3)).isoformat(),
+            "max_score": "100",
+            "rubric": [{"criterion": "a", "max_points": 70}, {"criterion": "b", "max_points": 70}],
+        },
+        format="json",
+    )
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "rubric_exceeds_max_score"
 
 
 def test_grade_score_out_of_range(tenant_a):
@@ -189,6 +306,21 @@ def test_upload_url_key_prefix_and_allowlist(tenant_a, monkeypatch):
         )
         assert result["key"].startswith(f"{tenant_a.schema_name}/assignments/")
         assert result["key"].endswith("/essay.pdf")
+
+        # D2-D review: a filename with path separators / traversal must be
+        # sanitized to its basename so it cannot escape the {uuid}/ isolation.
+        traversal = services.validate_and_presign_upload(
+            filename="../../etc/passwd.pdf", content_type="application/pdf", size_bytes=1024
+        )
+        assert traversal["key"].startswith(f"{tenant_a.schema_name}/assignments/")
+        assert traversal["key"].endswith("/passwd.pdf")
+        assert ".." not in traversal["key"]
+
+        windows = services.validate_and_presign_upload(
+            filename="sub\\dir\\report.pdf", content_type="application/pdf", size_bytes=1024
+        )
+        assert windows["key"].endswith("/report.pdf")
+        assert "\\" not in windows["key"]
 
         with pytest.raises(UnprocessableEntity) as exc:
             services.validate_and_presign_upload(
@@ -343,6 +475,41 @@ def test_assignments_cross_tenant_isolated(tenant_a, tenant_b, user_in, as_user)
     director_b = user_in(tenant_b, roles=["director"])
     body = as_user(tenant_b, director_b).get("/api/v1/assignments/").json()
     assert body["count"] == 0
+
+
+# D2-D review: the Lane-D cross-tenant suite covered only the /assignments/ list.
+# Pin tenant_mismatch (401) on the submission detail + action endpoints too — a
+# tenant-A token on tenant-B's host must 401 at the TD-1 auth gate (before any
+# object lookup), so arbitrary path ids are fine. (GET and POST methods per the
+# endpoint's declared verbs.)
+@pytest.mark.parametrize(
+    ("method", "url"),
+    [
+        ("get", "/api/v1/assignments/1/submissions/"),  # teacher submissions list
+        ("post", "/api/v1/assignments/1/submissions/"),  # student submit
+        ("post", "/api/v1/assignments/upload-url/"),  # presigned upload
+        ("get", "/api/v1/assignments/submissions/1/"),  # submission detail
+        ("post", "/api/v1/assignments/submissions/1/grade/"),  # grade
+        ("post", "/api/v1/assignments/submissions/1/request-ai-feedback/"),  # AI feedback
+    ],
+)
+def test_assignment_action_endpoints_cross_tenant_rejected(
+    tenant_a, tenant_b, user_in, client_for, method, url
+):
+    """A token minted in tenant A must 401 `tenant_mismatch` against tenant B's
+    host on every submission/grade/upload action — not leak a 403/404/422."""
+    from apps.auth.services import issue_token_pair
+
+    user = user_in(tenant_a, roles=["director"])
+    with schema_context(tenant_a.schema_name):
+        access = issue_token_pair(user)["access"]
+
+    client_b = client_for(tenant_b)
+    client_b.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
+    resp = getattr(client_b, method)(url, {}, format="json")
+
+    assert resp.status_code == 401
+    assert resp.json()["error"]["code"] == "tenant_mismatch"
 
 
 def test_assignments_list_query_budget(tenant_a, user_in, as_user, django_assert_max_num_queries):
