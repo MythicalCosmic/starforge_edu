@@ -3,19 +3,25 @@
 from __future__ import annotations
 
 import re
+from datetime import timedelta
 
+from django.conf import settings
 from django.db import IntegrityError, connection, transaction
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from django_tenants.utils import schema_context
+from rest_framework_simplejwt.tokens import AccessToken
 
 from core.exceptions import NotFoundException, ValidationException
 
-from .models import Center, Domain
+from .models import Center, Domain, PlatformEvent
 
 # Postgres-safe schema names: lowercase, starts with a letter, ≤ 63 chars.
 SLUG_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 RESERVED_SLUGS = {"public", "admin", "www", "api", "static", "media"}
+
+# Read-only impersonation tokens are deliberately short-lived (D4-LE-4).
+IMPERSONATION_TOKEN_TTL_SECONDS = 600  # 10 minutes
 
 
 def _validate_slug(slug: str) -> str:
@@ -138,3 +144,202 @@ def add_domain(center: Center, *, domain: str, is_primary: bool = False) -> Doma
 def verify_domain_txt(domain: str) -> bool:
     """[OWNER:O-8] DNS TXT ownership verification — mock passes until creds land."""
     return True
+
+
+# ---------------------------------------------------------------------------
+# Platform event audit trail (D4-LE-5) — append-only, public schema
+# ---------------------------------------------------------------------------
+def record_platform_event(
+    *,
+    actor,
+    center: Center | None,
+    event: str,
+    payload: dict | None = None,
+) -> PlatformEvent:
+    """Append one immutable PlatformEvent row (public schema).
+
+    `actor` may be a public-schema platform-staff User or ``None`` (system).
+    The row is never updated or deleted (there is no mutation API).
+    """
+    actor_instance = actor if getattr(actor, "pk", None) is not None else None
+    return PlatformEvent.objects.create(
+        actor=actor_instance,
+        center=center,
+        event=event,
+        payload=payload or {},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Center lifecycle (D4-LE-1) — suspend / activate / extend-trial
+# ---------------------------------------------------------------------------
+@transaction.atomic
+def suspend_center(center: Center, *, actor=None, reason: str = "") -> Center:
+    """Suspend a Center: deactivate it (→ 503 InactiveTenantMiddleware) AND flip
+    its subscription to ``suspended`` (→ 402 SubscriptionGateMiddleware, the
+    Day-3 paywall). Records a PlatformEvent. Idempotent on an already-inactive
+    center (still re-asserts the suspended subscription)."""
+    center.is_active = False
+    center.save(update_fields=["is_active", "updated_at"])
+    _set_subscription_status(center, status="suspended")
+    record_platform_event(
+        actor=actor,
+        center=center,
+        event=PlatformEvent.Event.CENTER_SUSPENDED,
+        payload={"reason": reason} if reason else {},
+    )
+    return center
+
+
+@transaction.atomic
+def activate_center(center: Center, *, actor=None) -> Center:
+    """Re-activate a suspended Center: reactivate it AND flip its subscription
+    back to ``active`` so the tenant API returns 200 again. Records a
+    PlatformEvent."""
+    center.is_active = True
+    center.save(update_fields=["is_active", "updated_at"])
+    _set_subscription_status(center, status="active")
+    record_platform_event(
+        actor=actor,
+        center=center,
+        event=PlatformEvent.Event.CENTER_ACTIVATED,
+    )
+    return center
+
+
+@transaction.atomic
+def extend_trial(center: Center, *, days: int, actor=None) -> Center:
+    """Push `Center.trial_ends_at` out by `days` (from the later of now / the
+    existing end). Records a PlatformEvent. Does not change subscription state —
+    use activate_center for that."""
+    if days <= 0:
+        raise ValidationException(_("Days must be a positive integer."), code="invalid_days")
+    now = timezone.now()
+    base = center.trial_ends_at if (center.trial_ends_at and center.trial_ends_at > now) else now
+    center.trial_ends_at = base + timedelta(days=days)
+    center.on_trial = True
+    center.save(update_fields=["trial_ends_at", "on_trial", "updated_at"])
+    record_platform_event(
+        actor=actor,
+        center=center,
+        event=PlatformEvent.Event.CENTER_TRIAL_EXTENDED,
+        payload={"days": days, "trial_ends_at": center.trial_ends_at.isoformat()},
+    )
+    return center
+
+
+def _set_subscription_status(center: Center, *, status: str) -> None:
+    """Drive the Day-3 billing state machine from the control center.
+
+    Imported lazily: billing is a sibling SHARED app and reaching for it at
+    module import time would couple the two lanes' load order. A center with no
+    subscription row yet is a no-op (the paywall treats "no row" as pass-through).
+    """
+    from apps.billing.services import change_subscription
+
+    try:
+        change_subscription(center_id=center.pk, status=status)
+    except NotFoundException:
+        return  # no subscription row → nothing to flip (paywall passes through)
+
+
+# ---------------------------------------------------------------------------
+# Read-only impersonation (D4-LE-4/5)
+# ---------------------------------------------------------------------------
+@transaction.atomic
+def mint_impersonation_token(*, center: Center, user_id: int, impersonator) -> dict:
+    """Mint a 10-minute, read-only, access-ONLY JWT for `user_id` in `center`.
+
+    Claims: ``{schema, impersonator_id, read_only: true, tv}`` — TD-1's auth
+    class validates ``schema`` + ``tv``; ``read_only`` is enforced by
+    ``core.permissions.DenyWriteForReadOnlyToken`` (see integration_needed).
+    No refresh token is minted (impersonation cannot be extended).
+
+    Writes BOTH audit trails (D4-LE-5): one public-schema PlatformEvent here,
+    and one tenant-schema ``audit_log("impersonation.started")`` inside the
+    target center's schema (so the school's own audit log shows it too).
+    """
+    from apps.users.models import User
+
+    with schema_context(center.schema_name):
+        target = User.objects.filter(pk=user_id).first()
+        if target is None:
+            raise NotFoundException(_("No such user in that center."), code="user_not_found")
+        token = AccessToken.for_user(target)
+        token.set_exp(lifetime=timedelta(seconds=IMPERSONATION_TOKEN_TTL_SECONDS))
+        token["schema"] = center.schema_name
+        token["tv"] = target.token_version
+        token["impersonator_id"] = getattr(impersonator, "pk", None)
+        token["read_only"] = True
+        # Tenant-side audit row: the school's own AuditLog records the access.
+        _audit_impersonation_started(
+            target=target,
+            impersonator=impersonator,
+        )
+
+    record_platform_event(
+        actor=impersonator,
+        center=center,
+        event=PlatformEvent.Event.IMPERSONATION_MINTED,
+        payload={"target_user_id": user_id, "read_only": True},
+    )
+    return {"access": str(token), "expires_in": IMPERSONATION_TOKEN_TTL_SECONDS}
+
+
+def _audit_impersonation_started(*, target, impersonator) -> None:
+    """Write the tenant-schema audit row (already inside schema_context)."""
+    from apps.audit.services import audit_log
+
+    audit_log(
+        actor=None,  # the impersonator is a public-schema user, not a tenant FK
+        action="impersonation.started",
+        resource_type="users.User",
+        resource_id=str(target.pk),
+        after={
+            "impersonator_id": getattr(impersonator, "pk", None),
+            "impersonator_repr": str(impersonator),
+            "read_only": True,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# TD-19 tenant resolution (D4-LE-6) — anonymous, anon-throttled
+# ---------------------------------------------------------------------------
+def resolve_tenant(*, slug: str) -> dict:
+    """Resolve a center slug to the public bootstrap payload a frontend needs to
+    point itself at the right tenant (TD-19). Raises NotFoundException on an
+    unknown / inactive / archived center."""
+    center = (
+        Center.objects.filter(slug=slug, is_active=True, archived_at__isnull=True)
+        .prefetch_related("domains")
+        .first()
+    )
+    if center is None:
+        raise NotFoundException(_("No active center with that slug."), code="center_not_found")
+    primary = next((d for d in center.domains.all() if d.is_primary), None)
+    host = primary.domain if primary else ""
+    scheme = "https"
+    locale = _center_locale(center)
+    return {
+        "name": center.name,
+        "base_url": f"{scheme}://{host}" if host else "",
+        "ws_url": f"wss://{host}/ws/notifications/" if host else "",
+        "logo": "",  # branding asset slot — populated when O-13 branding lands
+        "locale": locale,
+    }
+
+
+def _center_locale(center: Center) -> str:
+    """The center's default UI locale. Reads the tenant CenterSettings default
+    language when set; falls back to the platform default. Best-effort: a center
+    whose schema is mid-provision falls back without raising."""
+    default = str(getattr(settings, "LANGUAGE_CODE", "uz")).split("-")[0]
+    try:
+        with schema_context(center.schema_name):
+            from apps.org.selectors import get_center_settings
+
+            value = getattr(get_center_settings(), "default_language", None)
+            return value or default
+    except Exception:
+        return default

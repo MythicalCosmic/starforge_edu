@@ -150,7 +150,7 @@ class ContentUploadUrlSerializer(serializers.Serializer):
 
     def validate(self, attrs):
         if not attrs.get("lesson") and not attrs.get("folder"):
-            raise serializers.ValidationError("A file must be attached to a lesson or a folder.")
+            raise serializers.ValidationError(_("A file must be attached to a lesson or a folder."))
         return attrs
 
 

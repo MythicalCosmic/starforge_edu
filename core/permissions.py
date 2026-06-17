@@ -66,7 +66,14 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "assignments:*",
         "schedule:*",
         "reports:read",
+        "reports:write",  # D4-LB-5
         "audit:read",
+        # D4-LA-8: AI request log + budget snapshot + exam generation (read+write).
+        # ai:manage (budget edits) stays director-only via *:*.
+        "ai:read",
+        "ai:write",
+        "printing:read",  # D4-LD-7
+        "printing:write",
     },
     Role.TEACHER: {
         "students:read",
@@ -80,6 +87,13 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "assignments:*",
         "schedule:read",
         "content:*",
+        # D4-LA-8: teachers read the AI log + request exam generation (ai:write).
+        "ai:read",
+        "ai:write",
+        "reports:read",  # D4-LB-5: run own-cohort enrollment/attendance/grades reports
+        "reports:write",
+        "printing:read",  # D4-LD-7: request prints
+        "printing:write",
     },
     Role.STUDENT: {
         # students:read is row-scoped to self by apps/students/selectors.py
@@ -105,7 +119,7 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "schedule:read",
         "notifications:read",
     },
-    Role.ACCOUNTANT: {"finance:*", "payments:*", "reports:read"},
+    Role.ACCOUNTANT: {"finance:*", "payments:*", "reports:read", "reports:write"},
     Role.CASHIER: {"finance:read", "payments:write"},
     Role.LIBRARIAN: {"content:*", "students:read", "cohorts:read"},
     Role.SECURITY: {"attendance:write", "users:read"},
@@ -117,6 +131,8 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "parents:*",
         "teachers:read",
         "schedule:*",
+        "printing:read",  # D4-LD-7: manage printers/agents
+        "printing:write",
     },
     Role.SUPPORT: {"users:read", "audit:read"},
 }
@@ -216,3 +232,40 @@ class ObjectScopedPermission(BasePermission):
             allowed = {m.department_id for m in memberships if m.department_id}
             return getattr(obj, "department_id", None) in allowed
         return False
+
+
+SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
+
+
+def is_read_only_token(request: Request) -> bool:
+    """True when the request is authenticated by a read-only impersonation token
+    (access claim ``read_only=true``). Surfaced by the JWT auth class as
+    ``request.is_read_only_token``; falls back to the raw ``request.auth`` claim."""
+    read_only = bool(getattr(request, "is_read_only_token", False))
+    if not read_only:
+        auth = getattr(request, "auth", None)
+        try:
+            read_only = bool(auth.get("read_only")) if auth is not None else False
+        except AttributeError:
+            read_only = False
+    return read_only
+
+
+class DenyWriteForReadOnlyToken(BasePermission):
+    """D4-LE-4: a read-only impersonation token (claim ``read_only=true``) may make
+    only SAFE (GET/HEAD/OPTIONS) requests. Any write → 403 ``read_only_token``.
+    Normal tokens (no claim) are unaffected.
+
+    NOTE: this only covers views that include it in ``permission_classes``. The
+    authoritative, opt-out-proof enforcement lives in ``core.viewsets`` (both base
+    classes call ``assert_not_read_only_write`` in ``initial``) so an APIView that
+    overrides ``permission_classes`` can never silently regain write access."""
+
+    def has_permission(self, request: Request, view: APIView) -> bool:
+        if request.method in SAFE_METHODS:
+            return True
+        if is_read_only_token(request):
+            from core.exceptions import PermissionException
+
+            raise PermissionException(code="read_only_token")
+        return True

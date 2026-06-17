@@ -7,6 +7,7 @@ from __future__ import annotations
 from datetime import date
 
 from django.utils import timezone
+from django.utils.translation import gettext_lazy as _
 from drf_spectacular.utils import (
     OpenApiExample,
     OpenApiParameter,
@@ -184,7 +185,7 @@ class PaymentViewSet(TenantSafeModelViewSet):
         receipt = getattr(payment, "fiscal_receipt", None)
         if receipt is None:
             return Response(
-                {"error": {"code": "not_found", "detail": "No fiscal receipt for this payment yet."}},
+                {"error": {"code": "not_found", "detail": _("No fiscal receipt for this payment yet.")}},
                 status=404,
             )
         key = (receipt.payload or {}).get("pdf_key")

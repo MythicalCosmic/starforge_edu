@@ -26,9 +26,28 @@ class UserViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, viewsets.Gen
             return [IsAuthenticated()]
         return [RolePermission()]
 
-    @extend_schema(summary="Current user + role memberships", responses=UserSerializer, tags=["users"])
-    @action(detail=False, methods=["get"], url_path="me")
+    @extend_schema(
+        summary="Current user + role memberships (GET) or update own profile (PATCH)",
+        description=(
+            "GET hydrates the caller's own profile. PATCH updates self-service "
+            "fields only — notably ``preferred_language`` (drives the localized "
+            "notification template variant, D4-LF-3). Read-only fields "
+            "(username/roles/is_staff) are ignored by the serializer."
+        ),
+        request=UserSerializer,
+        responses=UserSerializer,
+        tags=["users"],
+    )
+    @action(detail=False, methods=["get", "patch"], url_path="me")
     def me(self, request):
+        if request.method == "PATCH":
+            # Self-scoped write: always the caller's own row, partial update so a
+            # client can send just {"preferred_language": "ru"}. Read-only fields
+            # (username/is_staff/roles) are declared read_only on the serializer.
+            serializer = self.get_serializer(request.user, data=request.data, partial=True)
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
+            return Response(serializer.data)
         return Response(self.get_serializer(request.user).data)
 
 

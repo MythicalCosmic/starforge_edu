@@ -177,6 +177,7 @@ class CenterSettingsSerializer(serializers.ModelSerializer):
             "otp_cooldown_seconds",
             "student_id_pattern",
             "center_code",
+            "ai_exam_generation_enabled",
             "updated_at",
         )
         read_only_fields = ("updated_at",)

@@ -61,6 +61,13 @@ jobs:
         with:
           version: "0.11.x"
       - run: uv sync --all-groups --frozen
+      # D4-LF-2: compile the uz/en/ru gettext catalogs so activate("uz") resolves
+      # translated strings in the suite. The Linux runner has GNU gettext (the
+      # Windows dev box does not — locale/*/LC_MESSAGES/django.mo are committed,
+      # built by scripts/build_locale.py; compilemessages refreshes them from the
+      # committed .po here as the authoritative step).
+      - run: sudo apt-get update && sudo apt-get install -y gettext
+      - run: uv run python manage.py compilemessages -l uz -l en -l ru
       - run: uv run python manage.py check
       # TD-20 coverage floor: 70 after Day 1 → 80 after Day 3 → 85 after Day 5.
       # Raising this number is the EOD duty of D1-A / D3-F / D5-B respectively.

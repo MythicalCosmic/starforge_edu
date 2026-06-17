@@ -296,16 +296,16 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
 ## 14. Printing (apps/printing) — server side only
 
-- [ ] Replace placeholder with `PrintJob`, `Printer`, `BranchAgent` models
-- [ ] PrintJob fields: status (queued/picked/printing/done/failed), source (assignment/transcript/report), payload (S3 key), pages, copies, color, duplex, branch_id, agent_id, requested_by
-- [ ] Printer registration per Branch (name, model, ip, capabilities)
-- [ ] Branch agent auth: long-lived API token bound to a Branch
-- [ ] Job claim endpoint for the agent: `POST /api/v1/printing/agent/claim/` returns next queued job
-- [ ] Job status update endpoint for the agent
-- [ ] Job retry policy on failure (max 3, exponential backoff)
-- [ ] Print quotas per cohort per term (paper saving)
-- [ ] Print job audit (who printed what, when, how many pages)
-- [ ] **NOTE:** the actual CUPS-talking branch agent is a separate repo. Don't add CUPS code here.
+- [x] Replace placeholder with `PrintJob`, `Printer`, `BranchAgent` models
+- [x] PrintJob fields: status (queued/picked/printing/done/failed), source (assignment/transcript/report/receipt), payload (S3 key), pages, copies, color, duplex, branch_id, agent_id, requested_by
+- [x] Printer registration per Branch (name, model, capabilities)
+- [x] Branch agent auth: hashed API token bound to a Branch (`Authorization: Agent <raw>`)
+- [x] Job claim endpoint for the agent: `POST /api/v1/printing/agent/claim/` returns next queued job (select_for_update skip_locked)
+- [x] Job status update endpoint for the agent (`POST /api/v1/printing/agent/jobs/<id>/status/`, transition matrix)
+- [x] Job retry policy on failure (max 3, exponential backoff via next_attempt_at)
+- [x] Print quotas per cohort per term (paper saving) — CenterSettings.print_quota_pages_per_cohort_term (0 = unlimited)
+- [x] Print job audit (who printed what, when, how many pages) — print.job_created/done/failed
+- [x] **NOTE:** the actual CUPS-talking branch agent is a separate repo. Don't add CUPS code here.
 
 ---
 
@@ -393,13 +393,13 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
 ## 20. Reports (apps/reports)
 
-- [ ] Replace placeholder with `Report`, `ReportRun`, `ReportSchedule` models
-- [ ] Report library: enrollment, attendance, grades, finance, AI usage, storage usage
-- [ ] One-shot generation via Celery (writes to S3, signed URL emailed)
-- [ ] Scheduled reports (weekly/monthly) via django-celery-beat
-- [ ] Per-role visibility: directors see all, accountants see finance, teachers see their cohorts
-- [ ] PDF + Excel exports
-- [ ] Cross-tenant analytics (platform admin only) — separate aggregation pipeline (see tenancy memory)
+- [x] Replace placeholder with `Report`, `ReportRun`, `ReportSchedule` models
+- [x] Report library: enrollment, attendance, grades, finance, AI usage, storage usage
+- [x] One-shot generation via Celery (writes to S3, signed URL — delivered via notifications.dispatch, not email directly)
+- [x] Scheduled reports (weekly/monthly) via django-celery-beat (`run_due_report_schedules`, last_run_at guard)
+- [x] Per-role visibility: directors see all, accountants see finance, teachers see their cohorts (selector-scoped)
+- [x] PDF + Excel exports (weasyprint/openpyxl LAZY; render tests skip when absent)
+- [x] Cross-tenant analytics (platform admin only) — `nightly_platform_aggregation` → billing.UsageSnapshot
 
 ---
 

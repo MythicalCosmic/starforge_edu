@@ -18,6 +18,7 @@ from django.db.models import F
 from django.utils.translation import gettext_lazy as _
 
 from apps.content.models import FileView, LessonFile
+from apps.content.signals import file_upload_confirmed
 from apps.org.selectors import get_center_settings
 from core.exceptions import ConflictException, UnprocessableEntity
 from core.utils import current_schema
@@ -142,11 +143,22 @@ def request_upload(
 @transaction.atomic
 def confirm_upload(*, file: LessonFile) -> LessonFile:
     """Mark a pending upload ready and enqueue async validation. 409 if not
-    pending. No S3 call here — just enqueue."""
+    pending. No S3 call here — just enqueue. Emits ``file_upload_confirmed`` on
+    commit (D4-A AI content summary consumes it)."""
     if file.status != LessonFile.Status.PENDING:
         raise ConflictException(_("This file has already been processed."), code="file_not_pending")
     schema = current_schema()
-    transaction.on_commit(lambda: _enqueue_validate(file.pk, schema))
+    file_id = file.pk
+    requested_by = file.uploaded_by_id
+    transaction.on_commit(lambda: _enqueue_validate(file_id, schema))
+    transaction.on_commit(
+        lambda: file_upload_confirmed.send(
+            sender=LessonFile,
+            file_id=file_id,
+            requested_by=requested_by,
+            schema_name=schema,
+        )
+    )
     return file
 
 

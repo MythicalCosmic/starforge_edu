@@ -150,13 +150,13 @@ def drf_exception_handler(exc: Exception, context: dict[str, Any]) -> Response |
 
     if isinstance(exc, PermissionDenied):
         return Response(
-            {"error": {"code": "forbidden", "detail": str(exc) or "Forbidden."}},
+            {"error": {"code": "forbidden", "detail": str(exc) or _("Forbidden.")}},
             status=status.HTTP_403_FORBIDDEN,
         )
 
     if isinstance(exc, Http404):
         return Response(
-            {"error": {"code": "not_found", "detail": "Resource not found."}},
+            {"error": {"code": "not_found", "detail": _("Resource not found.")}},
             status=status.HTTP_404_NOT_FOUND,
         )
 

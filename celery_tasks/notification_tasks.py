@@ -204,33 +204,19 @@ def _deliver(notification, channel, context, render_template) -> str:
 # Per-channel delivery
 # ---------------------------------------------------------------------------
 def _deliver_in_app(notification, title, body) -> str:
-    """In-app = a delivery row + a WS group_send to {schema}.user.{id} (TD-15)."""
+    """In-app = a delivery row + a WS group_send to {schema}.user.{id} (TD-15).
+
+    The actual group_send is delegated to ``apps.notifications.services.
+    push_in_app`` so the notifications stack has exactly ONE group_send producer
+    call site (the producer-uniqueness grep test, D4-LC-6). The payload shape +
+    schema-prefixed group naming live there (the Day-4 NotificationConsumer
+    contract).
+    """
     from apps.notifications.models import Channel, NotificationDelivery
-    from core.utils import current_schema
-    from infrastructure.websocket.channel_layer import group_send
+    from apps.notifications.services import push_in_app
 
     _record(notification, Channel.IN_APP, NotificationDelivery.Status.SENT)
-    # dispatch is the ONLY group_send producer (TD-15). Payload shape is the
-    # Day-4 NotificationConsumer contract (published to WORKLOG).
-    #
-    # The group name MUST be schema-prefixed: user ids are per-tenant-schema
-    # autoincrements, so an unscoped "user.5" collides across tenants on the
-    # shared Redis channel layer (tenant A user 5 receives tenant B user 5's
-    # notifications). The Day-4 NotificationConsumer MUST join the SAME
-    # schema-prefixed group, deriving the schema from
-    # scope["tenant"].schema_name (see integration_needed).
-    group_send(
-        f"{current_schema()}.user.{notification.user_id}",
-        {
-            "type": "notification.message",
-            "id": notification.pk,
-            "event_type": notification.event_type,
-            "title": title,
-            "body": body,
-            "data": dict(notification.data or {}),
-            "created_at": notification.created_at.isoformat(),
-        },
-    )
+    push_in_app(notification, title, body)
     return "sent"
 
 

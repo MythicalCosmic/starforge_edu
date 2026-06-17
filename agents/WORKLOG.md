@@ -29,6 +29,148 @@ Every agent session **must** append an entry here before ending. Never edit or d
 <!-- entries begin below this line -->
 
 ---
+### [Day 4 · Lane E] Control center — platform API (D4-LE-1..7) — 2026-06-16
+**Branch:** `day1-build`. Built the public-schema platform control center on `apps/tenancy`
+(+ additive `apps/billing` platform-subscription surface). Gates run on my dirs:
+**ruff format + check clean; `mypy apps/tenancy apps/billing` clean (31 files); makemigrations
+--check tenancy → "No changes detected" (hand-written `0003_platformevent` is exact).** Full
+pytest NOT run (shared test DB has sibling-lane drift — see Blocked); 26 Lane-E tests collect cleanly.
+
+**Shipped:**
+- **Center lifecycle** (`apps/tenancy/views.CenterViewSet`, now full `ModelViewSet`, `IsAdminUser`):
+  `POST /api/v1/platform/centers/` → `provision_center`; `PATCH .../<id>/` (contact metadata only);
+  actions `POST .../suspend/`, `.../activate/`, `.../extend-trial/ {days}`. Suspend flips
+  `Center.is_active=False` AND drives the Day-3 billing state machine to `suspended` (→ 402 paywall);
+  activate restores both (→ 200). No DELETE (archival is a mgmt command).
+- **Usage** `GET /api/v1/platform/centers/<id>/usage/?days=30` → `{series:[{date,dau,students,
+  storage_bytes,ai_tokens}], today:{...}}`. `series` = `billing.UsageSnapshot` rows; `today` = LIVE
+  DAU from `users.User.last_seen_at` under `schema_context` + latest snapshot's students/storage/AI.
+- **Subscriptions** `GET /api/v1/platform/subscriptions/` + `PATCH .../<id>/` (NEW
+  `apps/billing/urls_platform.py` + `PlatformSubscriptionViewSet`, lookup by SUBSCRIPTION id; the
+  legacy `/platform/billing/subscriptions/{center_id}/` by-center viewset is retained). PATCH writes
+  a `SUBSCRIPTION_CHANGED` PlatformEvent + the existing tenant AuditLog.
+- **Read-only impersonation** `POST /api/v1/platform/centers/<id>/impersonate/ {user_id}` →
+  `{access, expires_in:600}` (access-ONLY, no refresh) via
+  `apps.tenancy.services.mint_impersonation_token`. Claims: `{schema, impersonator_id,
+  read_only:true, tv}`. TD-1 auth already validates schema+tv (GET works); write-deny needs the
+  core wiring in **integration_needed**.
+- **PlatformEvent** (NEW public-schema model, `apps/tenancy`): append-only audit trail written on
+  suspend/activate/extend-trial/create/subscription-change/impersonation-mint. Impersonation mint
+  ALSO writes a tenant-schema `audit_log("impersonation.started")` (1 PlatformEvent + 1 tenant
+  AuditLog per mint). No update/delete API; admin is read-only.
+- **TD-19 resolve** `GET /api/v1/platform/resolve/?slug=` (AllowAny, AnonRateThrottle) →
+  `{name, base_url, ws_url, logo, locale}`; unknown/inactive/archived slug → 404 `center_not_found`.
+- **Admin polish:** Center `list_display` gains subscription status + latest-snapshot usage columns
+  + a Subscription inline; PlatformEvent registered read-only. Apex-admin lockdown tested.
+
+**Tests (26, `apps/tenancy/tests/test_control_center.py`):** suspend→402→activate→200 (Day-3 paywall
+reuse); extend-trial + zero-days reject; create→provision; non-staff 403; usage series + live DAU +
+two-tenant isolation + invalid-days 400; subscription list/patch-reactivate + non-numeric 404;
+impersonation mint access-only / unknown 404 / both-sides audit / claims shape / token-expires-401 /
+GET-200 / write-403 (skips until core wiring lands); lifecycle + subscription-change PlatformEvent;
+append-only; resolve happy/404/missing-slug/anon-throttle; apex admin rejects tenant creds + accepts
+public staff.
+
+**Deviations from plan:** (1) **suspend flips BOTH `Center.is_active` (503) AND the subscription to
+`suspended` (402)** — DAY-4 says "503/402 per Day-3 paywall"; the actual paywall only 402s on a
+`suspended` SUBSCRIPTION, so I drive both for the round-trip to be real. (2) flat
+`/platform/subscriptions/` keys by **subscription id** (per the spec's `.../<id>/` wording), distinct
+from the retained by-center billing viewset. (3) `locale` reads a CenterSettings `default_language`
+if present (it is not today) and falls back to `settings.LANGUAGE_CODE`; `logo` is an empty slot
+until branding [O-13]. (4) the impersonation write-403 + the core read_only surfacing are returned as
+**integration_needed** (core/* off-limits); those two tests skip until wired (never a false green).
+
+**Blocked:** full pytest — the shared test DB has unapplied sibling-lane migrations (Lane A's
+`org_centersettings.ai_exam_generation_enabled`; my `tenancy/0003`); `--create-db` is correctly
+denied (would disrupt concurrent lanes). The orchestrator's central makemigrations + migrate +
+authoritative suite covers it. Impersonation enforcement awaits the core wiring below.
+
+**Publish to WORKLOG (Day-5 A security review + D5-D API contract consume):**
+- **Impersonation claim shape:** access-only JWT, exp ≤ 600s, claims
+  `{schema, impersonator_id, read_only: true, tv, user_id}`. No refresh path.
+- **`apps.tenancy.services.mint_impersonation_token(*, center, user_id, impersonator) -> {access, expires_in}`**.
+- **`apps.tenancy.models.PlatformEvent`** (public schema): `actor`(User SET_NULL), `center`(Center
+  SET_NULL), `event`(choices: center.suspended|center.activated|center.trial_extended|center.created|
+  subscription.changed|impersonation.minted), `payload`(JSON), `created_at`. Append-only.
+- **`apps.tenancy.services.record_platform_event(*, actor, center, event, payload=None)`** — the
+  single PlatformEvent writer.
+- **`apps.billing.selectors.usage_series(*, center, days=30)`** + **`center_dau(*, schema_name, on=None)`**.
+- **Platform URL map:** `/api/v1/platform/{centers/, centers/<id>/{suspend,activate,extend-trial,
+  usage,impersonate,domains}/, subscriptions/, subscriptions/<id>/, resolve/}` + the retained
+  `/api/v1/platform/billing/{plans,subscriptions/<center_id>,usage,checkout}/`.
+
+---
+### [Day 4 · Lane C] Channels realtime — consumers, heartbeat, dispatch→WS — 2026-06-16
+**Branch / commits:** `day1-build` (Day-4 Lane C build).
+**Shipped (D4-LC-1..7):**
+- **WS auth hardened (TD-1)** `infrastructure/websocket/middleware.py::_user_from_token`: validates
+  `schema` claim vs host-resolved tenant BEFORE the user lookup, then `tv` vs the user (+is_active),
+  mirroring `core/authentication.py`. Any failure → AnonymousUser → consumers close **4401**
+  (cross-tenant + stale-tv both 4401). Added a missing-`user_id` guard.
+- **Heartbeat mixin** `infrastructure/websocket/consumers.py::HeartbeatConsumerMixin`: server sends
+  `{"type":"ping"}` every `HEARTBEAT_INTERVAL` (30s; class attr, tests patch it); client must
+  `{"type":"pong"}`; **2 missed → close 4408**. Tracks joined groups in `self._groups`; `disconnect`
+  AND the 4408 path both `group_discard` every group + cancel the asyncio task (no membership leak on
+  either close path — server-initiated close does NOT trigger `websocket_disconnect`, so the 4408
+  branch discards explicitly). `PingConsumer` (`/ws/ping/`) unchanged.
+- **NotificationConsumer** `apps/notifications/consumers.py` at **`ws/notifications/`** (any authed
+  user): joins **`f"{schema}.user.{id}"`** + **`f"{schema}.branch.{b}"`** for every active
+  (non-revoked) RoleMembership. Handler **`notification_message`** (NOT `notify_message`) relays the
+  producer payload as `{"type":"notification","payload":{...}}`.
+- **AttendanceConsumer** `apps/attendance/consumers.py` at **`ws/cohorts/<cohort_id>/attendance/`**:
+  permission check ON CONNECT — `has_permission_code(roles,"attendance:read")` AND (director OR a
+  RoleMembership branch == cohort.branch_id); deny/unknown-cohort → **4403**, cross-tenant → 4401.
+  Joins **`f"{schema}.cohort.{id}"`**; handler **`attendance_update`** relays
+  `{"type":"attendance.update","payload":{...}}`.
+- **Routing** `infrastructure/websocket/routing.py` concatenates `apps.notifications.routing` +
+  `apps.attendance.routing` + keeps `ws/ping/`. `config/asgi.py` untouched (import path verified).
+- **dispatch→WS producer (TD-15, D4-LC-6)**: moved the group_send producer into
+  **`apps/notifications/services.py`** — `push_in_app(notification, title, body)` (in-app channel) and
+  `push_cohort_attendance(*, cohort_id, payload)`. `celery_tasks/notification_tasks._deliver_in_app`
+  now calls `services.push_in_app` (no longer imports `group_send` itself), so the ONLY
+  `channel_layer.group_send` import in non-test code is `apps/notifications/services.py`. Cohort
+  attendance relay is emitted from `apps/notifications/receivers.on_student_marked_absent` (fires once
+  per absent record) via `push_cohort_attendance` — **never from apps.attendance**.
+- **API-CONTRACT** `agents/API-CONTRACT.md` §6 Realtime rewritten to the real D4-C contract: close
+  codes 4401/4403/4408, subprotocol `bearer.<token>`, schema-prefixed groups, server-driven heartbeat,
+  exponential backoff 1s→30s+jitter, resubscribe + REST-resync on reconnect.
+**Tests:** `tests/test_realtime_ws.py` (15) — anonymous 4401 (notifications), cross-tenant 4401, stale
+tv 4401, user+branch group membership (behavioral), **E2E delivery via `dispatch()`**, attendance
+teacher-in-branch connect + cohort relay, attendance other-branch 4403, anonymous 4401, cross-tenant
+4401, unknown-cohort 4403, student-other-branch 4403, **producer E2E relay**, heartbeat silence→4408,
+heartbeat pong-sustains, disconnect group cleanup, **producer-uniqueness grep**. (Existing
+`tests/test_plumbing.py` `/ws/ping/` tests untouched/passing.)
+**Gates:** `ruff check` + `ruff format` clean on all Lane-C dirs. **Could NOT run pytest/mypy
+end-to-end: the shared tree had `apps/ai/admin.py` importing a now-deleted `AiItem` (Lane A mid-edit),
+which blocks Django app-registry load for ALL tests + the mypy django plugin.** All Lane-C files
+`py_compile` clean; logic verified statically. The orchestrator's post-merge run is authoritative.
+**Deviations from plan (bolded):**
+- **Handler names are `notification_message` / `attendance_update`, NOT DAY-4's `notify.message`.** The
+  CODE is the source of truth: `celery_tasks/notification_tasks._deliver_in_app` already group_sends
+  `type="notification.message"` (Day-3 fix), so the consumer method MUST be `notification_message`.
+- **Group names are schema-prefixed** (`{schema}.user.{id}` / `{schema}.branch.{b}` / `{schema}.cohort.{id}`)
+  per the Day-3 shared-Redis fix — DAY-4.md's unprefixed `user.{id}` is superseded.
+- **Cohort attendance group_send originates in the notifications receiver** (once per absent record),
+  not literally inside `dispatch()` — `dispatch()` is per-recipient (guardians), so emitting the cohort
+  frame there would duplicate it N times. The producer function still lives in `services.py` (dispatch
+  remains the sole producer module); the receiver is the single call site for the cohort channel.
+**Blocked:** none for code. Live multi-worker Redis fan-out is owner-demo only (InMemoryChannelLayer
+covers the E2E path in tests).
+**Publish to WORKLOG (Lane B `report.ready` + Day-5 demo consume):**
+- **WS paths:** `ws/notifications/` (authed), `ws/cohorts/<cohort_id>/attendance/` (`attendance:read`
+  + branch scope), `ws/ping/` (smoke).
+- **Close codes:** 4401 (anonymous/cross-tenant/stale-tv), 4403 (forbidden/unknown-cohort), 4408
+  (heartbeat timeout).
+- **Message envelope (server→client):** `{"type":"notification","payload":{id,event_type,title,body,data,created_at}}`
+  and `{"type":"attendance.update","payload":{record_id,student_id,lesson_id,status,auto}}`.
+- **Group naming (schema-prefixed):** `f"{schema}.user.{id}"`, `f"{schema}.branch.{b}"`,
+  `f"{schema}.cohort.{id}"`. The in-app channel of `dispatch()` already writes `{schema}.user.{id}` —
+  any new realtime event reaches the socket by routing through `dispatch()` (do NOT add a second
+  `group_send` producer; the grep test enforces it).
+- **Producers (the ONLY group_send call sites, both in `apps/notifications/services.py`):**
+  `push_in_app(notification, title, body)`, `push_cohort_attendance(*, cohort_id, payload)`.
+
+---
 ### [DEEP BUG RESEARCH] Whole-project adversarial audit + fixes (Days 1-3) — 2026-06-16
 **Branch:** `day1-build` (on top of Day-3 `ac859a0`). A 93-agent whole-project hunt
 (9 finders across domains + cross-cutting lenses, every serious finding verified by 3
@@ -1016,3 +1158,417 @@ concurrent account -31099) driven by per-method fixtures.
 **Coverage:** Day-3 floor rises to 80% (TD-20) — the central run measures it; D3-F's duty to bump
 `--cov-fail-under` to 80 in `ci.yml` is a shared-file edit → flagged in integration_needed.
 **Handoff:** the one found vuln (duplicate-status P0) is a same-day `fix(payments)` for Lane B.
+
+---
+### [Day 4 · Lane D] Printing pipeline (apps/printing) — 2026-06-16
+**Branch:** `day1-build` (Lane D slice). Built the full vertical slice; deleted the
+`PrintingItem` placeholder + its CRUD.
+**Shipped:**
+- **Models** (`apps/printing/models.py`, migration `printing/0002` deletes `PrintingItem`):
+  `Printer` (branch FK, name, model_name, capabilities JSON, is_active; unique (branch,name)),
+  `BranchAgent` (branch FK, name, `token_hash` unique sha256, created_by, last_seen_at, revoked_at;
+  raw token NEVER stored), `PrintJob` (branch/printer/agent FKs, status queued|picked|printing|done|
+  failed, source assignment|transcript|report|receipt, source_id, payload_s3_key, pages, copies,
+  color, duplex, `cohort_id` (no FK — quota lookup only), requested_by, attempts, next_attempt_at,
+  pages_printed, last_error; index `(branch,status,next_attempt_at)` + `(source,source_id)`).
+- **Agent auth** (`apps/printing/authentication.py`): `BranchAgentAuthentication` (DRF
+  `BaseAuthentication`, header `Authorization: Agent <raw>`, sha256 vs `BranchAgent.token_hash`,
+  non-revoked only; unknown/revoked/malformed → 401 `agent_token_invalid` envelope; sets
+  `request.auth = agent`, `request.user` anonymous — zero User involvement). `IsBranchAgent`
+  permission. Non-`Agent` headers (Bearer JWT) deferred (returns None).
+- **Services** (`apps/printing/services.py`): `register_agent(*, branch_id, name, created_by=None)
+  -> (agent, raw_token)` (only the hash persisted); `revoke_agent`; `claim_job(*, agent)`
+  (`select_for_update(skip_locked=True)` oldest `queued` job with `next_attempt_at <= now` for the
+  agent's branch → picked + claimed_at + agent, stamps `last_seen_at`; None when empty);
+  `update_job_status(*, agent, job_id, status, error="", pages_printed=None)` (cross-branch → 404;
+  transition matrix picked→printing→done|failed only, illegal → 409 `invalid_transition`; retry
+  policy: failed & attempts<3 → queued + `next_attempt_at = now + 2**attempts*60s`; 3rd → final
+  failed + `print.failed` dispatch to requested_by + `print.job_failed` audit); quotas
+  (`print_quota_pages_per_cohort_term` knob, 0/None = unlimited; current term window via
+  `schedule.Term.is_current`; over → `print_quota_exceeded`).
+- **enqueue_print** (the published hook): idempotent on an OPEN (queued/picked/printing) job for
+  `(source, source_id, payload_s3_key)`; enforces quota; emits `print_job_created` + enqueues
+  `enqueue_print_job` on commit. **Signature (transcripts/receipts/reports consume):**
+  `enqueue_print(*, source: str, source_id: int, payload_s3_key: str, branch_id: int, requested_by,
+  pages: int, copies=1, color=False, duplex=False, cohort_id=None) -> PrintJob`.
+- **Celery** `celery_tasks/print_tasks.py::enqueue_print_job(print_job_id)` rewritten from the TODO
+  stub: idempotent (guards on an existing `print.job_created` audit row), writes the creation audit
+  via `apps.audit.services.audit_log` (lazy import), `acks_late=True`, max_retries=3. Already
+  registered in the `celery_tasks/tasks.py` aggregator (no aggregator change needed).
+- **Endpoints** (`/api/v1/printing/`, already routed in config/urls.py): staff `jobs/` (GET list
+  filter status/source/branch + POST create, service applies quota), `printers/` (GET/POST/PATCH),
+  `agents/` (GET/POST → `{id, token}` once, `<id>/revoke/`); agent `agent/claim/` (IsBranchAgent →
+  200 `{job, download_url}` via `presign_download` or 204) + `agent/jobs/<id>/status/` (200 / 409 /
+  404). Per-action `required_perms` via `default_perms("printing")`, `object_scope="branch"`,
+  `@extend_schema`, read/write serializer split (token_hash never serialized).
+- **Signals** (`apps/printing/signals.py`, emit-only): `print_job_created`, `print_job_failed`.
+- Admin for all three models (token_hash readonly, never exposed).
+**Tests (`apps/printing/tests/test_printing.py`, 1 factories module):** register-agent hash-only +
+no plaintext in DB; agent auth valid/revoked/unknown/missing → 401; cross-branch claim (204, not
+the other branch's job) + cross-branch status update → 404; transition picked→printing→done +
+5 illegal transitions → 409; retry backoff requeues until exhausted (attempts 1→2→3, final failed,
+next_attempt_at cleared); **retry exhaustion → exactly 1 `print.failed` Notification + 1
+`print.job_failed` audit** (via `django_capture_on_commit_callbacks`, eager Celery); quota edge
+(exactly-at-limit allowed, one over → `print_quota_exceeded`, 0 = unlimited); enqueue idempotency
+(open job no-op, new job after done); **concurrent claim atomicity** (threaded, `@django_db
+(transaction=True)`, barrier — two agents, two jobs, never the same row); staff create
+director/teacher 201, student/parent 403, list anon 401 / denied-role 403; register-agent token
+shown once + never in list; cross-tenant token → `tenant_mismatch` 401, jobs not visible across
+tenants, agent token does not authenticate cross-tenant; jobs-list query budget ≤10.
+**Gates run here:** `ruff format` + `ruff check apps/printing celery_tasks/print_tasks.py` — clean;
+all modules byte-compile. **Could NOT run pytest/mypy through the full app registry:** sibling
+in-flight lanes left broken admin imports (`apps/ai/models` missing `AiItem`, `apps/reports/admin`
+importing a removed `ReportItem`) so `django.setup()` fails tree-wide right now — the orchestrator's
+post-merge run is authoritative. Verified every cross-app interface I call against its source
+(dispatch/audit_log/get_center_settings/presign_download/stable_hash signatures + `Source.values`).
+**TASKS.md ticked:** §14 (all server-side items).
+**Deviations from plan:**
+- **Quota is metered by the current term window** (`schedule.Term.is_current` → start/end dates) over
+  `PrintJob.created_at` for the cohort, since DAY-4 says "cohort's *term* usage" but PrintJob has no
+  term FK. No current term ⇒ no window ⇒ unlimited. `print_quota_exceeded` is surfaced as **422**
+  (`UnprocessableEntity`), matching the Day-2/3 well-formed-but-unactionable convention.
+- **Added `EventType.PRINT_JOB_FAILED = "print.failed"`** to `apps/notifications/models.py`
+  (additive, per the enum's "extend, never rename" rule) — needs an `AlterField` migration on the
+  notifications app (choices change, DB-no-op): flagged in integration_needed (shared Day-3 app; left
+  for central makemigrations to keep it off Lane F's i18n-label collision path).
+- Agent endpoints are plain `APIView`s with explicit `authentication_classes`/`permission_classes`
+  (no JWT, no role matrix) but still assert a tenant context (host-resolved schema).
+**Blocked:** none functionally (mock-first stands). Live agent round-trip needs Redis+worker+MinIO.
+**Handoff notes / Publish:**
+- **`apps.printing.services.enqueue_print(...)` signature above** — Lane B (report run-done),
+  academics transcript-ready (D2-C), payments receipt-ready (D3-B), and the Day-5 demo call it.
+  Import it **lazily** inside the calling function (cross-app). Pass `cohort_id` for quota
+  attribution; omit it (None) to skip cohort-quota metering.
+- **Agent contract (separate-repo team, TASKS §28):** header `Authorization: Agent <raw-token>`;
+  `POST /api/v1/printing/agent/claim/` → `200 {job, download_url}` (presigned GET) or `204`;
+  `POST /api/v1/printing/agent/jobs/<id>/status/` body `{status: printing|done|failed, error?,
+  pages_printed?}` → `200 job` / `409 invalid_transition` / `404` (cross-branch/unknown).
+  Transitions are picked→printing→done|failed ONLY.
+- **Audit actions:** `print.job_created` (task), `print.job_done` / `print.job_failed` (status
+  service) on `resource_type="printing.PrintJob"` carrying pages/copies/attempts.
+
+---
+### [Day 4 · Lane F] i18n + beat consolidation — 2026-06-16
+**Branch / commits:** `day1-build` (Lane F worktree).
+**Scope:** i18n sweep (string-only `gettext_lazy` wraps), compiled uz/en/ru catalogs,
+language plumbing verification, the consolidated `CELERY_BEAT_SCHEDULE` (returned as
+integration_needed — base.py is off-limits), DLQ + duration handlers, and the Lane-F
+test set. Merges last; prefers integration_needed over editing shared files.
+
+**Shipped:**
+- **`scripts/check_i18n.py`** — AST audit of every `apps/*/services.py` + `serializers.py`
+  + `core/exceptions.py` + `core/validators.py`: flags a bare wordy string literal passed as
+  the first positional arg to an error class (StarforgeError subclasses + DRF/serializers
+  `ValidationError`). Ignores `_()`-wrapped args, machine codes, and separators (`"; ".join`).
+  Exit 1 on any finding (CI gate). **Currently zero findings.**
+- **i18n string fixes (string-only `_()` wraps):** `apps/assignments/serializers.py` (4 rubric
+  msgs), `apps/content/serializers.py` (1), `apps/ai/serializers.py` (1 + import),
+  `apps/billing/serializers.py` (1 + import), `apps/payments/views.py` (1 hand-built error
+  detail + import), `core/exceptions.py` (2 handler-fallback literals: `Forbidden.` /
+  `Resource not found.`). All other error paths were already `_()`-wrapped (Day-1..3 discipline).
+- **Catalogs:** `locale/{uz,en,ru}/LC_MESSAGES/django.{po,mo}` (17 real msgids x 3 locales).
+  Generated by **`scripts/build_locale.py`** (the Windows dev box has NO GNU gettext —
+  `makemessages` errors "Can't find msguniq"; the script writes the `.po` and compiles the
+  `.mo` with a pure-Python MO writer). Verified: `activate("uz"/"ru"/"en")` resolves through
+  Django's full stack under test settings. **CI `compilemessages` is authoritative on Linux**
+  (added to ci.yml test job: `apt-get install gettext` + `compilemessages -l uz -l en -l ru`).
+- **Language plumbing:** `apps/notifications/services._lookup_template` now logs a WARNING on a
+  missing-variant fallback and the chain is `requested -> center-default -> en -> uz`
+  (`_center_default_locale()` reads the CenterSettings `default_language` knob if present, else
+  uz — defensive `getattr`/try-except, no migration required). `User.preferred_language` confirmed
+  present (Day-1). **Added `PATCH /api/v1/users/me/`** (the `me` action was GET-only) — self-scoped
+  partial update; `preferred_language` round-trips, read-only fields ignored.
+- **Beat consolidation (`celery_tasks/cleanup_tasks.py`):** added **`flush_expired_jwt_blacklist`**
+  (per-schema `OutstandingToken.objects.filter(expires_at__lte=now).delete()` — wraps simplejwt's
+  flushexpiredtokens across public + every tenant, since token_blacklist is SHARED+TENANT).
+  Refactored the schema list into `_all_schemas()` (shared by both cleanup tasks).
+- **DLQ + duration (`celery_tasks/observability.py`):** `connect_celery_observability(app)` wires
+  `task_failure` -> LPUSH `{task,args,kwargs,exc,schema,ts}` to Redis list **`starforge:dlq`**
+  (best-effort; never re-raises) and `task_prerun`/`task_postrun` -> structured tenant-tagged
+  duration on the `starforge.celery` logger. Logic lives in this owned module; the one-line wiring
+  in `config/celery.py` is integration_needed (off-limits).
+- **docs/architecture.md:** new "Periodic tasks, DLQ & metrics" (the full beat table + DLQ
+  drain/replay runbook) and "i18n" sections.
+
+**Tests (4 files):**
+- `tests/test_beat_consolidation.py` (4): every beat entry references a registered task; the
+  consolidated Day-1..4 table is registered; every registered canonical task is scheduled
+  (the 3 tasks delivered by Lane F's own beat block — flush_jwt + the 2 report tasks — xfail
+  until the orchestrator applies the integration block, then tighten); no ad-hoc schedule
+  outside settings.
+- `tests/test_i18n.py` (9): `activate("uz"/"ru"/"en")` translations; render_template picks
+  `preferred_language` variant; missing-variant fallback + WARNING; in-app uz/en/ru template
+  completeness; LocaleMiddleware order; Accept-Language honored on a 401 envelope; check_i18n clean.
+- `tests/test_celery_observability.py` (4): task_failure -> exactly one DLQ entry (task/exc/schema);
+  DLQ swallows Redis errors; prerun->postrun logs a non-None duration; connect is idempotent.
+- `apps/users/tests/test_preferred_language.py` (4): PATCH /users/me/ updates preferred_language;
+  rejects invalid lang (400); ignores read-only fields; requires auth (401).
+- **Non-DB tests RUN green** (7 passed + 1 expected xfail). **DB tests are written + verified by
+  logic but currently BLOCKED at fixture setup** by a cross-lane gap: `org_centersettings` is
+  missing columns `ai_exam_generation_enabled` (Lane A) + `print_quota_pages_per_cohort_term`
+  (Lane D) — both are model fields with **no migration yet** (latest is org/0007). Any test
+  touching CenterSettings (i.e. tenant provisioning) errors until the orchestrator's central
+  `makemigrations org` lands. NOT a Lane-F defect; `makemigrations org` is correctly sandbox-blocked
+  for this lane.
+
+**Gates:** ruff format + ruff check + mypy all clean on every owned/edited file. check_i18n + the
+non-DB pytest set green. Full suite + central makemigrations are the orchestrator's.
+
+**Deviations from plan (bolded):**
+- **Beat task names: code is source of truth.** DAY-4's conceptual table names map to the ACTUALLY
+  built names: `meter_usage_and_flip_states` -> `billing_tasks.run_nightly_metering`;
+  `expire_trials` -> `tenancy_tasks.deactivate_expired_trials` (NOT in billing_tasks);
+  `assignment_due_soon` -> `assignment_tasks.send_due_soon_reminders`. The final table in
+  integration_needed + docs uses the real names.
+- **makemessages could not run here** (no GNU gettext on Windows) — used `scripts/build_locale.py`
+  to produce real compiled `.mo`s; CI `compilemessages` is the authoritative Linux step.
+- **`flush_expired_jwt_blacklist` lives in `cleanup_tasks`** (DAY-4 named it
+  `cleanup_tasks::flush_expired_jwt_blacklist` — matched).
+
+**Blocked:** DB tests await the central `makemigrations org` (Lanes A/D CenterSettings columns).
+**Handoff / Publish:**
+- **FINAL `CELERY_BEAT_SCHEDULE`** (authoritative; supersedes per-lane notes) — see integration_needed.
+- **DLQ list `starforge:dlq`**; drain procedure in docs/architecture.md.
+- **`celery_tasks.observability.connect_celery_observability(app)`** — wire in config/celery.py.
+- **Notification fallback chain** now `requested -> center-default -> en -> uz` + logs on fallback.
+- **`PATCH /api/v1/users/me/ {preferred_language}`** is the language setter (was GET-only).
+- **`scripts/check_i18n.py`** is the CI i18n gate; **`scripts/build_locale.py`** rebuilds catalogs.
+
+---
+### [Day 4 · Lane B] Reports (apps/reports) — 2026-06-16
+**Branch:** `day1-build` (Lane B worktree). **Local gates green:** ruff format
+(--check) + ruff check + mypy (23 files) + `makemigrations reports --check` ("No
+changes detected") + `pytest apps/reports/tests/test_reports.py` = **23 passed, 2
+skipped** (the weasyprint + openpyxl real-render tests skip on the Windows dev box;
+CI/Linux runs them). OpenAPI `spectacular` generates with **0 errors** (1 cosmetic
+ReportKeyEnum naming warning, same class as Day-2's).
+
+**Shipped (replaces the `ReportItem` placeholder + its CRUD entirely):**
+- **Models + migrations** (`apps/reports/models.py`, `migrations/0002` + data-seed
+  `0003`): `Report` (key unique, allowed_roles JSON, default_format), `ReportRun`
+  (queued→running→done|failed, s3_key, file_bytes, error, timestamps),
+  `ReportSchedule` (weekly|monthly, weekday/day_of_month, hour, recipient_ids,
+  is_active, last_run_at; CheckConstraint `report_schedule_cadence_anchor`:
+  weekly⇒weekday set, monthly⇒day_of_month set). `0003` seeds the **6 library
+  rows** idempotently (update_or_create on key). Migration hand-written but
+  verified byte-identical to the autodetector (`makemigrations --check` clean).
+- **Generator library** (`apps/reports/generators/`): `base.ReportGenerator`
+  (pure `collect(params,*,user,roles)` selector + `render_pdf` LAZY weasyprint +
+  `render_xlsx` LAZY openpyxl + `render(data,fmt,locale)` dispatch) and the six
+  generators. `enrollment`/`attendance`/`grades` apply **teacher cohort scoping
+  in the selector** (`teacher_cohort_ids`: primary + co-teacher + lesson teacher);
+  `finance` aggregates invoice totals/outstanding (exact Decimal→2dp strings);
+  `ai_usage` calls **`apps.ai.selectors.tokens_consumed(start,end)` LAZILY**,
+  tolerating its absence→0 until Lane A merges; `storage_usage` sums
+  **CLEAN `content.LessonFile.size_bytes`** grouped by library. `get_generator(key)`
+  is the registry lookup. Zero N+1 (query-count covered).
+- **Templates** `templates/documents/reports/_base.html` + `<key>_{uz,ru,en}.html`
+  for all 6 keys (18 files). `_base` renders the generic columns/rows table via a
+  new `apps/reports/templatetags/report_extras.py::dictkey` filter; locale `_uz`/
+  `_ru` extend the `_en` canonical and `translation.override(locale)` localizes
+  the `{% trans %}` strings (matches the statement-template pattern).
+- **Celery** `celery_tasks/report_tasks.py` (already imported in the aggregator):
+  `build_report(run_id)` REAL (idempotent on status — non-`queued` skipped;
+  render→`s3_client.upload_bytes` `{schema}/reports/{run_id}.{pdf|xlsx}`→
+  `presign_download`→**`notifications.dispatch(event_type="report.ready", ...)`**,
+  NEVER email directly; `max_retries=3 retry_backoff acks_late`, failure→
+  `mark_run_failed`); `run_due_report_schedules` (public dispatcher → per-tenant
+  `run_due_report_schedules_for_schema`, `last_run_at` guard, exactly-once/window);
+  `nightly_platform_aggregation` (PUBLIC; per Center under `schema_context`:
+  students + **DAU(`last_seen_at>=today`)** + storage bytes + AI tokens → upsert
+  `billing.UsageSnapshot(center,date)`).
+- **API** (`reports:read`/`reports:write`, role-scoped IN selectors):
+  `GET /api/v1/reports/` (library filtered to allowed_roles),
+  `POST /api/v1/reports/runs/`→202 `{run_id}` (403 `report_forbidden` /
+  422 `unknown_report_key`/`invalid_format`), `GET /api/v1/reports/runs/<id>/`
+  (`download_url` = fresh presign only when done),
+  `GET|POST|PATCH /api/v1/reports/schedules/`. All three viewsets declare
+  `permission_classes = [RolePermission]` explicitly (project default is
+  IsAuthenticated, not RolePermission — same gotcha the Day-3 audit fix caught).
+- **admin** for all 3 models; deleted ReportItem admin/serializer/view.
+
+**Tests** (`apps/reports/tests/test_reports.py`, 25 fns / 23 run + 2 skip):
+6 generators vs factory data (incl. ai_usage stub + missing-selector tolerance +
+storage clean-only); library role-visibility matrix (director all / accountant
+finance / teacher enrollment+attendance+grades); **teacher cohort scoping**
+(foreign-cohort rows absent, attendance + enrollment); accountant→grades 403,
+accountant→finance ok; build flow render→S3→presign→dispatch (mocked boto3
+helpers; real-dispatch Notification row recorded); idempotent skip-done;
+mark-failed; schedule due-fires-once + re-scan-creates-none + wrong-hour-skips;
+two-tenant aggregation no-bleed + same-day-rerun-updates-not-dupes; DAU helper;
+cross-tenant `/reports/runs/` 401; list query-count (≤12); PDF + XLSX real-render
+(skipif lib absent — mirrors academics transcript skip).
+
+**Deviations from plan:**
+1. **`report.ready` is NOT yet a `notifications.EventType` choice.** dispatch
+   stores it fine (Django doesn't enforce CharField choices on create; the
+   template lookup degrades gracefully), so the lane works as-is. The additive
+   `EventType.REPORTS_READY = "report.ready"` enum row + a uz/ru/en
+   NotificationTemplate set are listed in **integration_needed** for cleanliness
+   (Lane C/F own notifications strings). **Published name is `report.ready`.**
+2. **`UsageSnapshot.dau` field does not exist yet** (apps/billing off-limits).
+   `nightly_platform_aggregation` writes `dau` only when the column exists
+   (`_usage_snapshot_has_dau()` guard) so the task is safe before/after the merge;
+   the exact additive model field + migration are in **integration_needed** (I own
+   this additive migration but cannot edit apps/billing directly).
+3. Hand-wrote the reports migrations (the shared tree's `apps/printing/admin.py`
+   transiently imported a deleted `PrintingItem`, breaking `django.setup()` and
+   thus `makemigrations` mid-build); once that sibling-lane breakage cleared I
+   re-verified with `makemigrations reports --check` = clean.
+
+**Blocked (owner/CI):** weasyprint (GTK) + openpyxl native/CI deps — declared in
+pyproject (`openpyxl>=3.1` added; weasyprint already present), lazy-imported so the
+app loads locally; the 2 render tests run on CI/Linux. `uv.lock` left to the
+central `uv sync`.
+
+**Publish to WORKLOG (consumers):**
+- **`build_report(run_id)`** (`celery_tasks.report_tasks`): renders run → S3
+  `{schema}/reports/{run_id}.{pdf|xlsx}` → presign → `dispatch("report.ready")`;
+  idempotent (non-`queued` skipped); enqueue via
+  `apps.reports.services.create_report_run(*, report_key, fmt, params,
+  requested_by, roles)`.
+- **`report.ready` dispatch event** (context: `report`, `report_title`, `run_id`,
+  `format`, `download_url`; dedupe_key `report.ready:{schema}:{run_id}`) — **Lane C**
+  in-app/WS channel carries it; the recipient is the run's requester.
+- **`nightly_platform_aggregation`** + **`aggregate_center(*, center_id)`** upsert
+  `billing.UsageSnapshot(center, date)` with `students_count`, `storage_bytes`,
+  `ai_tokens_used`, and **`dau`** (the only additive field — see integration_needed;
+  **Lane E** reads these via the usage endpoint).
+- **Generator contract:** `apps.reports.generators.get_generator(key).collect(
+  params, *, user, roles) -> dict` + `render(data, fmt, locale)`.
+
+---
+### [Day 4 · Lane A] AI subsystem (apps/ai) — 2026-06-16
+**Branch:** `day1-build`. Replaced the `AiItem` placeholder with the budgeted AI subsystem.
+**Shipped (43 AI tests green; ruff+mypy clean on apps/ai + celery_tasks/ai_tasks.py + infra/ai):**
+- **Models** (`apps/ai/models.py`, migration `ai_app/0002` deletes `AiItem`): `TenantAIBudget`
+  (singleton pk=1, day/month anchors+counters, CheckConstraint pk=1), `AIPrompt` (versioned,
+  partial-unique one-active-per-feature, unique(feature,version)), `AIRequest` (status machine
+  queued/running/succeeded/failed/denied_budget, unique `idempotency_key`, encrypted
+  `redaction_map` via core.fields.EncryptedTextField TD-11, token/cost cols). Seed migration
+  `ai_app/0003` seeds one ACTIVE prompt per feature.
+- **Anthropic mock (TD-2)**: `infrastructure/ai/anthropic_client._mock_complete` + `ANTHROPIC_USE_MOCK`
+  gate in `complete()` — deterministic text+usage, ZERO HTTP; `anthropic` import is now LAZY inside
+  `get_client()` (not installed here). `_cache_key` already had the TD-17 max_tokens+effort fix;
+  added a regression test that proves it.
+- **Budget service** (`apps/ai/services.py`): `check_and_reserve_budget(*, feature, estimated_tokens,
+  requested_by|requested_by_id, source_app, source_id) -> AIRequest` (select_for_update on budget,
+  anchor rollover, over-budget/disabled → `denied_budget` row committed in its OWN txn + raises
+  `AIBudgetExceeded` code `ai_budget_exceeded` 429); `record_usage(*, ai_request_id, usage)` (F()
+  counters, status-guarded so retries never double-count); `update_budget`, `request_exam_generation`
+  (CenterSettings gate → `AIFeatureDisabled` 403 `feature_disabled`), `cost_microusd` (settings-driven).
+- **PII redaction** (`apps/ai/redaction.py`): `redact(text, *, known_names) -> (text, map)` + `restore`
+  (E.164 phones, national-id `[A-Z]{2}\d{7}`, emails, exact known-name → `[STUDENT_n]`); lossless
+  round-trip; longest-first name+token ordering; `dump_map`/`load_map` for the encrypted column.
+- **Celery tasks** (`celery_tasks/ai_tasks.py`, registered in `celery_tasks/tasks.py` aggregator):
+  `run_assignment_feedback(submission_id, *, requested_by=None)`, `run_exam_generation(ai_request_id,
+  *, params)`, `run_content_summary(lesson_file_id, *, requested_by=None)` — load active AIPrompt →
+  redact → `complete()` → restore → persist → `record_usage`; idempotent on AIRequest status;
+  max_retries=3 retry_backoff acks_late; failure → status=failed+error_detail. Feedback writes
+  `SubmissionGrade.ai_feedback` without touching the teacher's score.
+- **Receivers** (`apps/ai/receivers.py`, `apps.py ready()`): wired to the REAL Day-2 signal
+  `apps.assignments.signals.ai_feedback_requested(submission_id, requested_by, schema_name)` and a
+  NEW `apps.content.signals.file_upload_confirmed(file_id, requested_by, schema_name)` (added +
+  emitted on_commit from `content.services.confirm_upload`). `weak=False` + `dispatch_uid`.
+- **Endpoints** (`/api/v1/ai/`): `GET requests/`(+`<id>/`, filters feature/status/date), `GET|PATCH
+  budget/` (PATCH=ai:manage director-only), `POST exam-generation/` (202/403/429), `GET usage-report/`.
+  Per-action perms (TD-5), `@extend_schema` w/ examples, schema generates 0 errors.
+- **Selectors** (`apps/ai/selectors.py`): **`tokens_consumed(start, end) -> int`** (the published
+  **ai-tokens-consumed** interface) + `tokens_used_current_month()` REIMPLEMENTED to delegate to it
+  (Day-3 billing metering keeps working — verified by billing tests).
+
+**Published interfaces (consumed by other lanes):**
+- `apps.ai.selectors.tokens_consumed(start: date, end: date) -> int` — Lane B `ai_usage` generator +
+  D4-LB-7 aggregation + Day-3 billing all use this (runs in the active tenant schema, sums in+out tokens).
+- `apps.content.signals.file_upload_confirmed` — new emit-only content signal (Lane E may also consume).
+- `ANTHROPIC_USE_MOCK` flag (default True; production False).
+
+**Deviations from plan (bolded):**
+- **DAY-4 says wire assignment feedback to a `submission_created` signal; there is NO such signal.**
+  Per the prompt's own guidance I used the REAL Day-2 published signal `ai_feedback_requested`. To make
+  "creating a Submission enqueues feedback exactly once" true via the production path, `assignments.
+  services.submit()` now emits `ai_feedback_requested` on_commit (additive, 1 emission point).
+- **Content had no upload-confirmed signal** — added `apps.content.signals.file_upload_confirmed`,
+  emitted from `confirm_upload` on_commit.
+- Budget over-limit path is NOT inside a single function-level atomic (the `denied_budget` row must
+  survive the raised exception); it commits the denial in its own txn, then raises.
+
+**Blocked:** real Anthropic key [OWNER:O-2] — everything runs against the deterministic mock per TD-2;
+flip `ANTHROPIC_USE_MOCK=False` + set `ANTHROPIC_API_KEY` to go live. Real AI pricing [OWNER:O-2] —
+`AI_COST_PER_MTOK_*` are placeholders.
+
+**Handoff / integration_needed (orchestrator must wire — see structured output):** ai_app/0002+0003
+migrations are written; **org/0008 migration for `CenterSettings.ai_exam_generation_enabled` must be
+generated centrally** (org is shared; Lane D also added `print_quota_pages_per_cohort_term` — one
+combined org migration). Settings (`ANTHROPIC_USE_MOCK`, `AI_COST_PER_MTOK_*`, production override),
+`core/permissions` `ai:read`/`ai:write` rows (teacher+head_of_dept), and the `ai_tasks` aggregator
+import are additive edits I made in-place and flagged; dedupe centrally if needed.
+
+---
+### [Day 4 · OWNER REVIEW] Central integration + adversarial review — 2026-06-16
+**Reviewer:** owner (me). Integrated all six Day-4 lanes, ran a 6-lane adversarial review (3-skeptic
+verification per finding), and fixed every confirmed bug WITH a mandated test. **All gates green:**
+pytest **916 passed / 6 skipped** (verified on BOTH `--create-db` AND the default `--reuse-db`),
+`ruff check` clean, `mypy` clean (425 files), `makemigrations --check` + `manage.py check` clean.
+
+**Integration straggler fixes (3) before review:**
+- **Lane F read a `CenterSettings.default_language` knob that was never added as a field** — `getattr`
+  always hit the "uz" default, so the locale fallback chain made center-default leapfrog `en`. Added
+  the REAL field (`org/0009`, blank=uz/ru/en choices) + made `_center_default_locale()` return `""`
+  when unconfigured so an unset center keeps the en→uz lingua-franca order. Now genuinely dynamic (TD-13).
+- Impersonation write-deny test had an unused `branch_id` line crashing on a wrong-schema query (removed).
+- `test_resolve_anon_throttle` used a `settings` override that DRF's import-time `THROTTLE_RATES`
+  binding ignores mid-suite → switched to `monkeypatch.setitem` on the dict the throttle actually reads.
+
+**Adversarial review: 14 raw findings → 13 confirmed (≥2/3 skeptics), all FIXED + tested:**
+- **[BLOCKER] AI Celery retry was dead** (`celery_tasks/ai_tasks.py`): `_mark_failed` set status=FAILED
+  *before* `self.retry()`, and `_run_request`'s guard then short-circuited every retry as a no-op — a
+  single transient 529 permanently failed the request. Fix: `_run_with_retry` only marks FAILED (and
+  releases the reservation) once retries are exhausted; intermediate failures leave the row RUNNING so
+  the retry re-executes. **Found beyond the review:** the task BODIES (`run_assignment_feedback`,
+  `run_content_summary`) had a SECOND guard `if status != QUEUED: return` that ALSO blocked a RUNNING
+  retry — relaxed both to `not in (QUEUED, RUNNING)`.
+- **[BLOCKER] Read-only impersonation token could write through every `TenantSafeAPIView`**
+  (`core/viewsets.py`): `DenyWriteForReadOnlyToken` was only on `TenantSafeModelViewSet`, so APIView
+  writes (MarkAttendance, GradeRecompute, Announcement, ExamGeneration, BudgetView, CenterSettings,
+  ContentUploadUrl, StatementRequest) executed real mutations. Fix: `assert_not_read_only_write()`
+  enforced in `initial()` of BOTH base classes — opt-out-proof (subclasses can't regain write by
+  overriding `permission_classes`).
+- **[MAJOR] WebSocket subprotocol handshake broken for browsers** (3 consumers + middleware): server
+  echoed bare `"bearer"` but clients offer `bearer.<token>`; per RFC 6455 the browser handshake fails.
+  Fix: `accepted_subprotocol(scope)` echoes the exact offered value; middleware reads `scope["subprotocols"]`.
+- **[MAJOR] AI budget didn't actually reserve** (`apps/ai/services.py`): `check_and_reserve_budget`
+  only READ counters, so a burst all passed the same stale check and over-spent. Fix: reserve the
+  estimate at queue time (new `AIRequest.reserved_tokens`, `ai_app/0004`); `record_usage` reconciles
+  delta→actual; failure/cache-hit releases it. All atomic under the singleton lock, clamped ≥0.
+- **[MAJOR] Free-text PII leak to Anthropic** (`ai_tasks` + `redaction.py`): only the submitter's name
+  + `+`-prefixed phones were redacted. Fix: tokenize all linked guardian names; phone regex now catches
+  non-`+` and separated forms (over-redaction is the safe direction).
+- **[MAJOR] XLSX/CSV formula injection** (`reports/generators/base.py`): user-controlled cells written
+  raw. Fix: `safe_cell()` prefixes a leading `= + - @` with `'`.
+- **[MAJOR] Monthly schedules skipped short months** (`reports/services.py`): exact `day==day_of_month`
+  meant day 31 never fired in Feb/Apr/... Fix: clamp to the month's last day (`calendar.monthrange`).
+- **[MAJOR] `ReportSchedule.recipient_ids` stored but never delivered**: added `ReportRun.recipient_ids`
+  (`reports/0004`), copied on fire, and `_notify_ready` now delivers to requester + recipients (deduped).
+- **[MAJOR] `enqueue_print` idempotency not branch-scoped** (`printing/services.py`): two branches with
+  the same payload key collapsed to one job → cross-branch routing. Fix: `branch_id` in the dedupe filter.
+- **[MINOR] Budget over-charged on Redis cache hits**: `complete()` now flags `cache_hit`; `record_usage(billable=False)` bills zero.
+- **[MINOR] Hourly schedule scan drifted** (`settings/base.py`): fixed-interval beat could skip an hour
+  bucket vs `schedule_is_due`'s exact-hour match. Fix: `crontab(minute=0)`.
+- **[MINOR] Deleted-creator schedules fired empty undelivered runs**: `run_due_schedules` now deactivates
+  a schedule whose `created_by` is NULL (deactivation done OUTSIDE `fire_schedule`'s atomic, else it rolls back).
+- **[MINOR] BranchAgent auth 500 on whitespace-only header** (`printing/authentication.py`): `parts[0]`
+  IndexError → guard `if not parts`.
+- (1 rejected: ASGI `AllowedHostsOriginValidator` — defense-in-depth, mitigated by bearer-token auth.)
+
+**[out-of-lane] test hygiene:** `test_dispatch_unknown_user_is_dropped_not_raised` asserted a global
+`Notification.count()==0`, which is order-fragile under the default `--reuse-db` (a prior
+`transaction=True` test's committed tenant-schema rows survive). Switched to a before/after delta.
+
+**Handoff notes:** new migrations `org/0009` (default_language), `ai_app/0004` (reserved_tokens),
+`reports/0004` (recipient_ids). The read-only write-deny is now enforced in `core/viewsets` for ALL
+tenant views — new write endpoints get it for free. AI budget is now a true reservation: any new AI
+feature must call `check_and_reserve_budget` (reserves) then `record_usage` (reconciles) or
+`release_reservation` (on terminal failure). Known latent infra issue (NOT fixed, pre-existing):
+`transaction=True` tests don't flush tenant-schema tables, so global-count assertions are reuse-db
+fragile — prefer deltas/scoped filters.

@@ -13,6 +13,8 @@ urlpatterns = [
     path("api/v1/platform/", include("apps.tenancy.urls")),
     # TD-8: platform billing API (plans/subscriptions/usage/checkout), staff-only.
     path("api/v1/platform/billing/", include("apps.billing.urls")),
+    # D4-LE-3: flat control-center subscription management (by subscription id).
+    path("api/v1/platform/", include("apps.billing.urls_platform")),
     # TD-6: provider webhooks land on the public schema and resolve the tenant
     # by <center_slug> in the path, then verify the provider signature.
     path("api/v1/webhooks/", include("apps.payments.webhook_urls")),

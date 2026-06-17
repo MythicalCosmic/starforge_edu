@@ -41,6 +41,7 @@ class EventType(models.TextChoices):
     COHORTS_ANNOUNCEMENT = "cohorts.announcement", _("Cohort announcement")
     BILLING_SUBSCRIPTION_PAST_DUE = "billing.subscription_past_due", _("Subscription past due")
     BILLING_SUBSCRIPTION_SUSPENDED = "billing.subscription_suspended", _("Subscription suspended")
+    PRINT_JOB_FAILED = "print.failed", _("Print job failed")  # D4-LD-4
 
 
 class Channel(models.TextChoices):

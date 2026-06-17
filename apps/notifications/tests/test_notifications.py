@@ -53,13 +53,18 @@ def test_dispatch_dedupe_key_is_idempotent(tenant_a, user_in, sms_outbox):
 
 def test_dispatch_unknown_user_is_dropped_not_raised(tenant_a):
     with schema_context(tenant_a.schema_name):
+        # Delta, not a global ==0: under the project default --reuse-db a prior
+        # transaction=True test's committed rows can survive into this run, so an
+        # absolute count is order-fragile. The real assertion is "this dispatch
+        # created nothing".
+        before = Notification.objects.count()
         result = services.dispatch(
             event_type=EventType.ATTENDANCE_ABSENT,
             recipient_id=999999,
             context={},
         )
         assert result is None
-        assert Notification.objects.count() == 0
+        assert Notification.objects.count() == before
 
 
 # ---------------------------------------------------------------------------

@@ -97,7 +97,22 @@ class CenterSettings(models.Model):
         GPA = "gpa", _("GPA (0–4)")
         PERCENTAGE = "percentage", _("Percentage (0–100)")
 
+    class Language(models.TextChoices):
+        UZBEK = "uz", _("Uzbek")
+        RUSSIAN = "ru", _("Russian")
+        ENGLISH = "en", _("English")
+
     open_registration = models.BooleanField(default=False)  # TD-17
+    # D4-LF-3 (TD-13): the center's default notification language. Blank means
+    # "no preference" — the locale fallback chain then uses the en→uz lingua
+    # franca order. A center serving Uzbek can set "uz" to prefer it over en.
+    default_language = models.CharField(
+        max_length=8,
+        blank=True,
+        default="",
+        choices=Language.choices,
+        help_text=_("Default notification language; blank uses the en→uz fallback."),
+    )
     grading_scheme = models.CharField(
         max_length=16, choices=GradingScheme.choices, default=GradingScheme.PERCENTAGE
     )
@@ -130,6 +145,8 @@ class CenterSettings(models.Model):
     otp_cooldown_seconds = models.PositiveSmallIntegerField(default=60)
     student_id_pattern = models.CharField(max_length=64, default="{CODE}-{YYYY}-{NNNNN}")
     center_code = models.CharField(max_length=16, blank=True)
+    # D4-LA-7 (TD-13): gates the request-driven AI exam-generation endpoint.
+    ai_exam_generation_enabled = models.BooleanField(default=False)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

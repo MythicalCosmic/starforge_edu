@@ -86,6 +86,16 @@ MATRIX_CASES = [
     (Role.PARENT, "get", "/api/v1/content/files/", True),  # cohort visibility incl. guardian-linked parents
     (Role.CASHIER, "get", "/api/v1/content/files/", False),
     (Role.STUDENT, "post", "/api/v1/content/upload-url/", False),  # needs content:write
+    # --- Day 4 · AI (ai:read TEACHER/HEAD; ai:manage director-only; STUDENT/PARENT none)
+    (Role.DIRECTOR, "get", "/api/v1/ai/requests/", True),
+    (Role.HEAD_OF_DEPT, "get", "/api/v1/ai/requests/", True),
+    (Role.TEACHER, "get", "/api/v1/ai/requests/", True),
+    (Role.STUDENT, "get", "/api/v1/ai/requests/", False),
+    (Role.PARENT, "get", "/api/v1/ai/requests/", False),
+    (Role.CASHIER, "get", "/api/v1/ai/requests/", False),
+    (Role.TEACHER, "get", "/api/v1/ai/budget/", True),
+    (Role.STUDENT, "get", "/api/v1/ai/budget/", False),
+    (Role.TEACHER, "patch", "/api/v1/ai/budget/", False),  # ai:manage director-only
 ]
 
 

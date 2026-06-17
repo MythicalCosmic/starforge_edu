@@ -47,6 +47,7 @@ dependencies = [
     "python-dateutil>=2.9",    # TD-12 recurrence rules (used from Day 2 schedule)
     "icalendar>=6.0",          # TD-16 / D2-A iCal feed
     "weasyprint>=63.0",        # TD-14 / D2-C transcript PDFs (needs GTK native libs at runtime)
+    "openpyxl>=3.1",           # TD-14/16 / D4-B report Excel export (lazy import; CI installs it)
     "sentry-sdk>=2.0",         # O-10 error tracking (prod-only, no-op without DSN)
 ]
 

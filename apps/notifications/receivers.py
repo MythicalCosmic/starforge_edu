@@ -83,6 +83,22 @@ def _cohort_member_user_ids(cohort_id: int) -> list[int]:
     )
 
 
+def _push_cohort_attendance(*, lesson_id: int, payload: dict) -> None:
+    """Relay a live attendance update to the lesson's cohort group (D4-LC-6).
+
+    Resolves the cohort from the lesson and emits one schema-prefixed cohort
+    group_send via the notifications producer. Best-effort: if the lesson is
+    gone or the channel layer is unconfigured, the in-app feed remains the source
+    of truth, so a missed frame is non-fatal.
+    """
+    from apps.schedule.models import Lesson
+
+    cohort_id = Lesson.objects.filter(pk=lesson_id).values_list("cohort_id", flat=True).first()
+    if cohort_id is None:
+        return
+    services.push_cohort_attendance(cohort_id=cohort_id, payload=payload)
+
+
 def _dispatch_many(*, user_ids, event_type: str, context: dict, dedupe_prefix: str | None = None) -> None:
     seen: set[int] = set()
     for uid in user_ids:
@@ -113,6 +129,21 @@ def _connect_attendance() -> None:
             event_type=EventType.ATTENDANCE_ABSENT,
             context=context,
             dedupe_prefix=f"attendance.absent:{record_id}",
+        )
+        # D4-LC-6: live attendance dashboard update. This receiver fires exactly
+        # once per record that becomes absent (manual or sweep), so the cohort
+        # group_send is emitted once per event — not once per guardian. dispatch
+        # (this notifications stack) is the ONLY group_send producer (TD-15); the
+        # cohort group is schema-prefixed inside push_cohort_attendance.
+        _push_cohort_attendance(
+            lesson_id=lesson_id,
+            payload={
+                "record_id": record_id,
+                "student_id": student_id,
+                "lesson_id": lesson_id,
+                "status": "absent",
+                "auto": auto,
+            },
         )
 
 

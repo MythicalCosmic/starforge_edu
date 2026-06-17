@@ -35,6 +35,9 @@ X_FRAME_OPTIONS = "DENY"
 # Never mock real SMS in prod.
 ESKIZ_USE_MOCK = False
 
+# Never mock the Anthropic API in prod (D4-LA-2). Requires a real key [OWNER:O-2].
+ANTHROPIC_USE_MOCK = False
+
 # Structured JSON logging in production only (D1-LA-10) — dev/test stay human.
 LOGGING["formatters"]["json"] = {  # type: ignore[index]  # noqa: F405
     "()": "core.logging_filters.JsonFormatter",

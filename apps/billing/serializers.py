@@ -3,6 +3,7 @@ no `fields = "__all__"`."""
 
 from __future__ import annotations
 
+from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
 
 from apps.billing.models import Plan, Subscription, UsageSnapshot
@@ -54,7 +55,7 @@ class SubscriptionUpdateSerializer(serializers.Serializer):
 
     def validate(self, attrs):
         if not attrs:
-            raise serializers.ValidationError("Provide plan_code and/or status.")
+            raise serializers.ValidationError(_("Provide plan_code and/or status."))
         return attrs
 
 

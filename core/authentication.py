@@ -53,6 +53,10 @@ class TenantAwareJWTAuthentication(JWTAuthentication):
                 _("Your session is no longer valid. Please sign in again."), code="token_stale"
             )
 
+        # D4-LE-4: surface the impersonation read_only claim so
+        # DenyWriteForReadOnlyToken can block writes under an impersonation token.
+        request.is_read_only_token = bool(validated_token.get("read_only"))
+
         self._touch_last_seen(user)
         return user, validated_token
 

@@ -315,33 +315,47 @@ B) Query string (Flutter/non-browser):
    ws://demo.localhost:8001/ws/notifications/?token=<access>
 ```
 
-Anonymous or invalid token → close code **4401** (see `PingConsumer` in `infrastructure/websocket/consumers.py`).
-
 | Path | Stream | Since |
 |---|---|---|
 | `/ws/ping/` | Smoke test: sends `{"type":"hello","user_id":N}`; `{"type":"ping"}` → `{"type":"pong"}` | D0 |
-| `/ws/notifications/` | Per-user in-app notification stream (`user.{id}` group) | D4 |
-| `/ws/cohorts/{id}/attendance/` | Live attendance marks for one cohort (`cohort.{id}` group) | D4 |
+| `/ws/notifications/` | Per-user in-app notification stream — joins `{schema}.user.{id}` + `{schema}.branch.{b}` per active RoleMembership | D4 |
+| `/ws/cohorts/{id}/attendance/` | Live attendance marks for one cohort — joins `{schema}.cohort.{id}` (requires `attendance:read` + branch scope) | D4 |
 
-**Message envelope** (server→client, D4 consumers):
+Group names are **schema-prefixed** server-side (shared-Redis tenant isolation); clients never address groups directly — they just open the path and receive frames.
+
+**Close codes** (every code a D4-C consumer can emit):
+
+| Code | Meaning | Client action |
+|---|---|---|
+| **4401** | Unauthorized — anonymous, cross-tenant token (schema claim ≠ host tenant), or stale `tv` (logout-everywhere / role change / password change) | Refresh the access token (§3.4), then reconnect with the new token. If refresh also fails, send the user to login. |
+| **4403** | Forbidden — authenticated but not permitted: `/ws/cohorts/{id}/attendance/` requires `attendance:read` AND (director OR a RoleMembership in the cohort's branch); unknown cohort also closes 4403 | Do NOT retry this path with the same token; the user lacks access. Other sockets stay open. |
+| **4408** | Heartbeat timeout — the server sent two pings with no intervening `pong` | Treat as a dead connection; reconnect (backoff below). |
+
+**Message envelopes** (server→client, D4 consumers):
 
 ```json
-{"type": "notification.created", "data": {"id": 42, "title": "...", "body": "...", "event": "attendance.absent"},
- "ts": "2026-06-10T14:30:05+05:00"}
+// /ws/notifications/  (relayed from notifications.dispatch in-app channel)
+{"type": "notification",
+ "payload": {"id": 42, "event_type": "attendance.absent", "title": "...", "body": "...",
+             "data": {"student_id": 7, "lesson_id": 12}, "created_at": "2026-06-10T14:30:05+05:00"}}
+
+// /ws/cohorts/{id}/attendance/
+{"type": "attendance.update",
+ "payload": {"record_id": 9, "student_id": 7, "lesson_id": 12, "status": "absent", "auto": false}}
 ```
 
-`type` is `<domain>.<event>`; unknown types must be ignored, not crash the client.
+Unknown `type` values must be ignored, not crash the client.
 
-**Heartbeat:** client sends `{"type":"ping"}` every 30 s; server replies `{"type":"pong"}`. No pong within 2 intervals → assume dead, reconnect. Access tokens expire in 15 min — on close code 4401, refresh first, then reconnect with the new token.
+**Heartbeat (server-driven, D4-C):** the **server** sends `{"type":"ping"}` every **30 s**; the client MUST reply `{"type":"pong"}`. Two consecutive server pings with no `pong` in between → the server closes **4408**. Clients should also treat 60 s of total silence as a dead link and reconnect. Access tokens expire in 15 min — on 4401, refresh first, then reconnect.
 
 **Reconnect procedure (both clients):**
 
-1. On close/error: schedule reconnect with exponential backoff + jitter (1 s → 2 → 4 → … cap 30 s); reset backoff after a connection survives 60 s.
-2. Before each attempt: if the access token has < 60 s left, refresh it (§3.4).
-3. On successful (re)connect: **resync via REST** — `GET /api/v1/notifications/feed/` (cursor) for missed items, re-fetch any screen-critical data.
+1. On close/error (except 4403, which is a permanent deny for that path): schedule reconnect with **exponential backoff + jitter** (1 s → 2 → 4 → 8 → … cap **30 s**); reset backoff to 1 s after a connection survives 60 s.
+2. Before each attempt: if the access token has < 60 s left (or the prior close was 4401), refresh it (§3.4).
+3. On successful (re)connect: **resync via REST** — `GET /api/v1/notifications/` (cursor feed) for missed items; for an attendance dashboard, re-fetch `GET /api/v1/attendance/records/?lesson=...`. Re-subscribe (reopen the same paths) after reconnect.
 4. Pause attempts when the app is backgrounded (mobile) or the tab is hidden (web); reconnect on foreground.
 
-**Contract: WS is best-effort, REST is the source of truth.** Messages missed while disconnected are NOT replayed over WS. Never make business decisions from WS payloads alone — a WS event is a hint to re-fetch, the REST record is the fact.
+**Contract: WS is best-effort, REST is the source of truth.** Messages missed while disconnected are NOT replayed over WS — a dropped socket simply misses the frame. The in-app feed (`GET /api/v1/notifications/`) and the attendance records endpoint are authoritative on reconnect. Never make a business decision from a WS payload alone — a WS event is a hint to re-fetch, the REST record is the fact.
 
 ---
 

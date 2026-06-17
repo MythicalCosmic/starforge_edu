@@ -14,7 +14,15 @@ from rest_framework import viewsets
 from rest_framework.views import APIView
 
 from core.exceptions import PermissionException, TenantContextMissing
-from core.permissions import ObjectScopedPermission, Role, RolePermission, get_role_memberships
+from core.permissions import (
+    SAFE_METHODS,
+    DenyWriteForReadOnlyToken,
+    ObjectScopedPermission,
+    Role,
+    RolePermission,
+    get_role_memberships,
+    is_read_only_token,
+)
 
 
 def assert_tenant_context() -> None:
@@ -23,12 +31,22 @@ def assert_tenant_context() -> None:
         raise TenantContextMissing()
 
 
+def assert_not_read_only_write(request) -> None:
+    """D4-LE-4 (hardened): a read-only impersonation token may only make SAFE
+    requests. Enforced here in ``initial`` — NOT only via a permission class — so a
+    subclass that overrides ``permission_classes`` (many TenantSafeAPIViews do)
+    can never accidentally let a read-only token through on a write."""
+    if request.method not in SAFE_METHODS and is_read_only_token(request):
+        raise PermissionException(code="read_only_token")
+
+
 class TenantSafeModelViewSet(viewsets.ModelViewSet):
-    permission_classes = [RolePermission, ObjectScopedPermission]
+    permission_classes = [RolePermission, ObjectScopedPermission, DenyWriteForReadOnlyToken]
 
     def initial(self, request, *args, **kwargs):
         super().initial(request, *args, **kwargs)
         assert_tenant_context()
+        assert_not_read_only_write(request)
 
     def perform_create(self, serializer):
         # ObjectScopedPermission only runs via has_object_permission (detail
@@ -66,3 +84,4 @@ class TenantSafeAPIView(APIView):
     def initial(self, request, *args, **kwargs):
         super().initial(request, *args, **kwargs)
         assert_tenant_context()
+        assert_not_read_only_write(request)

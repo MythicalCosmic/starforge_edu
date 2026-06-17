@@ -39,6 +39,7 @@ env = environ.Env(
     ESKIZ_USE_MOCK=(bool, True),
     NUM_PROXIES=(int, 0),  # trusted reverse-proxy hops for X-Forwarded-For (0 = trust REMOTE_ADDR only)
     ANTHROPIC_API_KEY=(str, ""),
+    ANTHROPIC_USE_MOCK=(bool, True),  # D4-LA-2 (TD-2): mock-first; production.py sets False
     FIELD_ENCRYPTION_KEY=(str, ""),  # TD-11 Fernet key (O-11); dev/test override locally
     DEFAULT_FROM_EMAIL=(str, "noreply@starforge.uz"),
     EMAIL_HOST=(str, "localhost"),
@@ -321,6 +322,8 @@ CELERY_TASK_CLS = "tenant_schemas_celery.task:TenantTask"
 # with workers via celery_tasks/tasks.py — see tests/test_celery_registration.py.
 # purge_expired_otps already iterates public + tenant schemas; D4-F only
 # consolidates schedule registration).
+from celery.schedules import crontab  # noqa: E402
+
 CELERY_BEAT_SCHEDULE = {
     "deactivate-expired-trials": {
         "task": "celery_tasks.tenancy_tasks.deactivate_expired_trials",
@@ -357,6 +360,22 @@ CELERY_BEAT_SCHEDULE = {
     "run-nightly-metering": {
         "task": "celery_tasks.billing_tasks.run_nightly_metering",
         "schedule": 60 * 60 * 24,  # nightly usage snapshot + state flips (D3-E-5)
+    },
+    # Day 4 (D4-LF-4 consolidation)
+    "flush-expired-jwt-blacklist": {
+        "task": "celery_tasks.cleanup_tasks.flush_expired_jwt_blacklist",
+        "schedule": 60 * 60 * 24 * 7,  # weekly
+    },
+    "run-due-report-schedules": {
+        "task": "celery_tasks.report_tasks.run_due_report_schedules",
+        # Clock-aligned hourly (:00) — schedule_is_due requires an exact
+        # local.hour match, so a drifting fixed interval could skip an hour
+        # bucket (and that hour's due schedules) after a beat restart (D4-LB-6).
+        "schedule": crontab(minute=0),
+    },
+    "nightly-platform-aggregation": {
+        "task": "celery_tasks.report_tasks.nightly_platform_aggregation",
+        "schedule": 60 * 60 * 24,  # daily, public schema (D4-LB-7)
     },
 }
 
@@ -478,6 +497,10 @@ ESKIZ_USE_MOCK = env("ESKIZ_USE_MOCK")
 
 ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY")
 ANTHROPIC_DEFAULT_MODEL = "claude-sonnet-4-6"
+# D4-LA-2 (TD-2): when on, infrastructure/ai/anthropic_client.complete() returns
+# a deterministic mock + fake usage with ZERO HTTP. Default True outside
+# production; production.py forces it False (real key required, [OWNER:O-2]).
+ANTHROPIC_USE_MOCK = env("ANTHROPIC_USE_MOCK")
 
 # TD-11 field encryption (O-11). Empty by default; dev/test set a deterministic
 # throwaway key, prod REQUIRES a real one (core.fields raises without it).
@@ -487,6 +510,13 @@ ANTHROPIC_PROMPT_CACHE_TTL_SECONDS = 60 * 60 * 24  # 24h
 # Per-tenant AI budget defaults (override per-tenant via TenantAIBudget rows).
 AI_DEFAULT_DAILY_TOKENS = 100_000
 AI_DEFAULT_MONTHLY_TOKENS = 2_000_000
+
+# D4-LA-2/4 placeholder AI pricing (microUSD per million tokens). Real pricing is
+# [OWNER:O-2]; apps.ai.services.cost_microusd() reads these (TD-13: no magic
+# numbers). Defaults approximate Claude Sonnet list pricing ($3/MTok in,
+# $15/MTok out) expressed in microUSD.
+AI_COST_PER_MTOK_INPUT_MICROUSD = 3_000_000
+AI_COST_PER_MTOK_OUTPUT_MICROUSD = 15_000_000
 
 # OTP config (consumed by apps.auth)
 # OTP codes serve password reset / contact verification only — login is

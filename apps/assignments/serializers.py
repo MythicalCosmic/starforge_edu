@@ -57,14 +57,14 @@ class AssignmentSerializer(serializers.ModelSerializer):
 
     def validate_rubric(self, rubric):
         if not isinstance(rubric, list):
-            raise serializers.ValidationError("Rubric must be a list of criteria.")
+            raise serializers.ValidationError(_("Rubric must be a list of criteria."))
         for row in rubric:
             if not isinstance(row, dict) or "criterion" not in row or "max_points" not in row:
-                raise serializers.ValidationError("Each rubric row needs 'criterion' and 'max_points'.")
+                raise serializers.ValidationError(_("Each rubric row needs 'criterion' and 'max_points'."))
             if not isinstance(row["criterion"], str) or not str(row["criterion"]).strip():
-                raise serializers.ValidationError("'criterion' must be a non-empty string.")
+                raise serializers.ValidationError(_("'criterion' must be a non-empty string."))
             if not isinstance(row["max_points"], int) or row["max_points"] < 0:
-                raise serializers.ValidationError("'max_points' must be a non-negative integer.")
+                raise serializers.ValidationError(_("'max_points' must be a non-negative integer."))
         return rubric
 
     def validate(self, attrs):

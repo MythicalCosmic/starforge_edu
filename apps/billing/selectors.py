@@ -7,8 +7,11 @@ in Redis to avoid a public-schema query on every tenant request.
 
 from __future__ import annotations
 
+from datetime import date, datetime, timedelta
+
 from django.core.cache import cache
 from django.db.models import QuerySet
+from django.utils import timezone
 from django_tenants.utils import get_public_schema_name, schema_context
 
 from apps.billing.models import Plan, Subscription, UsageSnapshot
@@ -55,3 +58,60 @@ def subscription_for_center(*, center_id: int) -> Subscription | None:
 
 def usage_for_center(*, center_id: int) -> QuerySet[UsageSnapshot]:
     return UsageSnapshot.objects.filter(center_id=center_id).select_related("center")
+
+
+def center_dau(*, schema_name: str, on: date | None = None) -> int:
+    """Daily active users for a tenant on `on` (default today, tenant TZ).
+
+    Counts `users.User` rows whose `last_seen_at` falls on the given date,
+    computed INSIDE the tenant schema (users.User is per-schema under TD-3).
+    Used for the live `today` point on the platform usage endpoint (D4-LE-2);
+    the nightly aggregation (D4-LB-7) persists historical DAU into snapshots.
+    """
+    on = on or timezone.localdate()
+    start = timezone.make_aware(datetime(on.year, on.month, on.day))
+    end = start + timedelta(days=1)
+    with schema_context(schema_name):
+        from apps.users.models import User
+
+        return User.objects.filter(last_seen_at__gte=start, last_seen_at__lt=end).count()
+
+
+def usage_series(*, center, days: int = 30) -> dict:
+    """Per-center usage payload for the control center (D4-LE-2).
+
+    Returns ``{"series": [...], "today": {...}}`` where `series` is the last
+    `days` nightly `UsageSnapshot` rows (Lane B writes them) and `today` is a
+    LIVE point: live DAU from `users.User.last_seen_at` + the latest snapshot's
+    students/storage/AI figures (so the dashboard isn't blank before the
+    nightly run). Each point carries its `dau` from the snapshot's stored value;
+    snapshots persist DAU via the nightly job (D4-LB-7 field per WORKLOG).
+    """
+    today = timezone.localdate()
+    floor = today - timedelta(days=max(days, 1) - 1)
+    rows = list(
+        UsageSnapshot.objects.filter(center=center, date__gte=floor, date__lte=today).order_by("date")
+    )
+    series = [_snapshot_point(r) for r in rows]
+
+    latest = rows[-1] if rows else None
+    today_point = {
+        "date": today,
+        "dau": center_dau(schema_name=center.schema_name, on=today),
+        "students": latest.students_count if latest else 0,
+        "storage_bytes": latest.storage_bytes if latest else 0,
+        "ai_tokens": latest.ai_tokens_used if latest else 0,
+    }
+    return {"series": series, "today": today_point}
+
+
+def _snapshot_point(row: UsageSnapshot) -> dict:
+    # `dau` is read from the snapshot if Lane B's nightly job stores it; absent
+    # the column it degrades to 0 (the live `today` point always has real DAU).
+    return {
+        "date": row.date,
+        "dau": getattr(row, "dau", 0) or 0,
+        "students": row.students_count,
+        "storage_bytes": row.storage_bytes,
+        "ai_tokens": row.ai_tokens_used,
+    }

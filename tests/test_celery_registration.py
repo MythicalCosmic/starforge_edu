@@ -21,3 +21,14 @@ def test_beat_tasks_registered_via_autodiscovery():
         assert entry["task"] in app.tasks, f"beat references unregistered task {entry['task']!r}"
     assert "celery_tasks.tenancy_tasks.deactivate_expired_trials" in app.tasks
     assert "celery_tasks.cleanup_tasks.purge_expired_otps" in app.tasks
+
+
+def test_report_schedule_scan_is_clock_aligned_crontab():
+    """The report-schedule scan must use a clock-aligned crontab (:00), not a
+    fixed interval — schedule_is_due requires an exact hour match, so a drifting
+    interval could skip an hour bucket (and its due schedules) after a restart."""
+    from celery.schedules import crontab
+
+    entry = settings.CELERY_BEAT_SCHEDULE["run-due-report-schedules"]
+    assert isinstance(entry["schedule"], crontab)
+    assert entry["schedule"].minute == {0}  # fires at the top of every hour

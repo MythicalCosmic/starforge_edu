@@ -156,6 +156,59 @@ def _queue_dispatch(notification_id: int, channels: list[str] | None, schema: st
     dispatch_notification.delay(notification_id, channels=channels, _schema_name=schema)
 
 
+# ---------------------------------------------------------------------------
+# Realtime producers (D4-LC-6) — the ONLY place dispatch's fan-out talks to the
+# Channels layer (TD-15: dispatch is the single group_send producer). The
+# producer-uniqueness grep test asserts `channel_layer.group_send` is imported
+# only under apps/notifications/ + infrastructure/websocket/. The celery in-app
+# delivery calls push_in_app() rather than importing group_send itself so this
+# module stays the sole producer call site in the notifications stack.
+#
+# Group names are SCHEMA-PREFIXED: user/branch/cohort ids are per-tenant
+# autoincrements, so an unscoped "user.5"/"cohort.3" collides across tenants on
+# the shared Redis channel layer. The Day-4 consumers join the SAME prefixed
+# groups (NotificationConsumer: {schema}.user.{id}/{schema}.branch.{b};
+# AttendanceConsumer: {schema}.cohort.{id}).
+# ---------------------------------------------------------------------------
+def push_in_app(notification, title: str, body: str) -> None:
+    """group_send the in-app payload to ``{schema}.user.{recipient}``.
+
+    Payload ``type`` ``notification.message`` routes to
+    ``NotificationConsumer.notification_message`` (Channels maps dots to
+    underscores). Called from ``dispatch_notification`` (the in-app channel).
+    """
+    from infrastructure.websocket.channel_layer import group_send
+
+    group_send(
+        f"{current_schema()}.user.{notification.user_id}",
+        {
+            "type": "notification.message",
+            "id": notification.pk,
+            "event_type": notification.event_type,
+            "title": title,
+            "body": body,
+            "data": dict(notification.data or {}),
+            "created_at": notification.created_at.isoformat(),
+        },
+    )
+
+
+def push_cohort_attendance(*, cohort_id: int, payload: dict[str, Any]) -> None:
+    """group_send a live attendance update to ``{schema}.cohort.{cohort_id}``.
+
+    Payload ``type`` ``attendance.update`` routes to
+    ``AttendanceConsumer.attendance_update``. Producer of record for the cohort
+    attendance channel (TD-15) — called from the attendance notification
+    receiver (once per attendance event), never from apps.attendance directly.
+    """
+    from infrastructure.websocket.channel_layer import group_send
+
+    group_send(
+        f"{current_schema()}.cohort.{cohort_id}",
+        {"type": "attendance.update", **payload},
+    )
+
+
 def _json_safe(context: dict[str, Any]) -> dict[str, Any]:
     """JSON-serializable copy of the context for the Notification.data column."""
     safe: dict[str, Any] = {}
@@ -203,11 +256,26 @@ def render_template(
     return subject, body
 
 
-# Locale fallback order for any requested locale: requested -> en -> uz.
+def _center_default_locale() -> str:
+    """The center's *explicitly configured* default notification language
+    (CenterSettings.default_language). Returns "" when unset so the implicit
+    platform default does NOT leapfrog the en lingua-franca step — uz is still
+    the final fallback in `_fallback_locales`. A center that sets default_language
+    (e.g. "uz") gets that variant preferred over en."""
+    from apps.org.selectors import get_center_settings
+
+    try:
+        settings_obj = get_center_settings()
+    except Exception:  # public schema / no settings row — no configured default
+        return ""
+    return getattr(settings_obj, "default_language", "") or ""
+
+
+# Locale fallback order (D4-LF-3): requested -> center-default -> en -> uz.
 def _fallback_locales(locale: str) -> list[str]:
     chain = [locale]
-    for fallback in ("en", "uz"):
-        if fallback not in chain:
+    for fallback in (_center_default_locale(), "en", "uz"):
+        if fallback and fallback not in chain:
             chain.append(fallback)
     return chain
 
@@ -217,6 +285,19 @@ def _lookup_template(*, event_type: str, channel: str, locale: str) -> Notificat
     by_locale = {row.locale: row for row in rows}
     for candidate in _fallback_locales(locale):
         if candidate in by_locale:
+            # D4-LF-3: the user's preferred_language variant should exist; when it
+            # doesn't we serve a fallback (center-default -> en -> uz) but log a
+            # warning so the gap is observable (the completeness test asserts every
+            # event type has uz+en+ru in_app rows).
+            if candidate != locale:
+                logger.warning(
+                    "notification template fallback: event=%s channel=%s wanted=%s served=%s schema=%s",
+                    event_type,
+                    channel,
+                    locale,
+                    candidate,
+                    current_schema(),
+                )
             return by_locale[candidate]
     return None
 

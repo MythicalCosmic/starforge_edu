@@ -49,21 +49,30 @@ def _user_from_token(raw_token: str, tenant):
     except (InvalidToken, TokenError):
         return AnonymousUser()
 
+    # TD-1, mirroring core/authentication.TenantAwareJWTAuthentication: the
+    # schema binding MUST be checked BEFORE the user lookup. A cross-tenant
+    # token's user_id row may not exist in THIS schema, so looking the user up
+    # first would mask the mismatch as a plain "user not found". The consumer
+    # turns the resulting AnonymousUser into a close 4401 (cross-tenant replay).
     expected_schema = tenant.schema_name if tenant is not None else get_public_schema_name()
     if validated.get("schema") != expected_schema:
-        # TD-1: the token is bound to the tenant that minted it; a tenant-A
-        # token presented on tenant B's host is a cross-tenant replay.
+        return AnonymousUser()
+
+    user_id = validated.get("user_id")
+    if user_id is None:
         return AnonymousUser()
 
     # Switch schema on THIS thread — database_sync_to_async runs on asgiref's
     # thread-sensitive executor whose connection the event loop never touched.
     with schema_context(expected_schema):
         try:
-            user = User.objects.get(pk=validated["user_id"])
+            user = User.objects.get(pk=user_id)
         except User.DoesNotExist:
             return AnonymousUser()
+        # TD-1 `tv` claim: a stale token_version (logout-everywhere, password
+        # change, role grant/revoke) invalidates every already-minted access
+        # token — for websockets exactly as for HTTP (4401 token_stale).
         if not user.is_active or validated.get("tv") != getattr(user, "token_version", None):
-            # Logout-everywhere / role-change invalidation (TD-1 `tv` claim).
             return AnonymousUser()
         return user
 
@@ -89,7 +98,12 @@ class TenantAwareJWTAuthMiddleware(BaseMiddleware):
 
     @staticmethod
     def _extract_token(scope) -> str | None:
-        # 1) Sec-WebSocket-Protocol: bearer.<token>
+        # 1) Sec-WebSocket-Protocol: bearer.<token>. ASGI servers parse the header
+        #    into scope["subprotocols"]; read that first, then fall back to the raw
+        #    header for environments that don't pre-parse it.
+        for proto in scope.get("subprotocols", []) or []:
+            if proto.startswith("bearer."):
+                return proto.removeprefix("bearer.")
         for header_name, value in scope.get("headers", []):
             if header_name == b"sec-websocket-protocol":
                 for part in value.decode().split(","):

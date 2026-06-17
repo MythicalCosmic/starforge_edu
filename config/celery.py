@@ -19,6 +19,12 @@ app = CeleryApp("starforge", task_cls="core.celery_base:SchemaHeaderTask")
 app.config_from_object("django.conf:settings", namespace="CELERY")
 app.autodiscover_tasks(["celery_tasks"])
 
+# D4-LF-5: DLQ on exhausted retries (Redis list `starforge:dlq`) + per-task
+# duration logging. Idempotent (dispatch_uid); handlers live in celery_tasks.
+from celery_tasks.observability import connect_celery_observability  # noqa: E402
+
+connect_celery_observability(app)
+
 
 @app.task(bind=True)
 def debug_task(self):  # pragma: no cover

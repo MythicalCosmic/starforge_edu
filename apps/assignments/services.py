@@ -161,7 +161,7 @@ def submit(
     is_late = timezone.now() > assignment.due_at + grace
     try:
         with transaction.atomic():
-            return Submission.objects.create(
+            submission = Submission.objects.create(
                 assignment=assignment,
                 student=student,
                 text=text,
@@ -169,6 +169,19 @@ def submit(
                 is_late=is_late,
                 attempt_number=attempt_number,
             )
+        # D4-A: a new submission requests AI feedback. Emitted on commit so the
+        # receiver enqueues run_assignment_feedback exactly once per submission.
+        schema = current_schema()
+        actor_id = getattr(actor, "id", None)
+        transaction.on_commit(
+            lambda: ai_feedback_requested.send(
+                sender=Submission,
+                submission_id=submission.pk,
+                requested_by=actor_id,
+                schema_name=schema,
+            )
+        )
+        return submission
     except IntegrityError as exc:
         # Two concurrent submits for the same (assignment, student) computed the
         # same attempt_number; the UniqueConstraint catches the loser. Surface a

@@ -90,6 +90,96 @@ class SubscriptionViewSet(viewsets.GenericViewSet):
         return Response(SubscriptionSerializer(sub).data)
 
 
+class PlatformSubscriptionViewSet(viewsets.GenericViewSet):
+    """Control-center subscription management (D4-LE-3).
+
+    Mounted at /api/v1/platform/subscriptions/ (NOT under /billing/) so the
+    control center has a flat subscription surface. Lookup is by SUBSCRIPTION
+    id (distinct from the by-center lookup on the legacy
+    /billing/subscriptions/{center_id}/ viewset, which is retained).
+
+    - GET  /platform/subscriptions/        → list all subscriptions
+    - GET  /platform/subscriptions/<id>/   → one subscription
+    - PATCH /platform/subscriptions/<id>/  → change plan / set status
+
+    Every mutation is audited inside the target tenant schema by
+    `services.change_subscription` (D4-LE-5). Reactivating a suspended
+    subscription makes the tenant API return 200 again (Day-3 paywall).
+    """
+
+    serializer_class = SubscriptionSerializer
+    permission_classes = [IsAdminUser]
+    filterset_fields = ("status", "plan")
+    ordering_fields = ("center_id", "current_period_end")
+    # \d+ so a non-numeric id 404s at routing instead of ValueError → 500.
+    lookup_value_regex = r"\d+"
+
+    def get_queryset(self):
+        return Subscription.objects.select_related("plan", "center").all()
+
+    def _get_object(self, pk: int) -> Subscription:
+        sub = self.get_queryset().filter(pk=pk).first()
+        if sub is None:
+            from core.exceptions import NotFoundException
+
+            raise NotFoundException()
+        return sub
+
+    @extend_schema(
+        summary="List all Center subscriptions",
+        responses={200: SubscriptionSerializer(many=True)},
+        tags=["platform"],
+    )
+    def list(self, request, *args, **kwargs):
+        qs = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            return self.get_paginated_response(SubscriptionSerializer(page, many=True).data)
+        return Response(SubscriptionSerializer(qs, many=True).data)
+
+    @extend_schema(
+        summary="Retrieve a subscription by id",
+        responses={200: SubscriptionSerializer},
+        tags=["platform"],
+    )
+    def retrieve(self, request, pk=None):
+        return Response(SubscriptionSerializer(self._get_object(int(pk))).data)
+
+    @extend_schema(
+        summary="Change plan or set status (active|suspended) by subscription id",
+        request=SubscriptionUpdateSerializer,
+        responses={200: SubscriptionSerializer},
+        tags=["platform"],
+        examples=[OpenApiExample("Reactivate", value={"status": "active"})],
+    )
+    def partial_update(self, request, pk=None):
+        sub = self._get_object(int(pk))
+        old_status = sub.status
+        ser = SubscriptionUpdateSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        updated = services.change_subscription(
+            center_id=sub.center_id,
+            plan_code=ser.validated_data.get("plan_code"),
+            status=ser.validated_data.get("status"),
+        )
+        # D4-LE-5: a control-center subscription change is a PlatformEvent (the
+        # tenant-side AuditLog is written by change_subscription). Lazy import:
+        # tenancy is the owner of the public-schema audit trail.
+        from apps.tenancy.services import PlatformEvent, record_platform_event
+
+        record_platform_event(
+            actor=request.user,
+            center=updated.center,
+            event=PlatformEvent.Event.SUBSCRIPTION_CHANGED,
+            payload={
+                "old_status": old_status,
+                "new_status": updated.status,
+                "plan_code": ser.validated_data.get("plan_code"),
+            },
+        )
+        return Response(SubscriptionSerializer(updated).data)
+
+
 class UsageView(APIView):
     """GET /api/v1/platform/billing/usage/?center=<id> — usage snapshots."""
 
