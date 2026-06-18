@@ -13,6 +13,7 @@ from drf_spectacular.utils import (
 )
 from rest_framework import status
 from rest_framework.decorators import action
+from rest_framework.exceptions import MethodNotAllowed
 from rest_framework.permissions import BasePermission
 from rest_framework.response import Response
 
@@ -204,6 +205,12 @@ class CashierShiftViewSet(TenantSafeModelViewSet):
     filterset_fields = ("status", "cashier", "branch")
     ordering_fields = ("opened_at", "closed_at")
     http_method_names = ["get", "post", "head", "options"]
+
+    def create(self, request, *args, **kwargs):
+        # 'post' stays for the open/close @actions; block raw collection-create so
+        # the all-read-only serializer can't reach an INSERT with NULL cashier_id
+        # (IntegrityError 500). Shifts are opened via /cashier-shifts/open/.
+        raise MethodNotAllowed("POST", detail="Open a shift via /finance/cashier-shifts/open/.")
 
     @extend_schema(
         request=CashierShiftOpenSerializer,
