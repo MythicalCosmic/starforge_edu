@@ -57,6 +57,19 @@ def validate_and_presign_upload(*, filename: str, content_type: str, size_bytes:
             code="file_type_not_allowed",
             fields={"filename": [f"Extension '.{ext}' is not in the allowed list."]},
         )
+    # Declared content-type must be consistent with the extension (mirrors the
+    # content app), closing the content-type-confusion gap for known types. Types
+    # with no canonical mapping are not constrained here (the upload is still
+    # presigned for that exact content_type).
+    from apps.content.services import _EXT_MIME
+
+    expected = _EXT_MIME.get(ext)
+    if expected is not None and content_type not in expected:
+        raise UnprocessableEntity(
+            _("The declared content type does not match the file extension."),
+            code="content_type_mismatch",
+            fields={"content_type": [f"'{content_type}' is not valid for '.{ext}'."]},
+        )
     if size_bytes > settings.max_upload_mb * 1024 * 1024:
         raise UnprocessableEntity(
             _("That file is too large."),
