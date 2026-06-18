@@ -6,6 +6,7 @@ from rest_framework.response import Response
 from apps.students import selectors, services
 from apps.students.serializers import (
     BirthdayQuerySerializer,
+    BlockSerializer,
     EnrollmentEventSerializer,
     StudentCreateSerializer,
     StudentDetailSerializer,
@@ -28,6 +29,8 @@ class StudentViewSet(TenantSafeModelViewSet):
         "import_students": "students:write",
         "birthdays": "students:read",
         "events": "students:read",
+        "block": "students:write",
+        "unblock": "students:write",
     }
     filterset_fields = ("status", "branch", "current_cohort")
     search_fields = ("user__first_name", "user__last_name", "user__phone", "student_id")
@@ -129,6 +132,34 @@ class StudentViewSet(TenantSafeModelViewSet):
         if page is not None:
             return self.get_paginated_response(StudentReadSerializer(page, many=True).data)
         return Response(StudentReadSerializer(queryset, many=True).data)
+
+    @extend_schema(
+        summary="Block a student (soft bar; stays enrolled)",
+        request=BlockSerializer,
+        responses={200: StudentReadSerializer},
+        tags=["students"],
+    )
+    @action(detail=True, methods=["post"])
+    def block(self, request, pk=None):
+        student = self.get_object()
+        ser = BlockSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        student = services.block_student(
+            student=student, reason=ser.validated_data["reason"], actor=request.user
+        )
+        return Response(StudentReadSerializer(student).data)
+
+    @extend_schema(
+        summary="Unblock a student",
+        request=None,
+        responses={200: StudentReadSerializer},
+        tags=["students"],
+    )
+    @action(detail=True, methods=["post"])
+    def unblock(self, request, pk=None):
+        student = self.get_object()
+        student = services.unblock_student(student=student, actor=request.user)
+        return Response(StudentReadSerializer(student).data)
 
     @extend_schema(
         summary="A student's enrollment history",

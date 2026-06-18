@@ -182,6 +182,43 @@ def transition_enrollment(
     return student
 
 
+@transaction.atomic
+def block_student(*, student: StudentProfile, reason: str = "", actor=None) -> StudentProfile:
+    """Soft-block a student (disciplinary/financial bar). Idempotent: re-blocking
+    updates the reason but keeps the original blocked_at. Records an EnrollmentEvent
+    note for the audit trail without changing the enrollment status."""
+    if student.blocked_at is None:
+        student.blocked_at = timezone.now()
+    student.block_reason = reason
+    student.save(update_fields=["blocked_at", "block_reason", "updated_at"])
+    EnrollmentEvent.objects.create(
+        student=student,
+        from_status=student.status,
+        to_status=student.status,
+        note=f"blocked: {reason}"[:255] if reason else "blocked",
+        actor=actor,
+    )
+    return student
+
+
+@transaction.atomic
+def unblock_student(*, student: StudentProfile, actor=None) -> StudentProfile:
+    """Clear a soft block. Idempotent (a no-op on an unblocked student)."""
+    if student.blocked_at is None:
+        return student
+    student.blocked_at = None
+    student.block_reason = ""
+    student.save(update_fields=["blocked_at", "block_reason", "updated_at"])
+    EnrollmentEvent.objects.create(
+        student=student,
+        from_status=student.status,
+        to_status=student.status,
+        note="unblocked",
+        actor=actor,
+    )
+    return student
+
+
 def import_students_csv(*, file_obj, branch) -> dict[str, Any]:
     """Create one user+profile per CSV row inside a savepoint so a bad row never
     aborts the valid ones (D1-LD-5). Columns: phone, email, first_name, last_name."""

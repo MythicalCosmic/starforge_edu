@@ -116,6 +116,10 @@ class TransitionSerializer(serializers.Serializer):
     note = serializers.CharField(required=False, allow_blank=True, default="")
 
 
+class BlockSerializer(serializers.Serializer):
+    reason = serializers.CharField(max_length=255, required=False, allow_blank=True, default="")
+
+
 class EnrollmentEventSerializer(serializers.ModelSerializer):
     class Meta:
         model = EnrollmentEvent
