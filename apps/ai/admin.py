@@ -37,6 +37,10 @@ class AIRequestAdmin(admin.ModelAdmin):
     )
     list_filter = ("feature", "status")
     search_fields = ("idempotency_key", "source_app")
-    # Redaction map / output text are sensitive — never editable in admin.
-    readonly_fields = ("redaction_map", "output_text", "idempotency_key", "celery_task_id")
+    # redaction_map is the decrypted PII the redaction subsystem exists to protect,
+    # and output_text can carry un-redacted model output. readonly_fields still
+    # RENDERS them on the change page, so exclude them from the form entirely; they
+    # remain on the model only for programmatic restore().
+    exclude = ("redaction_map", "output_text")
+    readonly_fields = ("idempotency_key", "celery_task_id")
     date_hierarchy = "created_at"
