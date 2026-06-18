@@ -126,8 +126,15 @@ class SubmissionSerializer(serializers.ModelSerializer):
 
 
 class SubmissionCreateSerializer(serializers.Serializer):
-    text = serializers.CharField(required=False, allow_blank=True, default="")
-    attachment_keys = serializers.ListField(child=serializers.CharField(), required=False, default=list)
+    text = serializers.CharField(required=False, allow_blank=True, default="", max_length=20_000)
+    # Bound the attachment list + each key so a single submission can't carry an
+    # unbounded payload into the JSONField (DoS).
+    attachment_keys = serializers.ListField(
+        child=serializers.CharField(max_length=1024),
+        required=False,
+        default=list,
+        max_length=20,
+    )
 
 
 class GradeInputSerializer(serializers.Serializer):
