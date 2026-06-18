@@ -226,15 +226,17 @@ def test_password_reset_wrong_code_5x_invalidates(tenant_a, client_for, user_in,
     assert resp.json()["error"]["code"] == "throttled"
 
 
-def test_reset_request_cooldown_429_with_retry_after(tenant_a, client_for, user_in, sms_outbox):
+def test_reset_request_cooldown_silently_202_no_resend(tenant_a, client_for, user_in, sms_outbox):
+    """Anti-enumeration: a 2nd reset request for a KNOWN identifier within the
+    per-identifier OTP cooldown returns 202 (NOT 429) — identical to an unknown
+    identifier — and sends no second SMS (the cooldown still suppresses resend).
+    A 202-vs-429 difference here was an account-existence oracle."""
     user = _password_user(tenant_a, user_in)
     client = client_for(tenant_a)
     assert client.post(RESET_REQUEST_URL, {"identifier": user.phone}, format="json").status_code == 202
     resp = client.post(RESET_REQUEST_URL, {"identifier": user.phone}, format="json")
-    assert resp.status_code == 429
-    assert resp.json()["error"]["code"] == "throttled"
-    assert "Retry-After" in resp.headers
-    assert len(sms_outbox) == 1  # the throttled request sent nothing
+    assert resp.status_code == 202  # was 429 — would have leaked account existence
+    assert len(sms_outbox) == 1  # cooldown still prevented a second send
 
 
 def test_reset_request_ip_distinct_identifier_cap(tenant_a, client_for):

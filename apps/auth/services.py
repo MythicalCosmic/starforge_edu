@@ -308,7 +308,16 @@ def request_password_reset(*, identifier: str, ip: str = "", user_agent: str = "
     _enforce_ip_cap(ip, identifier)
     if _find_by_identifier(identifier) is None:
         return
-    send_otp(identifier=identifier, purpose=OTP.PURPOSE_RESET, ip=ip, user_agent=user_agent)
+    try:
+        send_otp(identifier=identifier, purpose=OTP.PURPOSE_RESET, ip=ip, user_agent=user_agent)
+    except ThrottledException:
+        # Anti-enumeration: an unknown identifier returns silently (202), so a
+        # KNOWN identifier on its per-identifier OTP cooldown must NOT surface a
+        # 429 — that 202-vs-429 difference was an account-existence oracle. Swallow
+        # the cooldown here; the per-IP distinct-identifier cap (enforced above,
+        # uniformly for known and unknown) and the view's per-identifier throttle
+        # still bound abuse, and the existing valid code stays usable.
+        return
 
 
 def reset_password(
