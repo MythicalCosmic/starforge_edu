@@ -12,8 +12,12 @@ DEBUG = False
 # the default SECRET_KEY would let anyone forge JWTs/sessions, and a wildcard
 # host disables Host-header validation.
 SECRET_KEY = env("SECRET_KEY")
-if not SECRET_KEY or SECRET_KEY == "dev-only-CHANGE-ME":
-    raise ImproperlyConfigured("SECRET_KEY must be set to a unique, secret value in production.")
+# Reject the dev default AND any short/low-entropy key — the JWTs are HS256-signed
+# with this, so a weak key is forgeable (Django's get_random_secret_key() is 50 chars).
+if not SECRET_KEY or SECRET_KEY == "dev-only-CHANGE-ME" or len(SECRET_KEY) < 50:
+    raise ImproperlyConfigured(
+        "SECRET_KEY must be a unique, secret value of at least 50 characters in production."
+    )
 
 ALLOWED_HOSTS = env("ALLOWED_HOSTS")
 if not ALLOWED_HOSTS or "*" in ALLOWED_HOSTS:
