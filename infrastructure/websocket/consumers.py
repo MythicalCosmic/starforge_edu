@@ -26,6 +26,10 @@ from django.contrib.auth.models import AnonymousUser
 # interval down (a 30s real interval would make the heartbeat tests glacial).
 HEARTBEAT_INTERVAL = 30  # seconds between server pings
 HEARTBEAT_MAX_MISSED = 2  # consecutive unanswered pings before close 4408
+# App-level inbound frame cap (in addition to any ASGI server limit): these are
+# tiny JSON control frames (pong / small commands), so anything larger is dropped
+# undecoded as a cheap DoS guard.
+MAX_INBOUND_BYTES = 64 * 1024
 
 # Close codes (also documented in agents/API-CONTRACT.md "Realtime").
 CLOSE_UNAUTHORIZED = 4401  # anonymous / cross-tenant / stale tv
@@ -94,6 +98,13 @@ class HeartbeatConsumerMixin(AsyncJsonWebsocketConsumer):
                 await self.send_json({"type": "ping"})
         except asyncio.CancelledError:  # pragma: no cover - normal on disconnect
             raise
+
+    async def receive(self, text_data=None, bytes_data=None, **kwargs):
+        # Drop an oversized inbound frame undecoded (DoS guard) before the JSON
+        # parse; otherwise preserve the base behavior.
+        if text_data is not None and len(text_data) > MAX_INBOUND_BYTES:
+            return
+        await super().receive(text_data=text_data, bytes_data=bytes_data, **kwargs)
 
     async def receive_json(self, content, **kwargs):
         # A non-dict JSON frame (e.g. "hi", 42, [1]) would make content.get raise
