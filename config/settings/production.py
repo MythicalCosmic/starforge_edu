@@ -52,6 +52,17 @@ ESKIZ_USE_MOCK = False
 # Never mock the Anthropic API in prod (D4-LA-2). Requires a real key [OWNER:O-2].
 ANTHROPIC_USE_MOCK = False
 
+# Never ship a mock money/fiscal/push integration to prod. base.py defaults these
+# to True (mock-first, TD-2) and only ESKIZ/ANTHROPIC were forced off here, so a
+# misconfigured prod could silently fake payments/fiscalization/push. Force them
+# all real — real provider credentials are then required [OWNER:O-5/O-7].
+CLICK_USE_MOCK = False
+PAYME_USE_MOCK = False
+UZUM_USE_MOCK = False
+SOLIQ_USE_MOCK = False
+FCM_USE_MOCK = False
+PLATFORM_PAYMENTS_USE_MOCK = False
+
 # Structured JSON logging in production only (D1-LA-10) — dev/test stay human.
 LOGGING["formatters"]["json"] = {  # type: ignore[index]  # noqa: F405
     "()": "core.logging_filters.JsonFormatter",
