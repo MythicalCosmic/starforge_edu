@@ -373,6 +373,19 @@ def record_webhook_event(
     reused nonce). The existing row is returned untouched with ``is_new=False``."""
     existing = WebhookEvent.objects.filter(provider=provider, event_id=event_id).first()
     if existing is not None:
+        # A previously REJECTED event is NOT a dedupe winner (mark_webhook_rejected's
+        # contract): the provider's corrected retry must be reprocessed, not
+        # swallowed as `duplicate`. Re-arm it as a fresh attempt when the retry now
+        # carries a valid signature; a still-invalid retry stays rejected.
+        if existing.status == WebhookEvent.Status.REJECTED:
+            if signature_valid:
+                existing.payload = payload
+                existing.remote_ip = remote_ip or existing.remote_ip
+                existing.signature_valid = True
+                existing.status = WebhookEvent.Status.RECEIVED
+                existing.save(update_fields=["payload", "remote_ip", "signature_valid", "status"])
+                return existing, True
+            return existing, False
         # P0 fix (D3-F): a replay must be recorded as `duplicate`, not silently
         # returned with its prior status — this is the audit signal that a nonce
         # was reused, and D3-B-6 / the replay tests assert it. Skip this for an
