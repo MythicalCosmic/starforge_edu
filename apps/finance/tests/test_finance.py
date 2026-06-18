@@ -475,6 +475,22 @@ def test_refund_exceeds_paid_rejected(tenant_a):
         assert exc.value.code == "refund_exceeds_paid"
 
 
+def test_refund_exceeds_single_payment_contribution_rejected(tenant_a):
+    """On a multi-payment invoice, one payment can't be refunded for more than IT
+    contributed, even though the invoice-level paid total would allow it."""
+    with schema_context(tenant_a.schema_name):
+        inv = InvoiceFactory(total_uzs=Decimal("100000.00"))
+        services.allocate_payment(payment_id=70, amount_uzs=Decimal("50000.00"))
+        services.allocate_payment(payment_id=71, amount_uzs=Decimal("50000.00"))
+        # Invoice net_paid is 100000, but payment 70 only contributed 50000.
+        with pytest.raises(ValidationException) as exc:
+            services.request_refund(invoice=inv, amount_uzs=Decimal("80000.00"), payment_id=70)
+        assert exc.value.code == "refund_exceeds_payment"
+        # A refund up to the payment's own contribution still succeeds.
+        ok = services.request_refund(invoice=inv, amount_uzs=Decimal("50000.00"), payment_id=70)
+        assert ok.amount_uzs == Decimal("50000.00")
+
+
 def test_register_refund_completion_reverses_allocation_and_status(tenant_a):
     """BLOCKER fix: completing a refund must delete the PaymentAllocation rows and
     flip the invoice off PAID, restoring the outstanding balance."""
