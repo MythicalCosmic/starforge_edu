@@ -116,8 +116,9 @@ def _storage_bytes(schema_name: str) -> int:
 
 
 def _ai_tokens(schema_name: str) -> int:
-    # D3-E-6 stub: apps.ai.selectors.tokens_used_current_month() returns 0 until
-    # D4-A wires the real implementation (declared additive cross-lane touch).
+    # apps.ai.selectors.tokens_used_current_month() is the real metering path now
+    # (delegates to tokens_consumed for the current calendar month); 0 only on a
+    # genuine error or if the AI app isn't importable.
     try:
         from apps.ai.selectors import tokens_used_current_month
     except Exception:

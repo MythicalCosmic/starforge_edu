@@ -1,12 +1,9 @@
 """Finance signal receivers (D3-A-3): auto-issue an invoice on enrollment.
 
-The auto-issue trigger is the cohorts enrollment signal. Day-1 published
-`apps.cohorts.signals.cohort_member_moved` (fires on `move_student`). The
-INITIAL `enroll_student_in_cohort` call does NOT yet emit a signal — see
-integration_needed: a `student_enrolled` emit must be added to
-`apps.cohorts.services.enroll_student_in_cohort` (one `transaction.on_commit`
-line) and connected below. Until then this receiver fires on cohort moves, which
-exercises the dedupe + materialization path end to end.
+The auto-issue trigger is `apps.cohorts.signals.cohort_member_moved`. Both
+`enroll_student_in_cohort` AND `move_student` emit it (via
+`transaction.on_commit`), so this receiver fires on the initial enrollment as
+well as subsequent cohort moves.
 
 The receiver body is deliberately thin: it enqueues nothing heavy synchronously;
 `auto_issue_on_enrollment` is idempotent (dedupe on (student, fee_schedule,
