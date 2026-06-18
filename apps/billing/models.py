@@ -80,6 +80,7 @@ class UsageSnapshot(models.Model):
     students_count = models.PositiveIntegerField(default=0)
     storage_bytes = models.BigIntegerField(default=0)
     ai_tokens_used = models.BigIntegerField(default=0)
+    dau = models.PositiveIntegerField(default=0)  # daily active users captured at snapshot time
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

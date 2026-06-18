@@ -63,10 +63,13 @@ def meter_center(*, center_id: int) -> None:
     if center is None:
         return
 
+    from apps.billing.selectors import center_dau
+
     today = timezone.now().date()
     students_count = _students_count(center.schema_name)
     storage_bytes = _storage_bytes(center.schema_name)
     ai_tokens = _ai_tokens(center.schema_name)
+    dau = center_dau(schema_name=center.schema_name, on=today)
 
     with schema_context(get_public_schema_name()):
         # Snapshot write lives on the public schema (UsageSnapshot is public).
@@ -77,6 +80,7 @@ def meter_center(*, center_id: int) -> None:
                 "students_count": students_count,
                 "storage_bytes": storage_bytes,
                 "ai_tokens_used": ai_tokens,
+                "dau": dau,
             },
         )
         sub = Subscription.objects.select_related("plan", "center").filter(center=center).first()
