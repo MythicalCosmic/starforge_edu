@@ -104,9 +104,13 @@ def _mark_failed(ai_request_id: int, exc: Exception) -> None:
         return
     if request.status in (AIRequest.Status.SUCCEEDED, AIRequest.Status.DENIED_BUDGET):
         return
+    from apps.ai.redaction import redact
+
     release_reservation(ai_request_id=ai_request_id)
     request.status = AIRequest.Status.FAILED
-    request.error_detail = str(exc)[:2000]
+    # Scrub PII (phone/email/national-id) the exception may have echoed from the
+    # prompt before persisting it to this plaintext column.
+    request.error_detail = redact(f"{type(exc).__name__}: {exc}")[0][:2000]
     request.finished_at = timezone.now()
     request.save(update_fields=["status", "error_detail", "finished_at"])
 
