@@ -172,11 +172,13 @@ class AttendanceExportView(TenantSafeAPIView):
     )
     def get(self, request):
         qs = selectors.scoped_records(user=request.user, roles=get_user_roles(request))
-        cohort = request.query_params.get("cohort")
-        term = request.query_params.get("term")
-        if cohort:
+        # Coerce optional FK filters to int; a non-integer (?cohort=abc) otherwise
+        # reaches the DB int cast and raises a 500 instead of a clean 400.
+        cohort = _optional_int(request, "cohort")
+        term = _optional_int(request, "term")
+        if cohort is not None:
             qs = qs.filter(lesson__cohort_id=cohort)
-        if term:
+        if term is not None:
             qs = qs.filter(lesson__term_id=term)
         qs = qs.select_related("marked_by").order_by("lesson__starts_at", "student_id")
 
@@ -216,6 +218,22 @@ def _require_int(request, name: str) -> int:
             f"Query parameter '{name}' is required and must be an integer.",
             code="invalid_query_param",
             fields={name: ["This query parameter is required."]},
+        ) from exc
+
+
+def _optional_int(request, name: str) -> int | None:
+    """Coerce an OPTIONAL int query param: None when absent, 400 when present but
+    non-integer (so it never reaches a DB int cast as a 500)."""
+    raw = request.query_params.get(name)
+    if raw in (None, ""):
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValidationException(
+            f"Query parameter '{name}' must be an integer.",
+            code="invalid_query_param",
+            fields={name: ["Must be an integer."]},
         ) from exc
 
 
