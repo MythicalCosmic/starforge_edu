@@ -28,7 +28,7 @@ from apps.payments.models import (
     WebhookEvent,
 )
 from apps.payments.signals import payment_completed, payment_failed
-from core.exceptions import UnprocessableEntity, ValidationException
+from core.exceptions import NotFoundException, UnprocessableEntity, ValidationException
 from core.utils import current_schema, stable_hash
 from infrastructure.payments.payme import (
     ERR_ACCOUNT_NOT_FOUND,
@@ -216,7 +216,9 @@ def _auto_allocate(payment: Payment) -> None:
 @transaction.atomic
 def allocate_manual(*, payment_id: int, allocations: list[dict[str, Any]]) -> Payment:
     """Manual allocation endpoint body — drives Lane A per (invoice, amount)."""
-    payment = Payment.objects.select_for_update().get(pk=payment_id)
+    payment = Payment.objects.select_for_update().filter(pk=payment_id).first()
+    if payment is None:
+        raise NotFoundException(_("Payment not found."), code="payment_not_found")
     if payment.status != Payment.Status.COMPLETED:
         raise UnprocessableEntity(_("Only completed payments can be allocated."))
     from apps.finance.services import allocate_payment
@@ -574,7 +576,9 @@ def _refund_for_cancelled_payment(payment: Payment, *, reason: int) -> None:
 @transaction.atomic
 def refund_payment(*, payment_id: int, amount_uzs: Decimal | None = None, reason: str = "") -> Payment:
     """Refund a completed payment — drives Lane A's Refund state machine."""
-    payment = Payment.objects.select_for_update().get(pk=payment_id)
+    payment = Payment.objects.select_for_update().filter(pk=payment_id).first()
+    if payment is None:
+        raise NotFoundException(_("Payment not found."), code="payment_not_found")
     if payment.status != Payment.Status.COMPLETED:
         raise UnprocessableEntity(_("Only completed payments can be refunded."))
     invoice_id = payment.metadata.get("invoice_id")
