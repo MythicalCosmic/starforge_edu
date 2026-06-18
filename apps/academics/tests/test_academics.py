@@ -159,6 +159,21 @@ def test_record_results_score_out_of_range_422(tenant_a):
         assert "0" in (exc.value.fields or {})
 
 
+def test_record_results_rejects_student_outside_exam_cohort(tenant_a):
+    """A student not enrolled in the exam's cohort cannot be graded (422), even
+    though ResultEntrySerializer.student is an unscoped StudentProfile queryset."""
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        exam: Any = ExamFactory(max_score=Decimal("100"))
+        outsider: Any = StudentProfileFactory(branch=branch)  # NOT enrolled in exam.cohort
+        with pytest.raises(UnprocessableEntity) as exc:
+            services.record_results(
+                exam=exam, rows=[{"student": outsider, "score": Decimal("50")}], actor=None
+            )
+        assert exc.value.code == "student_not_in_cohort"
+        assert ExamResult.objects.filter(exam=exam).count() == 0
+
+
 def test_grade_changed_emitted_once_on_overwrite(tenant_a, django_capture_on_commit_callbacks):
     received: list[dict] = []
 
@@ -171,6 +186,7 @@ def test_grade_changed_emitted_once_on_overwrite(tenant_a, django_capture_on_com
             branch = BranchFactory()
             exam: Any = ExamFactory(max_score=Decimal("100"))
             student: Any = StudentProfileFactory(branch=branch)
+            CohortMembershipFactory(cohort=exam.cohort, student=student)
 
             with django_capture_on_commit_callbacks(execute=True):
                 services.record_results(
@@ -203,6 +219,7 @@ def test_grade_changed_not_emitted_on_identical_reentry(tenant_a, django_capture
             branch = BranchFactory()
             exam: Any = ExamFactory(max_score=Decimal("100"))
             student: Any = StudentProfileFactory(branch=branch)
+            CohortMembershipFactory(cohort=exam.cohort, student=student)
 
             with django_capture_on_commit_callbacks(execute=True):
                 services.record_results(
@@ -232,6 +249,8 @@ def test_csv_import_atomic_and_row_errors(tenant_a):
         exam: Any = ExamFactory(max_score=Decimal("100"))
         s1: Any = StudentProfileFactory(branch=branch)
         s2: Any = StudentProfileFactory(branch=branch)
+        CohortMembershipFactory(cohort=exam.cohort, student=s1)
+        CohortMembershipFactory(cohort=exam.cohort, student=s2)
 
         # One unknown student_id + one out-of-range score → 422, zero written.
         bad = io.BytesIO(

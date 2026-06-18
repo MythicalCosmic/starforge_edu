@@ -64,6 +64,27 @@ def record_results(*, exam: Exam, rows: list[dict], actor=None) -> dict:
             _("One or more scores are out of range."), code="score_out_of_range", fields=field_errors
         )
 
+    # Every result row must be for a student actively enrolled in THIS exam's
+    # cohort. ResultEntrySerializer.student is unscoped (StudentProfile.all()), so
+    # without this a teacher reaching a scoped exam could still record/overwrite a
+    # grade for any tenant student outside the cohort they teach.
+    valid_student_ids = set(
+        CohortMembership.objects.filter(cohort=exam.cohort, end_date__isnull=True).values_list(
+            "student_id", flat=True
+        )
+    )
+    member_errors = {
+        str(index): [_("Student is not enrolled in this exam's cohort.")]
+        for index, row in enumerate(rows)
+        if row["student"].pk not in valid_student_ids
+    }
+    if member_errors:
+        raise UnprocessableEntity(
+            _("One or more students are not in this exam's cohort."),
+            code="student_not_in_cohort",
+            fields=member_errors,
+        )
+
     schema = current_schema()
     created = updated = 0
     results: list[ExamResult] = []
@@ -98,6 +119,13 @@ def bulk_grade_import(*, exam: Exam, csv_file, actor=None) -> dict:
             _("CSV must have at least 'student_id' and 'score' columns."), code="bad_csv_header"
         )
 
+    # Restrict CSV rows to students actively enrolled in this exam's cohort, so a
+    # global student_id lookup can't write grades for students outside the cohort.
+    valid_student_ids = set(
+        CohortMembership.objects.filter(cohort=exam.cohort, end_date__isnull=True).values_list(
+            "student_id", flat=True
+        )
+    )
     rows: list[dict] = []
     row_errors: list[dict] = []
     for line_no, raw_row in enumerate(reader, start=2):  # line 1 is the header
@@ -105,6 +133,9 @@ def bulk_grade_import(*, exam: Exam, csv_file, actor=None) -> dict:
         student = StudentProfile.objects.filter(student_id=code).first()
         if student is None:
             row_errors.append({"row": line_no, "error": f"Unknown student_id '{code}'."})
+            continue
+        if student.pk not in valid_student_ids:
+            row_errors.append({"row": line_no, "error": f"Student '{code}' is not in this exam's cohort."})
             continue
         try:
             score = Decimal((raw_row.get("score") or "").strip())
