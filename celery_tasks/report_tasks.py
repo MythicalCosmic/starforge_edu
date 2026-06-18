@@ -31,12 +31,19 @@ logger = logging.getLogger("starforge.reports")
 # --------------------------------------------------------------------------- #
 @app.task(bind=True, max_retries=3, retry_backoff=True, acks_late=True)
 def build_report(self, run_id: int) -> str | None:
-    from apps.reports.services import build_report_run, mark_run_failed
+    from apps.reports.services import build_report_run, mark_run_failed, reset_run_for_retry
 
     try:
         return build_report_run(run_id)
-    except Exception as exc:  # mark failed, then let Celery retry
-        mark_run_failed(run_id, exc)
+    except Exception as exc:
+        # Only persist FAILED once the retry budget is exhausted. On an earlier
+        # attempt, reset the run to QUEUED so the retry actually re-executes —
+        # build_report_run flips it to RUNNING before working and early-returns on
+        # any non-QUEUED status, so without the reset every retry was a dead no-op.
+        if self.request.retries >= self.max_retries:
+            mark_run_failed(run_id, exc)
+            raise
+        reset_run_for_retry(run_id)
         raise self.retry(exc=exc) from exc
 
 

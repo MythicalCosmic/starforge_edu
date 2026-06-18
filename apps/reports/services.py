@@ -143,6 +143,17 @@ def mark_run_failed(run_id: int, exc: Exception) -> None:
     )
 
 
+def reset_run_for_retry(run_id: int) -> None:
+    """Put a RUNNING/mid-flight run back to QUEUED so a Celery retry re-executes
+    it. build_report_run early-returns on any non-QUEUED status and flips the run
+    to RUNNING before doing work, so without this reset every retry would
+    short-circuit and the retry budget was a dead no-op."""
+    ReportRun.objects.filter(pk=run_id).exclude(status=ReportRun.Status.DONE).update(
+        status=ReportRun.Status.QUEUED,
+        started_at=None,
+    )
+
+
 def _requester_roles(user) -> set[str]:
     if user is None:
         return set()
