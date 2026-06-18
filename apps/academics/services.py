@@ -27,6 +27,9 @@ from core.exceptions import UnprocessableEntity, ValidationException
 from core.utils import current_schema
 from infrastructure.storage.s3_client import presign_download, upload_bytes
 
+# Max rows accepted in one results-CSV import (bounds memory + per-row DB work).
+MAX_IMPORT_ROWS = 5000
+
 _HUNDRED = Decimal("100")
 
 
@@ -111,6 +114,16 @@ def record_results(*, exam: Exam, rows: list[dict], actor=None) -> dict:
 def bulk_grade_import(*, exam: Exam, csv_file, actor=None) -> dict:
     """Parse a `student_id,score,note?` CSV and record every row, or **422** with
     per-row errors and **zero rows written** if any row is invalid (DoD)."""
+    # Bound input: file size (mirrors import_students_csv) + a row cap, so an
+    # unbounded CSV can't exhaust memory / per-row DB work.
+    settings_obj = get_center_settings()
+    max_bytes = settings_obj.max_upload_mb * 1024 * 1024
+    size = getattr(csv_file, "size", None)
+    if size is not None and size > max_bytes:
+        raise ValidationException(
+            _("File exceeds the maximum upload size of %(mb)s MB.") % {"mb": settings_obj.max_upload_mb},
+            code="file_too_large",
+        )
     raw = csv_file.read()
     text = raw.decode("utf-8-sig") if isinstance(raw, bytes) else raw
     reader = csv.DictReader(io.StringIO(text))
@@ -129,6 +142,11 @@ def bulk_grade_import(*, exam: Exam, csv_file, actor=None) -> dict:
     rows: list[dict] = []
     row_errors: list[dict] = []
     for line_no, raw_row in enumerate(reader, start=2):  # line 1 is the header
+        if line_no - 1 > MAX_IMPORT_ROWS:
+            raise ValidationException(
+                _("CSV exceeds the maximum of %(n)s rows.") % {"n": MAX_IMPORT_ROWS},
+                code="too_many_rows",
+            )
         code = (raw_row.get("student_id") or "").strip()
         student = StudentProfile.objects.filter(student_id=code).first()
         if student is None:

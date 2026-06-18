@@ -19,6 +19,10 @@ from apps.users.services import resolve_or_create_user
 from core.exceptions import ValidationException
 from core.utils import current_schema
 
+# Max rows accepted in one CSV import — bounds a single request's DB write fan-out
+# even within the file-size cap (a small file can hold very many short rows).
+MAX_IMPORT_ROWS = 5000
+
 # Enrollment state machine (D1-LD-3). Terminal: graduated. withdrawn re-enrolls.
 ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     StudentProfile.Status.LEAD: {StudentProfile.Status.APPLICATION},
@@ -193,9 +197,15 @@ def import_students_csv(*, file_obj, branch) -> dict[str, Any]:
         except UnicodeDecodeError:
             raise ValidationException(_("File must be UTF-8 encoded."), code="invalid_encoding") from None
     reader = csv.DictReader(io.StringIO(content))
+    rows = list(reader)
+    if len(rows) > MAX_IMPORT_ROWS:
+        raise ValidationException(
+            _("CSV exceeds the maximum of %(n)s rows.") % {"n": MAX_IMPORT_ROWS},
+            code="too_many_rows",
+        )
     created = 0
     errors: list[dict[str, Any]] = []
-    for index, row in enumerate(reader, start=1):
+    for index, row in enumerate(rows, start=1):
         try:
             with transaction.atomic():
                 create_student(
