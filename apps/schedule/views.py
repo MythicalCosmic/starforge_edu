@@ -3,6 +3,7 @@ from django.http import HttpResponse
 from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import status
 from rest_framework.decorators import action
+from rest_framework.exceptions import MethodNotAllowed
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -111,6 +112,13 @@ class LessonViewSet(TenantSafeModelViewSet):
 
     def get_queryset(self):
         return selectors.scoped_lessons(user=self.request.user, roles=get_user_roles(self.request))
+
+    def create(self, request, *args, **kwargs):
+        # Lessons are materialized from RecurrenceRule occurrences, never POSTed
+        # directly. 'post' stays in http_method_names only for the cancel/move
+        # detail @actions; block collection-create so an all-read-only serializer
+        # can't reach an INSERT with NULL columns (would be a 500, not a 4xx).
+        raise MethodNotAllowed("POST", detail="Lessons are generated from recurrence rules.")
 
     @extend_schema(request=CancelLessonSerializer, responses=LessonSerializer, tags=["schedule"])
     @action(detail=True, methods=["post"])
