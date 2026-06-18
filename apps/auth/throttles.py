@@ -64,7 +64,11 @@ class OTPIdentifierThrottle(SimpleRateThrottle):
         identifier = _normalized_identifier(request)
         if identifier is None:
             return None
-        return f"otp_phone:{identifier}"
+        # Schema-scoped like LoginUserThrottle: a reset OTP targets a user in THIS
+        # tenant, so an attack on tenant A's phone X must not exhaust tenant B's
+        # bucket for the same phone (shared cache). otp_ip/otp_global still bound
+        # cross-tenant abuse.
+        return f"otp_phone:{current_schema()}:{identifier}"
 
 
 class OTPVerifyThrottle(SimpleRateThrottle):
@@ -74,7 +78,7 @@ class OTPVerifyThrottle(SimpleRateThrottle):
         identifier = _normalized_identifier(request)
         if identifier is None:
             return None
-        return f"otp_verify:{identifier}"
+        return f"otp_verify:{current_schema()}:{identifier}"
 
 
 class OTPIPThrottle(SimpleRateThrottle):
