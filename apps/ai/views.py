@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 
+from django.db import transaction
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from drf_spectacular.utils import (
@@ -80,7 +81,12 @@ class BudgetView(TenantSafeAPIView):
         tags=["ai"],
     )
     def get(self, request):
-        budget = services._get_budget_locked()
+        # _get_budget_locked() uses select_for_update (+ may roll day/month
+        # counters over), which REQUIRES an open transaction. Requests run in
+        # autocommit (no ATOMIC_REQUESTS), so wrap the read or Postgres raises
+        # TransactionManagementError -> 500 in prod (masked by test transactions).
+        with transaction.atomic():
+            budget = services._get_budget_locked()
         return Response(BudgetReadSerializer(budget).data)
 
     @extend_schema(
