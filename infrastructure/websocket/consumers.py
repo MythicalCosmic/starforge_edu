@@ -96,6 +96,10 @@ class HeartbeatConsumerMixin(AsyncJsonWebsocketConsumer):
             raise
 
     async def receive_json(self, content, **kwargs):
+        # A non-dict JSON frame (e.g. "hi", 42, [1]) would make content.get raise
+        # AttributeError and crash the consumer; treat any malformed frame as a no-op.
+        if not isinstance(content, dict):
+            return
         if content.get("type") == "pong":
             self._missed_pings = 0
             return
@@ -138,5 +142,7 @@ class PingConsumer(AsyncJsonWebsocketConsumer):
         await self.send_json({"type": "hello", "user_id": user.pk})
 
     async def receive_json(self, content, **kwargs):
+        if not isinstance(content, dict):
+            return
         if content.get("type") == "ping":
             await self.send_json({"type": "pong"})
