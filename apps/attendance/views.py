@@ -110,7 +110,14 @@ class AttendanceSummaryView(TenantSafeAPIView):
 
 class CohortDashboardView(TenantSafeAPIView):
     """GET /cohorts/{cohort_id}/dashboard/ — whole-cohort grid; staff or the
-    teaching teacher only (never a student/parent)."""
+    teaching teacher only (never a student/parent).
+
+    Staff access is INTENTIONALLY tenant-wide (any STAFF_ROLES member can view any
+    cohort's dashboard), consistent with the rest of the attendance/students read
+    layer where STAFF_ROLES see all rows (selectors.scoped_records /
+    students.selectors.scoped_students). A non-teaching, non-staff role is denied.
+    Per-department HOD scoping would be a system-wide design change, not a
+    dashboard-only one."""
 
     permission_classes = [RolePermission]
     resource = "attendance"
