@@ -1,4 +1,4 @@
-from drf_spectacular.utils import OpenApiResponse, extend_schema
+from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema
 from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -8,6 +8,7 @@ from apps.students.filters import StudentFilter
 from apps.students.serializers import (
     BirthdayQuerySerializer,
     BlockSerializer,
+    ComparisonQuerySerializer,
     EnrollmentEventSerializer,
     StudentCreateSerializer,
     StudentDetailSerializer,
@@ -32,6 +33,8 @@ class StudentViewSet(TenantSafeModelViewSet):
         "events": "students:read",
         "block": "students:write",
         "unblock": "students:write",
+        "stats": "students:read",
+        "comparison": "students:read",
     }
     filterset_class = StudentFilter
     search_fields = ("user__first_name", "user__last_name", "user__phone", "student_id")
@@ -133,6 +136,32 @@ class StudentViewSet(TenantSafeModelViewSet):
         if page is not None:
             return self.get_paginated_response(StudentReadSerializer(page, many=True).data)
         return Response(StudentReadSerializer(queryset, many=True).data)
+
+    @extend_schema(
+        summary="Student-list snapshot stats (totals, with/without group, blocked, by status/branch)",
+        responses={200: OpenApiResponse(description="stats object")},
+        tags=["students"],
+    )
+    @action(detail=False, methods=["get"])
+    def stats(self, request):
+        qs = selectors.scoped_students(user=request.user, roles=get_user_roles(request))
+        return Response(selectors.student_stats(qs))
+
+    @extend_schema(
+        summary="Compare joined/left this period vs the previous one",
+        parameters=[
+            OpenApiParameter("metric", str, description="joined | left (default joined)"),
+            OpenApiParameter("unit", str, description="hour | day | week | month | year (default month)"),
+        ],
+        responses={200: OpenApiResponse(description="comparison object")},
+        tags=["students"],
+    )
+    @action(detail=False, methods=["get"])
+    def comparison(self, request):
+        params = ComparisonQuerySerializer(data=request.query_params)
+        params.is_valid(raise_exception=True)
+        qs = selectors.scoped_students(user=request.user, roles=get_user_roles(request))
+        return Response(selectors.student_comparison(qs, **params.validated_data))
 
     @extend_schema(
         summary="Block a student (soft bar; stays enrolled)",

@@ -120,6 +120,13 @@ class BlockSerializer(serializers.Serializer):
     reason = serializers.CharField(max_length=255, required=False, allow_blank=True, default="")
 
 
+class ComparisonQuerySerializer(serializers.Serializer):
+    metric = serializers.ChoiceField(choices=("joined", "left"), required=False, default="joined")
+    unit = serializers.ChoiceField(
+        choices=("hour", "day", "week", "month", "year"), required=False, default="month"
+    )
+
+
 class EnrollmentEventSerializer(serializers.ModelSerializer):
     class Meta:
         model = EnrollmentEvent

@@ -102,3 +102,46 @@ def test_student_filters(tenant_a, user_in, as_user):
 
     # garbage typed param -> 400, never a 500
     assert client.get("/api/v1/students/?age_min=abc").status_code == 400
+
+
+# --------------------------------------------------------------------------- #
+# F2-4 — stats snapshot
+# --------------------------------------------------------------------------- #
+def test_stats_snapshot(tenant_a, user_in, as_user):
+    branch, client = _branch_and_client(tenant_a, user_in, as_user)
+    with schema_context(tenant_a.schema_name):
+        a = create_student(branch=branch, phone="+998905557030")
+        create_student(branch=branch, phone="+998905557031")
+    client.post(f"/api/v1/students/{a.id}/block/", {"reason": "x"}, format="json")
+
+    body = client.get("/api/v1/students/stats/").json()
+    assert body["total"] == 2
+    assert body["without_cohort"] == 2
+    assert body["with_cohort"] == 0
+    assert body["blocked"] == 1
+    assert body["by_status"]["lead"] == 2
+
+
+# --------------------------------------------------------------------------- #
+# F2-5 — period comparison
+# --------------------------------------------------------------------------- #
+def test_comparison_joined_and_left(tenant_a, user_in, as_user):
+    from apps.students.models import StudentProfile
+    from apps.students.services import transition_enrollment
+
+    branch, client = _branch_and_client(tenant_a, user_in, as_user)
+    with schema_context(tenant_a.schema_name):
+        create_student(branch=branch, phone="+998905557040")  # a fresh "join"
+        leaver = create_student(branch=branch, phone="+998905557041", status=StudentProfile.Status.ACTIVE)
+        transition_enrollment(student=leaver, to_status=StudentProfile.Status.WITHDRAWN)
+
+    joined = client.get("/api/v1/students/comparison/?metric=joined&unit=year").json()
+    assert joined["current"] == 2  # both records were created this year
+    assert joined["previous"] == 0
+
+    left = client.get("/api/v1/students/comparison/?metric=left&unit=year").json()
+    assert left["current"] == 1  # one withdrawal this year
+    assert left["unit"] == "year"
+
+    # bad enum -> 400
+    assert client.get("/api/v1/students/comparison/?unit=decade").status_code == 400
