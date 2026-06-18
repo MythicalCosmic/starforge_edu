@@ -38,13 +38,17 @@ def generate_statement_pdf(self, student_id: int, *, locale: str = "en") -> str 
 def late_payment_reminders() -> dict:
     """Daily beat: for every active Center, emit payment reminders for overdue
     invoices. Idempotent within a reminder interval (dedupe in the service)."""
-    from django_tenants.utils import schema_context
+    from django_tenants.utils import get_public_schema_name, schema_context
 
     from apps.finance.services import emit_payment_reminders
     from apps.tenancy.models import Center
 
+    # Exclude the public Center: finance tables are TENANT_APPS-only (absent in
+    # public), so fanning the per-tenant body there raises ProgrammingError.
     results: dict[str, int] = {}
-    for center in Center.objects.filter(is_active=True).iterator():
+    for center in (
+        Center.objects.filter(is_active=True).exclude(schema_name=get_public_schema_name()).iterator()
+    ):
         with schema_context(center.schema_name):
             results[center.schema_name] = emit_payment_reminders()
     return results
@@ -62,14 +66,17 @@ def refresh_fx_rates(self) -> dict:
 
     from django.conf import settings
     from django.core.cache import cache
-    from django_tenants.utils import schema_context
+    from django_tenants.utils import get_public_schema_name, schema_context
 
     from apps.org.selectors import get_center_settings
     from apps.tenancy.models import Center
 
     use_mock = getattr(settings, "FINANCE_FX_USE_MOCK", True)
+    # Exclude the public Center: org/finance tables are TENANT_APPS-only.
     results: dict[str, str | None] = {}
-    for center in Center.objects.filter(is_active=True).iterator():
+    for center in (
+        Center.objects.filter(is_active=True).exclude(schema_name=get_public_schema_name()).iterator()
+    ):
         with schema_context(center.schema_name):
             cs = get_center_settings()
             if (cs.fx_source or "cbu") != "cbu":

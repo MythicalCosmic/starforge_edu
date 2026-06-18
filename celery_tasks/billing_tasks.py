@@ -25,9 +25,13 @@ logger = logging.getLogger("starforge.billing")
 
 
 def _active_centers():
+    from django_tenants.utils import get_public_schema_name
+
     from apps.tenancy.models import Center
 
-    return list(Center.objects.filter(is_active=True))
+    # Exclude the public Center: nightly metering counts students etc. which are
+    # TENANT_APPS-only tables, absent in the public schema (ProgrammingError).
+    return list(Center.objects.filter(is_active=True).exclude(schema_name=get_public_schema_name()))
 
 
 @app.task

@@ -9,9 +9,17 @@ from config.celery import app
 
 
 def _active_schemas():
+    from django_tenants.utils import get_public_schema_name
+
     from apps.tenancy.models import Center
 
-    return list(Center.objects.filter(is_active=True).values_list("schema_name", flat=True))
+    # Exclude the public Center: attendance tables are TENANT_APPS-only and absent
+    # in the public schema, so a per-tenant body there raises ProgrammingError.
+    return list(
+        Center.objects.filter(is_active=True)
+        .exclude(schema_name=get_public_schema_name())
+        .values_list("schema_name", flat=True)
+    )
 
 
 @app.task
