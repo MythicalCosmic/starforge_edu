@@ -3,7 +3,7 @@
 from django.core.exceptions import ImproperlyConfigured
 
 from .base import *  # noqa: F403
-from .base import FIELD_ENCRYPTION_KEY, env
+from .base import CORS_ALLOWED_ORIGINS, CSRF_TRUSTED_ORIGINS, FIELD_ENCRYPTION_KEY, env
 
 DEBUG = False
 
@@ -26,6 +26,16 @@ if not ALLOWED_HOSTS or "*" in ALLOWED_HOSTS:
 # TD-11 / O-11: encrypted fields are unreadable without this — fail fast.
 if not FIELD_ENCRYPTION_KEY:
     raise ImproperlyConfigured("FIELD_ENCRYPTION_KEY must be set in production (TD-11).")
+
+# CORS/CSRF must be an explicit allowlist in prod, never a wildcard (D5-A-3):
+# CORS_ALLOW_CREDENTIALS is True, so a wildcard origin would expose authenticated
+# responses to any site.
+if globals().get("CORS_ALLOW_ALL_ORIGINS"):
+    raise ImproperlyConfigured("CORS_ALLOW_ALL_ORIGINS must be False in production.")
+if any("*" in origin for origin in CORS_ALLOWED_ORIGINS):
+    raise ImproperlyConfigured("CORS_ALLOWED_ORIGINS must not contain a wildcard in production.")
+if any("*" in origin for origin in CSRF_TRUSTED_ORIGINS):
+    raise ImproperlyConfigured("CSRF_TRUSTED_ORIGINS must not contain a wildcard in production.")
 
 SECURE_SSL_REDIRECT = True
 SECURE_HSTS_SECONDS = 60 * 60 * 24 * 365
