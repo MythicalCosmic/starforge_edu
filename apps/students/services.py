@@ -96,6 +96,8 @@ def create_student(
     middle_name: str = "",
     status: str = StudentProfile.Status.LEAD,
     academic_level: str = "",
+    location: str = "",
+    previous_school: str = "",
     medical_notes: str = "",
     emergency_contacts: list | None = None,
     skip_limit_check: bool = False,
@@ -127,6 +129,8 @@ def create_student(
         status=status,
         enrollment_date=timezone.now().date() if status in _ENROLLED_OR_LATER else None,
         academic_level=academic_level,
+        location=location,
+        previous_school=previous_school,
         medical_notes=medical_notes,
         emergency_contacts=emergency_contacts or [],
     )

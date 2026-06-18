@@ -30,6 +30,7 @@ class StudentReadSerializer(serializers.ModelSerializer):
     is only served on retrieve, role-gated via StudentDetailSerializer."""
 
     user = StudentUserSerializer(read_only=True)
+    is_blocked = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = StudentProfile
@@ -41,6 +42,11 @@ class StudentReadSerializer(serializers.ModelSerializer):
             "current_cohort",
             "enrollment_date",
             "academic_level",
+            "location",
+            "previous_school",
+            "is_blocked",
+            "blocked_at",
+            "block_reason",
             "emergency_contacts",
             "user",
             "created_at",
@@ -79,6 +85,8 @@ class StudentCreateSerializer(serializers.Serializer):
         choices=StudentProfile.Status.choices, required=False, default=StudentProfile.Status.LEAD
     )
     academic_level = serializers.CharField(max_length=64, required=False, allow_blank=True, default="")
+    location = serializers.CharField(max_length=200, required=False, allow_blank=True, default="")
+    previous_school = serializers.CharField(max_length=200, required=False, allow_blank=True, default="")
     medical_notes = serializers.CharField(required=False, allow_blank=True, default="")
     emergency_contacts = serializers.JSONField(required=False)
 
@@ -97,7 +105,7 @@ class StudentUpdateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = StudentProfile
-        fields = ("academic_level", "medical_notes", "emergency_contacts")
+        fields = ("academic_level", "location", "previous_school", "medical_notes", "emergency_contacts")
 
 
 class TransitionSerializer(serializers.Serializer):

@@ -31,9 +31,15 @@ class StudentProfile(models.Model):
     )
     enrollment_date = models.DateField(null=True, blank=True)
     academic_level = models.CharField(max_length=64, blank=True)
+    location = models.CharField(max_length=200, blank=True)  # F2-1: city/area for filtering
+    previous_school = models.CharField(max_length=200, blank=True)  # F2-1: academic school at intake
     medical_notes = EncryptedTextField(blank=True)
     emergency_contacts = models.JSONField(default=list, blank=True)
     photo = models.ImageField(upload_to="students/photos/", blank=True)
+    # F2-2: soft block — a barred-but-still-enrolled student (disciplinary/financial),
+    # distinct from the WITHDRAWN terminal status. Null = not blocked.
+    blocked_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    block_reason = models.CharField(max_length=255, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -44,6 +50,10 @@ class StudentProfile(models.Model):
 
     def __str__(self) -> str:  # pragma: no cover
         return self.student_id
+
+    @property
+    def is_blocked(self) -> bool:
+        return self.blocked_at is not None
 
 
 class EnrollmentEvent(models.Model):
