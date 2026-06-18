@@ -102,8 +102,8 @@ class PlatformEvent(models.Model):
     class Meta:
         ordering = ("-created_at",)
         indexes = [
-            models.Index(fields=("center", "created_at"), name="platformevent_center_created_idx"),
-            models.Index(fields=("event", "created_at"), name="platformevent_event_created_idx"),
+            models.Index(fields=("center", "created_at"), name="pe_center_created_idx"),
+            models.Index(fields=("event", "created_at"), name="pe_event_created_idx"),
         ]
 
     def __str__(self) -> str:  # pragma: no cover

@@ -65,10 +65,10 @@ class Migration(migrations.Migration):
         ),
         migrations.AddIndex(
             model_name="platformevent",
-            index=models.Index(fields=["center", "created_at"], name="platformevent_center_created_idx"),
+            index=models.Index(fields=["center", "created_at"], name="pe_center_created_idx"),
         ),
         migrations.AddIndex(
             model_name="platformevent",
-            index=models.Index(fields=["event", "created_at"], name="platformevent_event_created_idx"),
+            index=models.Index(fields=["event", "created_at"], name="pe_event_created_idx"),
         ),
     ]
