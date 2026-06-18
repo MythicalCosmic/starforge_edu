@@ -15,6 +15,7 @@ from apps.students.serializers import (
     TransitionSerializer,
 )
 from core.permissions import default_perms, get_user_roles
+from core.throttles import BulkImportThrottle
 from core.viewsets import TenantSafeModelViewSet
 
 
@@ -99,7 +100,7 @@ class StudentViewSet(TenantSafeModelViewSet):
         responses={201: OpenApiResponse(description="{created, errors}")},
         tags=["students"],
     )
-    @action(detail=False, methods=["post"], url_path="import")
+    @action(detail=False, methods=["post"], url_path="import", throttle_classes=[BulkImportThrottle])
     def import_students(self, request):
         serializer = StudentImportSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)

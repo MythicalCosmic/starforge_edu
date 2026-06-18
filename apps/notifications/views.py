@@ -18,6 +18,7 @@ from apps.notifications.serializers import (
 )
 from core.pagination import TimelinePagination
 from core.permissions import RolePermission
+from core.throttles import AnnouncementThrottle
 from core.viewsets import TenantSafeAPIView, TenantSafeModelViewSet
 
 
@@ -147,6 +148,9 @@ class AnnouncementView(TenantSafeAPIView):
     """POST a cohort announcement (fan-out via chunked rate-limited Celery)."""
 
     permission_classes = [RolePermission]
+    # Mass messaging is expensive (per-recipient notification fan-out); the broad
+    # 1000/min user rate doesn't bound it. Cap per (schema, user).
+    throttle_classes = [AnnouncementThrottle]
     resource = "notifications"
     required_perms = {"post": "notifications:write"}
 

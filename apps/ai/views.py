@@ -40,6 +40,7 @@ from apps.ai.serializers import (
 )
 from core.exceptions import ValidationException
 from core.permissions import ObjectScopedPermission, RolePermission
+from core.throttles import AIGenerationThrottle
 from core.viewsets import TenantSafeAPIView, assert_tenant_context
 
 
@@ -104,6 +105,9 @@ class BudgetView(TenantSafeAPIView):
 
 class ExamGenerationView(TenantSafeAPIView):
     resource = "ai"
+    # A per-request rate cap in addition to the token budget: stops request
+    # flooding (each call is a model round-trip) before budget accounting runs.
+    throttle_classes = [AIGenerationThrottle]
     required_perms = {"post": "ai:write"}
 
     @extend_schema(

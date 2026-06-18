@@ -263,6 +263,10 @@ REST_FRAMEWORK = {
         "otp_verify": "10/min",
         "otp_ip": "10/min",
         "otp_global": "1000/hour",
+        # Per-(schema, user) caps on expensive endpoints (core.throttles).
+        "announcement": "10/min",
+        "bulk_import": "6/min",
+        "ai_generation": "20/min",
     },
     # Trusted-proxy depth for DRF's get_ident (IP throttles); mirrors
     # core.utils.client_ip so all IP-keyed controls share one source.

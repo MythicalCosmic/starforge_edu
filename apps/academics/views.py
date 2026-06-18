@@ -25,6 +25,7 @@ from apps.parents.models import Guardian
 from apps.schedule.models import Term
 from core.exceptions import PermissionException, ValidationException
 from core.permissions import Role, RolePermission, default_perms, get_user_roles, has_permission_code
+from core.throttles import BulkImportThrottle
 from core.viewsets import TenantSafeAPIView, TenantSafeModelViewSet
 
 # Honor-roll / warnings are staff-facing aggregates (never exposed to the
@@ -96,6 +97,7 @@ class ExamViewSet(TenantSafeModelViewSet):
         methods=["post"],
         url_path="results/import-csv",
         parser_classes=[MultiPartParser, FormParser],
+        throttle_classes=[BulkImportThrottle],
     )
     def import_csv(self, request, pk=None):
         exam = self.get_object()
