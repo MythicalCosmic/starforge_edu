@@ -76,3 +76,29 @@ def test_block_requires_write_role(tenant_a, user_in, as_user):
     teacher = as_user(tenant_a, user_in(tenant_a, roles=[Role.TEACHER], branch=branch))
     resp = teacher.post(f"/api/v1/students/{student.id}/block/", {"reason": "x"}, format="json")
     assert resp.status_code == 403
+
+
+# --------------------------------------------------------------------------- #
+# F2-3 — rich filters
+# --------------------------------------------------------------------------- #
+def test_student_filters(tenant_a, user_in, as_user):
+    branch, client = _branch_and_client(tenant_a, user_in, as_user)
+    with schema_context(tenant_a.schema_name):
+        a = create_student(
+            branch=branch, phone="+998905557020", location="Tashkent", academic_level="A1"
+        )
+        create_student(branch=branch, phone="+998905557021", location="Samarkand", academic_level="B2")
+
+    def ids(query):
+        return {r["id"] for r in client.get(f"/api/v1/students/?{query}").json()["results"]}
+
+    assert ids("location=tash") == {a.id}
+    assert ids("level=a1") == {a.id}  # iexact, case-insensitive
+    assert len(ids("has_cohort=false")) == 2  # neither is enrolled in a cohort
+
+    client.post(f"/api/v1/students/{a.id}/block/", {"reason": "x"}, format="json")
+    assert ids("blocked=true") == {a.id}
+    assert a.id not in ids("blocked=false")
+
+    # garbage typed param -> 400, never a 500
+    assert client.get("/api/v1/students/?age_min=abc").status_code == 400

@@ -4,6 +4,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from apps.students import selectors, services
+from apps.students.filters import StudentFilter
 from apps.students.serializers import (
     BirthdayQuerySerializer,
     BlockSerializer,
@@ -32,7 +33,7 @@ class StudentViewSet(TenantSafeModelViewSet):
         "block": "students:write",
         "unblock": "students:write",
     }
-    filterset_fields = ("status", "branch", "current_cohort")
+    filterset_class = StudentFilter
     search_fields = ("user__first_name", "user__last_name", "user__phone", "student_id")
     ordering_fields = ("created_at", "enrollment_date", "student_id")
 
