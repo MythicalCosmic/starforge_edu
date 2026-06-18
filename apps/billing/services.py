@@ -180,9 +180,7 @@ def apply_state_flip(*, subscription: Subscription, new_status: str) -> Subscrip
         return subscription
     subscription.status = new_status
     subscription.save(update_fields=["status", "updated_at"])
-    transaction.on_commit(
-        lambda s=subscription.center.schema_name: _invalidate_subscription_cache(s)
-    )
+    transaction.on_commit(lambda s=subscription.center.schema_name: _invalidate_subscription_cache(s))
 
     if new_status in (Subscription.Status.PAST_DUE, Subscription.Status.SUSPENDED):
         transaction.on_commit(lambda: _run_dunning(center_id=subscription.center_id, status=new_status))

@@ -528,7 +528,8 @@ def request_refund(
     # reverse_allocations_for_payment can only release that payment's own rows.
     if payment_id is not None:
         pay_allocated = (
-            PaymentAllocation.objects.filter(payment_id=payment_id).aggregate(s=Sum("amount_uzs"))["s"] or _ZERO
+            PaymentAllocation.objects.filter(payment_id=payment_id).aggregate(s=Sum("amount_uzs"))["s"]
+            or _ZERO
         )
         pay_in_flight = (
             Refund.objects.filter(payment_id=payment_id, state__in=in_flight_states).aggregate(
