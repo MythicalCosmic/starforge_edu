@@ -7,7 +7,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from apps.users.services import register_device
-from core.permissions import RolePermission
+from core.permissions import DenyWriteForReadOnlyToken, RolePermission
 from core.utils import user_agent
 
 from .models import Device, User
@@ -22,9 +22,11 @@ class UserViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, viewsets.Gen
     def get_permissions(self):
         # `me` is self-scoped: any authenticated user hydrates their own profile,
         # regardless of role. Directory list/retrieve require `users:read`.
+        # DenyWriteForReadOnlyToken blocks the PATCH `me` write under a read-only
+        # impersonation token (this viewset isn't a TenantSafe base, D4-LE-4).
         if getattr(self, "action", None) == "me":
-            return [IsAuthenticated()]
-        return [RolePermission()]
+            return [IsAuthenticated(), DenyWriteForReadOnlyToken()]
+        return [RolePermission(), DenyWriteForReadOnlyToken()]
 
     @extend_schema(
         summary="Current user + role memberships (GET) or update own profile (PATCH)",
@@ -57,7 +59,7 @@ class DeviceViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
     (D1-LC-9)."""
 
     serializer_class = DeviceSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, DenyWriteForReadOnlyToken]
 
     def get_queryset(self):
         # IsAuthenticated guarantees a concrete user here.

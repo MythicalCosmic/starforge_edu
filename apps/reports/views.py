@@ -22,7 +22,7 @@ from apps.reports.serializers import (
     ReportScheduleWriteSerializer,
     ReportSerializer,
 )
-from core.permissions import RolePermission, get_user_roles
+from core.permissions import DenyWriteForReadOnlyToken, RolePermission, get_user_roles
 from core.viewsets import assert_tenant_context
 
 
@@ -56,7 +56,7 @@ class ReportRunViewSet(
     a fresh download URL when done."""
 
     serializer_class = ReportRunReadSerializer
-    permission_classes = [RolePermission]
+    permission_classes = [RolePermission, DenyWriteForReadOnlyToken]
     resource = "reports"
     required_perms = {"create": "reports:write"}
     queryset = ReportRun.objects.none()
@@ -109,7 +109,7 @@ class ReportScheduleViewSet(
     """Recurring report schedules (manage = reports:write)."""
 
     serializer_class = ReportScheduleReadSerializer
-    permission_classes = [RolePermission]
+    permission_classes = [RolePermission, DenyWriteForReadOnlyToken]
     resource = "reports"
     required_perms = {"create": "reports:write", "partial_update": "reports:write", "update": "reports:write"}
     queryset = ReportSchedule.objects.none()

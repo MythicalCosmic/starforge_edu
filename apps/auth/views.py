@@ -7,6 +7,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.users.services import register_device
+from core.permissions import DenyWriteForReadOnlyToken
 from core.utils import client_ip, user_agent
 
 from . import services
@@ -71,7 +72,7 @@ class PasswordChangeView(APIView):
     returns a fresh pair so THIS device stays logged in.
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, DenyWriteForReadOnlyToken]
 
     @extend_schema(
         summary="Change password (ends all other sessions)",
@@ -217,7 +218,7 @@ class LogoutAllView(APIView):
     `token_version` so live access tokens are rejected too (D1-LC-8).
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, DenyWriteForReadOnlyToken]
 
     @extend_schema(
         summary="Log out of every device",
