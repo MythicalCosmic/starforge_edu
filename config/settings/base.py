@@ -510,6 +510,9 @@ ANTHROPIC_USE_MOCK = env("ANTHROPIC_USE_MOCK")
 # throwaway key, prod REQUIRES a real one (core.fields raises without it).
 FIELD_ENCRYPTION_KEY = env("FIELD_ENCRYPTION_KEY")
 ANTHROPIC_PROMPT_CACHE_TTL_SECONDS = 60 * 60 * 24  # 24h
+# Explicit HTTP timeout for the real Anthropic client (well under the 25-min task
+# soft limit) so a stuck call fails fast and the task can retry.
+ANTHROPIC_REQUEST_TIMEOUT_SECONDS = 120.0
 
 # Per-tenant AI budget defaults (override per-tenant via TenantAIBudget rows).
 AI_DEFAULT_DAILY_TOKENS = 100_000

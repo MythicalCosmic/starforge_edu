@@ -31,7 +31,11 @@ def get_client():  # pragma: no cover - real client never constructed under mock
     # `complete()` never reaches here and `anthropic` need not be importable.
     import anthropic
 
-    return anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+    # Explicit timeout so a stuck HTTP call fails fast (and the Celery task can
+    # retry) instead of hanging toward the task soft time limit. Sized well under
+    # CELERY_TASK_SOFT_TIME_LIMIT (25 min).
+    timeout = getattr(settings, "ANTHROPIC_REQUEST_TIMEOUT_SECONDS", 120.0)
+    return anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY, timeout=timeout)
 
 
 def _mock_complete(
