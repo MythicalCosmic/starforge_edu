@@ -640,14 +640,18 @@ def _assert_provider_amount(payload: dict, invoice) -> None:
             fields={"amount": ["required"]},
         )
     try:
-        reported = int(Decimal(str(raw)))
+        # Compare as exact Decimals (NOT int()): truncating to whole soum would let
+        # a provider under-pay a fractional invoice (e.g. 1000.50 vs 1000) and still
+        # credit the full total. Decimal equality ignores trailing zeros, so
+        # "1000" == 1000.00.
+        reported = Decimal(str(raw))
     except (ArithmeticError, ValueError) as exc:
         raise ValidationException(
             _("Provider callback amount is not a number."),
             code="amount_invalid",
             fields={"amount": [str(raw)]},
         ) from exc
-    expected = int(invoice.total_uzs)
+    expected = invoice.total_uzs
     if reported != expected:
         raise ValidationException(
             _("Provider amount does not match the invoice total."),
