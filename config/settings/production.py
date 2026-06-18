@@ -37,6 +37,16 @@ if any("*" in origin for origin in CORS_ALLOWED_ORIGINS):
 if any("*" in origin for origin in CSRF_TRUSTED_ORIGINS):
     raise ImproperlyConfigured("CSRF_TRUSTED_ORIGINS must not contain a wildcard in production.")
 
+# Production terminates TLS behind a reverse proxy (SECURE_PROXY_SSL_HEADER below),
+# so NUM_PROXIES MUST reflect the trusted hop count — otherwise client_ip / DRF's
+# get_ident resolve every client to the proxy's IP and all IP-keyed throttles
+# (login_ip, otp_ip, ...) collapse into one shared bucket.
+if env("NUM_PROXIES") < 1:
+    raise ImproperlyConfigured(
+        "NUM_PROXIES must be set to the number of trusted reverse-proxy hops (>=1) in production; "
+        "IP-keyed throttles depend on it."
+    )
+
 SECURE_SSL_REDIRECT = True
 SECURE_HSTS_SECONDS = 60 * 60 * 24 * 365
 SECURE_HSTS_INCLUDE_SUBDOMAINS = True
