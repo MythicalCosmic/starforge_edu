@@ -110,7 +110,14 @@ class TenantAwareJWTAuthMiddleware(BaseMiddleware):
                     part = part.strip()
                     if part.startswith("bearer."):
                         return part.removeprefix("bearer.")
-        # 2) ?token=<token>
+        # 2) ?token=<token> — convenient for clients that can't set a subprotocol,
+        #    but the token lands in proxy/access logs. Operators can disable this
+        #    fallback (WEBSOCKET_ALLOW_QUERY_TOKEN=False) to force the subprotocol
+        #    (bearer.<token>) path, which every browser can also use.
+        from django.conf import settings
+
+        if not getattr(settings, "WEBSOCKET_ALLOW_QUERY_TOKEN", True):
+            return None
         query = parse_qs(scope.get("query_string", b"").decode())
         token_list = query.get("token") or []
         return token_list[0] if token_list else None

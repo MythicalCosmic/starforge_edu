@@ -301,6 +301,10 @@ SPECTACULAR_SETTINGS = {
 # ---------------------------------------------------------------------------
 # Channels (Redis)
 # ---------------------------------------------------------------------------
+# Allow the WS ?token= auth fallback (default on for client compatibility). Set
+# False to force subprotocol-only auth (keeps tokens out of proxy/access logs).
+WEBSOCKET_ALLOW_QUERY_TOKEN = env.bool("WEBSOCKET_ALLOW_QUERY_TOKEN", default=True)
+
 _channel_redis = env("CHANNEL_REDIS_URL") or env("REDIS_URL")
 CHANNEL_LAYERS = {
     "default": {
