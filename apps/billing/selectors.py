@@ -7,6 +7,7 @@ in Redis to avoid a public-schema query on every tenant request.
 
 from __future__ import annotations
 
+import contextlib
 from datetime import date, datetime, timedelta
 
 from django.core.cache import cache
@@ -38,13 +39,20 @@ def get_subscription_status(*, schema_name: str, center_id: int) -> str | None:
     cache hit (the common path) no query runs and the context switch is skipped.
     """
     key = subscription_cache_key(schema_name)
-    cached = cache.get(key)
+    # Degrade gracefully if the cache (Redis) is unavailable: fall back to a direct
+    # public-schema read instead of letting the gate middleware 500 every tenant
+    # request on a Redis outage.
+    try:
+        cached = cache.get(key)
+    except Exception:  # any cache backend error -> treat as a miss, read from DB
+        cached = None
     if cached is not None:
         # Sentinel "" means "no subscription row" (distinct from a cache miss).
         return cached or None
     with schema_context(get_public_schema_name()):
         status = Subscription.objects.filter(center_id=center_id).values_list("status", flat=True).first()
-    cache.set(key, status or "", timeout=SUBSCRIPTION_CACHE_TIMEOUT)
+    with contextlib.suppress(Exception):  # a cache write failure must not break the request
+        cache.set(key, status or "", timeout=SUBSCRIPTION_CACHE_TIMEOUT)
     return status
 
 
