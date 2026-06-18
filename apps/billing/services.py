@@ -71,7 +71,9 @@ def create_trial_subscription(*, center) -> Subscription:
         current_period_start=now,
         current_period_end=period_end,
     )
-    _invalidate_subscription_cache(center.schema_name)
+    # Invalidate AFTER commit: clearing inside the tx lets a concurrent request
+    # re-cache the pre-change status from the uncommitted row (paywall re-poison).
+    transaction.on_commit(lambda s=center.schema_name: _invalidate_subscription_cache(s))
     return sub
 
 
@@ -172,7 +174,9 @@ def apply_state_flip(*, subscription: Subscription, new_status: str) -> Subscrip
         return subscription
     subscription.status = new_status
     subscription.save(update_fields=["status", "updated_at"])
-    _invalidate_subscription_cache(subscription.center.schema_name)
+    transaction.on_commit(
+        lambda s=subscription.center.schema_name: _invalidate_subscription_cache(s)
+    )
 
     if new_status in (Subscription.Status.PAST_DUE, Subscription.Status.SUSPENDED):
         transaction.on_commit(lambda: _run_dunning(center_id=subscription.center_id, status=new_status))
@@ -331,7 +335,7 @@ def change_subscription(
         if old != status:
             _audit_subscription_change(center=sub.center, old_status=old, new_status=status)
     sub.save(update_fields=["plan", "status", "updated_at"])
-    _invalidate_subscription_cache(sub.center.schema_name)
+    transaction.on_commit(lambda s=sub.center.schema_name: _invalidate_subscription_cache(s))
     return sub
 
 
@@ -357,7 +361,7 @@ def process_platform_checkout(*, center_id: int, provider: str = "payme") -> Sub
     old = sub.status
     sub.status = Subscription.Status.ACTIVE
     sub.save(update_fields=["current_period_end", "status", "updated_at"])
-    _invalidate_subscription_cache(sub.center.schema_name)
+    transaction.on_commit(lambda s=sub.center.schema_name: _invalidate_subscription_cache(s))
     if old != Subscription.Status.ACTIVE:
         _audit_subscription_change(center=sub.center, old_status=old, new_status=sub.status)
     return sub
