@@ -104,7 +104,7 @@ def change_password(*, user: User, old_password: str, new_password: str) -> dict
     return issue_token_pair(user)
 
 
-def _validate_new_password(raw: str, user: User) -> None:
+def _validate_new_password(raw: str, user: User | None) -> None:
     try:
         validate_password(raw, user=user)
     except DjangoValidationError as exc:
@@ -327,10 +327,11 @@ def reset_password(
     sessions. The user logs in fresh with the new password afterwards."""
     identifier = _normalize(identifier)
     user = _find_by_identifier(identifier)
-    # Validate the new password BEFORE consuming the OTP, so a weak-password
-    # attempt doesn't burn the (correct) code and force a cooldown-gated re-request.
-    if user is not None:
-        _validate_new_password(new_password, user)
+    # Validate the new password BEFORE consuming the OTP, so a weak-password attempt
+    # doesn't burn the (correct) code. Validate EVEN when the account is unknown
+    # (user=None) so the weak_password response can't distinguish a registered
+    # identifier from an unregistered one (anti-enumeration on the confirm path).
+    _validate_new_password(new_password, user)
     verify_otp(identifier=identifier, code=code, purpose=OTP.PURPOSE_RESET, ip=ip, user_agent=user_agent)
     if user is None:  # unreachable in practice: no OTP is issued for unknowns
         raise ValidationException(_("Invalid code."))
