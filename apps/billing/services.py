@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 from datetime import timedelta
 from decimal import Decimal
+from functools import partial
 
 from django.conf import settings
 from django.core.cache import cache
@@ -73,7 +74,7 @@ def create_trial_subscription(*, center) -> Subscription:
     )
     # Invalidate AFTER commit: clearing inside the tx lets a concurrent request
     # re-cache the pre-change status from the uncommitted row (paywall re-poison).
-    transaction.on_commit(lambda s=center.schema_name: _invalidate_subscription_cache(s))
+    transaction.on_commit(partial(_invalidate_subscription_cache, center.schema_name))
     return sub
 
 
@@ -180,7 +181,7 @@ def apply_state_flip(*, subscription: Subscription, new_status: str) -> Subscrip
         return subscription
     subscription.status = new_status
     subscription.save(update_fields=["status", "updated_at"])
-    transaction.on_commit(lambda s=subscription.center.schema_name: _invalidate_subscription_cache(s))
+    transaction.on_commit(partial(_invalidate_subscription_cache, subscription.center.schema_name))
 
     if new_status in (Subscription.Status.PAST_DUE, Subscription.Status.SUSPENDED):
         transaction.on_commit(lambda: _run_dunning(center_id=subscription.center_id, status=new_status))
@@ -339,7 +340,7 @@ def change_subscription(
         if old != status:
             _audit_subscription_change(center=sub.center, old_status=old, new_status=status)
     sub.save(update_fields=["plan", "status", "updated_at"])
-    transaction.on_commit(lambda s=sub.center.schema_name: _invalidate_subscription_cache(s))
+    transaction.on_commit(partial(_invalidate_subscription_cache, sub.center.schema_name))
     return sub
 
 
@@ -365,7 +366,7 @@ def process_platform_checkout(*, center_id: int, provider: str = "payme") -> Sub
     old = sub.status
     sub.status = Subscription.Status.ACTIVE
     sub.save(update_fields=["current_period_end", "status", "updated_at"])
-    transaction.on_commit(lambda s=sub.center.schema_name: _invalidate_subscription_cache(s))
+    transaction.on_commit(partial(_invalidate_subscription_cache, sub.center.schema_name))
     if old != Subscription.Status.ACTIVE:
         _audit_subscription_change(center=sub.center, old_status=old, new_status=sub.status)
     return sub
