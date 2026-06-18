@@ -597,8 +597,15 @@ def refund_payment(*, payment_id: int, amount_uzs: Decimal | None = None, reason
         reason=reason or "manual_refund",
     )
     register_refund_completion(refund_id=refund.pk, payment_id=payment.pk)
-    payment.status = Payment.Status.REFUNDED
-    payment.save(update_fields=["status", "updated_at"])
+    # Only mark the payment fully REFUNDED once cumulative completed refunds cover
+    # its amount. A PARTIAL refund must leave it COMPLETED so a follow-up partial
+    # refund is still possible (refund_payment requires status==COMPLETED); the
+    # per-payment ceiling in request_refund prevents over-refunding.
+    from apps.finance.services import completed_refund_total_for_payment
+
+    if completed_refund_total_for_payment(payment.pk) >= payment.amount_uzs:
+        payment.status = Payment.Status.REFUNDED
+        payment.save(update_fields=["status", "updated_at"])
     return payment
 
 

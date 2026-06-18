@@ -551,6 +551,17 @@ def request_refund(
     )
 
 
+def completed_refund_total_for_payment(payment_id: int) -> Decimal:
+    """Sum of COMPLETED refunds tied to a payment — used to decide whether a
+    payment has been refunded in full (vs a partial refund)."""
+    return (
+        Refund.objects.filter(payment_id=payment_id, state=Refund.State.COMPLETED).aggregate(
+            s=Sum("amount_uzs")
+        )["s"]
+        or _ZERO
+    )
+
+
 @transaction.atomic
 def transition_refund(*, refund_id: int, to_state: str, actor=None) -> Refund:
     """Move a refund along its state machine; an illegal jump raises
