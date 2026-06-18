@@ -314,7 +314,8 @@ def lessons_for_token(token: str):
     if data.get("schema") != current_schema():
         raise AuthenticationException(_("This feed belongs to a different center."), code="tenant_mismatch")
     user = User.objects.filter(pk=data.get("user_id")).first()
-    if user is None:
+    if user is None or not user.is_active:
+        # A deactivated account's feed URL must stop leaking schedule data.
         raise AuthenticationException(_("Invalid feed token."), code="authentication_failed")
     # token_version mismatch ⇒ password-change / logout-all revoked this feed.
     if data.get("tv") != user.token_version:

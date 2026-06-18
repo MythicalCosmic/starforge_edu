@@ -406,6 +406,12 @@ def rotate_refresh_token(raw_refresh: str) -> dict[str, str]:
     if user is None:
         raise AuthenticationException(_("Invalid or expired refresh token."), code="authentication_failed")
 
+    # A deactivated account must not mint fresh tokens. The HTTP access path is
+    # already covered by simplejwt's get_user(is_active) check, but this refresh
+    # path does its own user lookup, so enforce it here too (symmetric paths).
+    if not user.is_active:
+        raise AuthenticationException(_("This account is inactive."), code="user_inactive")
+
     # Honour the token_version like the access path (core/authentication.py): a
     # password change / role change / logout-all bumps tv, so a refresh carrying
     # a stale tv must NOT mint a fresh pair — otherwise the session never ends.
