@@ -89,16 +89,23 @@ def _set_subscription(center, *, status=Subscription.Status.ACTIVE, period_end=N
 # ---------------------------------------------------------------------------
 # D4-LE-1 — lifecycle: suspend → 402 → activate → 200 (Day-3 paywall reuse)
 # ---------------------------------------------------------------------------
-def test_suspend_then_activate_round_trip(staff_client, tenant_a, client_for):
+def test_suspend_then_activate_round_trip(
+    staff_client, tenant_a, client_for, django_capture_on_commit_callbacks
+):
     _set_subscription(tenant_a, status=Subscription.Status.ACTIVE)
 
     # Before: a gated tenant endpoint is reachable (200/401 — not a paywall 402).
     pre = client_for(tenant_a).get("/api/v1/org/settings/")
     assert pre.status_code != 402
 
-    resp = staff_client.post(f"/api/v1/platform/centers/{tenant_a.pk}/suspend/", {}, format="json")
+    # Subscription-cache invalidation runs on_commit; execute it so the paywall
+    # sees the new status within this test transaction.
+    with django_capture_on_commit_callbacks(execute=True):
+        resp = staff_client.post(f"/api/v1/platform/centers/{tenant_a.pk}/suspend/", {}, format="json")
     assert resp.status_code == 200
-    assert resp.json()["is_active"] is False
+    # Suspension is SOFT: is_active stays True (the 402 paywall gates the API; a
+    # 503 InactiveTenant would otherwise shadow the paywall and block auth too).
+    assert resp.json()["is_active"] is True
     assert Subscription.objects.get(center=tenant_a).status == "suspended"
 
     # Tenant API now blocked by the Day-3 paywall (402 subscription_required).
@@ -106,7 +113,8 @@ def test_suspend_then_activate_round_trip(staff_client, tenant_a, client_for):
     assert blocked.status_code == 402
     assert blocked.json()["error"]["code"] == "subscription_required"
 
-    resp = staff_client.post(f"/api/v1/platform/centers/{tenant_a.pk}/activate/", {}, format="json")
+    with django_capture_on_commit_callbacks(execute=True):
+        resp = staff_client.post(f"/api/v1/platform/centers/{tenant_a.pk}/activate/", {}, format="json")
     assert resp.status_code == 200
     assert resp.json()["is_active"] is True
     assert Subscription.objects.get(center=tenant_a).status == "active"
@@ -208,7 +216,9 @@ def test_usage_invalid_days_400(staff_client, tenant_a):
 # ---------------------------------------------------------------------------
 # D4-LE-3 — subscription management (flat /platform/subscriptions/)
 # ---------------------------------------------------------------------------
-def test_subscription_list_and_patch_reactivates(staff_client, tenant_a, client_for):
+def test_subscription_list_and_patch_reactivates(
+    staff_client, tenant_a, client_for, django_capture_on_commit_callbacks
+):
     sub = _set_subscription(tenant_a, status=Subscription.Status.SUSPENDED)
     tenant_a.is_active = True
     tenant_a.save(update_fields=["is_active"])
@@ -221,9 +231,11 @@ def test_subscription_list_and_patch_reactivates(staff_client, tenant_a, client_
     # Suspended → paywall 402.
     assert client_for(tenant_a).get("/api/v1/org/settings/").status_code == 402
 
-    resp = staff_client.patch(
-        f"/api/v1/platform/subscriptions/{sub.pk}/", {"status": "active"}, format="json"
-    )
+    # Cache invalidation runs on_commit; execute it so the paywall sees "active".
+    with django_capture_on_commit_callbacks(execute=True):
+        resp = staff_client.patch(
+            f"/api/v1/platform/subscriptions/{sub.pk}/", {"status": "active"}, format="json"
+        )
     assert resp.status_code == 200
     assert Subscription.objects.get(pk=sub.pk).status == "active"
     # Reactivated → no longer paywalled.

@@ -175,12 +175,13 @@ def record_platform_event(
 # ---------------------------------------------------------------------------
 @transaction.atomic
 def suspend_center(center: Center, *, actor=None, reason: str = "") -> Center:
-    """Suspend a Center: deactivate it (→ 503 InactiveTenantMiddleware) AND flip
-    its subscription to ``suspended`` (→ 402 SubscriptionGateMiddleware, the
-    Day-3 paywall). Records a PlatformEvent. Idempotent on an already-inactive
-    center (still re-asserts the suspended subscription)."""
-    center.is_active = False
-    center.save(update_fields=["is_active", "updated_at"])
+    """Suspend a Center (billing): flip its subscription to ``suspended`` so the
+    SubscriptionGateMiddleware paywall returns 402 on the API while STILL allowing
+    auth/admin/healthz/schema (so the tenant can log in and pay). It does NOT set
+    ``is_active=False``: that drives InactiveTenantMiddleware's 503 (which has no
+    auth allowlist) and is reserved for hard archival / trial-expiry — otherwise
+    the 503 would shadow the paywall and make the auth allowlist dead. Records a
+    PlatformEvent. Idempotent."""
     _set_subscription_status(center, status="suspended")
     record_platform_event(
         actor=actor,
