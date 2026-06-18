@@ -49,6 +49,13 @@ def _error(code: str, detail: str, *, http_status: int) -> Response:
 class _PublicWebhookView(APIView):
     authentication_classes: list = []
     permission_classes: list = []
+    # No throttling: provider callbacks are unauthenticated (request.user is
+    # Anonymous), so the global AnonRateThrottle (60/min per IP) would otherwise
+    # bucket ALL tenants' callbacks from the providers' few fixed source IPs into
+    # one window and 429-drop legitimate, signature-valid payment confirmations
+    # (and break Payme's "always HTTP 200" JSON-RPC contract). The per-provider
+    # signature check is the real control here.
+    throttle_classes: list = []
     provider: str = ""
 
     def _config(self) -> ProviderConfig | None:
