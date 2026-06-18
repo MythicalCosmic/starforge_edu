@@ -96,6 +96,12 @@ def enforce_student_limit() -> None:
     tenant schema. Called from the ONE enrollment site in apps/students/services.py
     (see integration_needed). No subscription / no cap configured → no-op (never
     blocks a center the platform has not metered yet).
+
+    BEST-EFFORT (not strict): this is a check-then-act with no seat lock, so two
+    concurrent enrollments at (cap - 1) could both pass and exceed the cap by a
+    small margin. The cap is a soft commercial guardrail (the nightly meter
+    reconciles usage), so this is acceptable; strict enforcement would require
+    holding a per-tenant lock across the count AND the enrollment commit.
     """
     center = getattr(connection, "tenant", None)
     if center is None:
