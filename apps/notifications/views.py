@@ -140,6 +140,17 @@ class NotificationTemplateViewSet(TenantSafeModelViewSet):
     queryset = NotificationTemplate.objects.all()
     serializer_class = NotificationTemplateSerializer
     resource = "notifications"
+    # Reads are gated at notifications:WRITE too (not the default :read): templates
+    # are admin messaging config, so a PARENT/holder of notifications:read must not
+    # list or retrieve them, matching the "director / IT only" contract.
+    required_perms = {
+        "list": "notifications:write",
+        "retrieve": "notifications:write",
+        "create": "notifications:write",
+        "update": "notifications:write",
+        "partial_update": "notifications:write",
+        "destroy": "notifications:write",
+    }
     filterset_fields = ("event_type", "channel", "locale", "is_active")
     ordering_fields = ("event_type", "channel", "locale")
 
