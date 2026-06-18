@@ -76,6 +76,12 @@ class RealClickClient(ClickClient):
     Click pushes to us; we only verify the signature it sent."""
 
     def verify_signature(self, *, payload: dict[str, Any], secret_key: str) -> bool:
+        # An empty/unset secret must never verify: the service_id is semi-public
+        # (it's in the browser-visible checkout redirect), so without this guard an
+        # attacker could forge md5(...''...) and pass compare_digest. Mirrors the
+        # `not api_key`/`not key` guards in uzum.py and payme.py.
+        if not secret_key:
+            return False
         try:
             expected = click_sign_string(
                 click_trans_id=str(payload["click_trans_id"]),
