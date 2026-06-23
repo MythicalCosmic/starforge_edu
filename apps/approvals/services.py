@@ -7,15 +7,20 @@ with select_for_update so concurrent approve/disburse can't double-act.
 
 from __future__ import annotations
 
-from decimal import Decimal
+from datetime import date
+from decimal import Decimal, InvalidOperation
 
 from django.db import transaction
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
 from apps.approvals.models import ApprovalRequest, LedgerEntry
-from core.exceptions import NotFoundException, UnprocessableEntity
+from core.exceptions import NotFoundException, UnprocessableEntity, ValidationException
 from core.permissions import roles_with_permission
+
+# Kinds whose payload is validated at creation time and which carry an
+# on-approval side-effect (see _apply_approval_effect).
+KIND_DISCOUNT = "discount"
 
 
 def _notify(*, event_type: str, recipient_id: int | None, req: ApprovalRequest) -> None:
@@ -49,6 +54,75 @@ def _disburser_ids(req: ApprovalRequest) -> list[int]:
     return list(qs.values_list("user_id", flat=True).distinct())
 
 
+def _validate_discount_payload(payload: dict) -> dict:
+    """Validate + normalize a discount-request payload at creation time, so a
+    malformed discount never enters the approval queue (a clean 400, not a 500
+    when someone later approves it). Shape:
+
+        {student_id, discount_type?, (percent | fixed_amount_uzs), valid_from?, valid_until?}
+
+    Exactly one of percent / fixed_amount_uzs must be set (mirrors the Discount
+    model's XOR CheckConstraint). Numbers are stored as strings to keep the JSON
+    payload exact (no float drift) and dates as ISO strings.
+    """
+    from apps.finance.models import Discount
+    from apps.students.models import StudentProfile
+
+    student_id = payload.get("student_id")
+    if not isinstance(student_id, int) or not StudentProfile.objects.filter(pk=student_id).exists():
+        raise ValidationException(
+            _("A discount request needs a valid student_id in its payload."),
+            code="discount_student_required",
+            fields={"payload": ["student_id"]},
+        )
+
+    percent = payload.get("percent")
+    fixed = payload.get("fixed_amount_uzs")
+    if (percent is None) == (fixed is None):
+        raise ValidationException(
+            _("Set exactly one of payload.percent or payload.fixed_amount_uzs."),
+            code="discount_amount_xor",
+        )
+
+    dtype = payload.get("discount_type", Discount.DiscountType.MANUAL)
+    if dtype not in Discount.DiscountType.values:
+        raise ValidationException(_("Unknown discount_type."), code="discount_type_invalid")
+
+    clean: dict = {"student_id": student_id, "discount_type": dtype}
+    if percent is not None:
+        try:
+            pv = Decimal(str(percent))
+        except (InvalidOperation, ValueError):
+            raise ValidationException(
+                _("percent must be a number."), code="discount_percent_invalid"
+            ) from None
+        if not (Decimal("0") < pv <= Decimal("100")):
+            raise ValidationException(_("percent must be between 0 and 100."), code="discount_percent_range")
+        clean["percent"] = str(pv)
+    else:
+        try:
+            fv = Decimal(str(fixed))
+        except (InvalidOperation, ValueError):
+            raise ValidationException(
+                _("fixed_amount_uzs must be a number."), code="discount_fixed_invalid"
+            ) from None
+        if fv <= 0:
+            raise ValidationException(_("fixed_amount_uzs must be positive."), code="discount_fixed_range")
+        clean["fixed_amount_uzs"] = str(fv)
+
+    for key in ("valid_from", "valid_until"):
+        raw = payload.get(key)
+        if raw:
+            try:
+                clean[key] = date.fromisoformat(str(raw)).isoformat()
+            except ValueError:
+                raise ValidationException(
+                    _("%(key)s must be an ISO date (YYYY-MM-DD).") % {"key": key},
+                    code="discount_date_invalid",
+                ) from None
+    return clean
+
+
 @transaction.atomic
 def create_request(
     *,
@@ -60,6 +134,12 @@ def create_request(
     branch=None,
     payload: dict | None = None,
 ) -> ApprovalRequest:
+    payload = payload or {}
+    if kind == KIND_DISCOUNT:
+        # A discount is decision-only (the Discount it grants is the effect, not a
+        # cash payout) — it never disburses, so drop any amount the caller passed.
+        payload = _validate_discount_payload(payload)
+        amount_uzs = None
     return ApprovalRequest.objects.create(
         kind=kind,
         title=title,
@@ -67,8 +147,45 @@ def create_request(
         amount_uzs=amount_uzs,
         description=description,
         branch=branch,
-        payload=payload or {},
+        payload=payload,
     )
+
+
+def _apply_discount_effect(req: ApprovalRequest, actor) -> None:
+    """On approval, a discount request materializes a standing Discount for the
+    student — which finance then auto-applies as a negative invoice line at the
+    next issue (apps.finance._active_discounts). Runs inside approve()'s
+    transaction, so a failed effect rolls the approval back. The created discount
+    id is stamped into the payload as the audit link."""
+    from apps.finance.models import Discount
+    from apps.students.models import StudentProfile
+
+    p = dict(req.payload or {})
+    if p.get("discount_id"):  # defensive: status gate already prevents re-approval
+        return
+    student_id = p.get("student_id")
+    if not student_id or not StudentProfile.objects.filter(pk=student_id).exists():
+        raise UnprocessableEntity(
+            _("The discount's student no longer exists."), code="discount_student_missing"
+        )
+    discount = Discount.objects.create(
+        student_id=student_id,
+        discount_type=p.get("discount_type", Discount.DiscountType.MANUAL),
+        percent=Decimal(p["percent"]) if p.get("percent") is not None else None,
+        fixed_amount_uzs=Decimal(p["fixed_amount_uzs"]) if p.get("fixed_amount_uzs") is not None else None,
+        valid_from=p.get("valid_from") or None,
+        valid_until=p.get("valid_until") or None,
+        approved_by=actor,
+    )
+    req.payload = {**p, "discount_id": discount.pk}
+
+
+def _apply_approval_effect(req: ApprovalRequest, actor) -> None:
+    """Dispatch the kind-specific side-effect that fires the instant a request is
+    APPROVED. Money-moving kinds (loan/expense/...) act at disburse time instead;
+    decision kinds with an effect (discount) act here."""
+    if req.kind == KIND_DISCOUNT:
+        _apply_discount_effect(req, actor)
 
 
 def _locked(request_id: int) -> ApprovalRequest:
@@ -87,7 +204,10 @@ def approve(*, request_id: int, actor=None, note: str = "") -> ApprovalRequest:
     req.decided_by = actor
     req.decided_at = timezone.now()
     req.decision_note = note
-    req.save(update_fields=["status", "decided_by", "decided_at", "decision_note", "updated_at"])
+    # Side-effect (e.g. discount -> standing Discount) runs in this same transaction
+    # and may stamp req.payload, so persist payload alongside the decision fields.
+    _apply_approval_effect(req, actor)
+    req.save(update_fields=["status", "decided_by", "decided_at", "decision_note", "payload", "updated_at"])
     _notify(event_type="approval.approved", recipient_id=req.requested_by_id, req=req)
     if req.amount_uzs is not None:
         # Tell whoever can pay it out that money is ready to be readied (PRODUCT_VISION
@@ -101,7 +221,9 @@ def approve(*, request_id: int, actor=None, note: str = "") -> ApprovalRequest:
 def reject(*, request_id: int, actor=None, note: str = "") -> ApprovalRequest:
     req = _locked(request_id)
     if req.status not in (ApprovalRequest.Status.PENDING, ApprovalRequest.Status.APPROVED):
-        raise UnprocessableEntity(_("This request can no longer be rejected."), code="approval_not_rejectable")
+        raise UnprocessableEntity(
+            _("This request can no longer be rejected."), code="approval_not_rejectable"
+        )
     req.status = ApprovalRequest.Status.REJECTED
     req.decided_by = actor
     req.decided_at = timezone.now()
@@ -116,7 +238,9 @@ def cancel(*, request_id: int, actor=None) -> ApprovalRequest:
     """Requester withdraws a still-pending request (ownership enforced by the view)."""
     req = _locked(request_id)
     if req.status != ApprovalRequest.Status.PENDING:
-        raise UnprocessableEntity(_("Only a pending request can be cancelled."), code="approval_not_cancellable")
+        raise UnprocessableEntity(
+            _("Only a pending request can be cancelled."), code="approval_not_cancellable"
+        )
     req.status = ApprovalRequest.Status.CANCELLED
     req.decided_by = actor
     req.decided_at = timezone.now()
@@ -141,7 +265,9 @@ def disburse(
 
     req = _locked(request_id)
     if req.status != ApprovalRequest.Status.APPROVED:
-        raise UnprocessableEntity(_("Only an approved request can be disbursed."), code="approval_not_approved")
+        raise UnprocessableEntity(
+            _("Only an approved request can be disbursed."), code="approval_not_approved"
+        )
     if req.amount_uzs is None:
         raise UnprocessableEntity(_("This request has no amount to disburse."), code="approval_no_amount")
     method = PaymentMethod.objects.filter(pk=payment_method_id, is_active=True).first()
@@ -166,7 +292,14 @@ def disburse(
     req.payment_method = method
     req.ledger_entry = entry
     req.save(
-        update_fields=["status", "disbursed_by", "disbursed_at", "payment_method", "ledger_entry", "updated_at"]
+        update_fields=[
+            "status",
+            "disbursed_by",
+            "disbursed_at",
+            "payment_method",
+            "ledger_entry",
+            "updated_at",
+        ]
     )
     _notify(event_type="approval.disbursed", recipient_id=req.requested_by_id, req=req)
     return req
