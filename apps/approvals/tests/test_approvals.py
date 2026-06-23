@@ -80,3 +80,18 @@ def test_student_cannot_request(tenant_a, as_role):
     student, _ = as_role(Role.STUDENT)
     resp = student.post(REQ, {"kind": "expense", "title": "x", "amount_uzs": "1.00"}, format="json")
     assert resp.status_code == 403
+
+
+def test_approval_notifies_requester_and_disburser(tenant_a, as_role):
+    teacher, _ = as_role(Role.TEACHER)
+    director, _ = as_role(Role.DIRECTOR)
+    cashier, _ = as_role(Role.CASHIER)
+
+    rid = teacher.post(REQ, {"kind": "loan", "title": "Advance", "amount_uzs": "100000.00"}, format="json").json()["id"]
+    director.post(f"{REQ}{rid}/approve/", {}, format="json")
+
+    teacher_events = {n["event_type"] for n in teacher.get("/api/v1/notifications/").json()["results"]}
+    assert "approval.approved" in teacher_events  # requester told the outcome
+
+    cashier_events = {n["event_type"] for n in cashier.get("/api/v1/notifications/").json()["results"]}
+    assert "approval.awaiting_disbursement" in cashier_events  # cashier told to ready the money

@@ -42,6 +42,11 @@ class EventType(models.TextChoices):
     BILLING_SUBSCRIPTION_PAST_DUE = "billing.subscription_past_due", _("Subscription past due")
     BILLING_SUBSCRIPTION_SUSPENDED = "billing.subscription_suspended", _("Subscription suspended")
     PRINT_JOB_FAILED = "print.failed", _("Print job failed")  # D4-LD-4
+    # A-1 Approvals engine
+    APPROVAL_APPROVED = "approval.approved", _("Request approved")
+    APPROVAL_REJECTED = "approval.rejected", _("Request rejected")
+    APPROVAL_AWAITING_DISBURSEMENT = "approval.awaiting_disbursement", _("Approved — awaiting disbursement")
+    APPROVAL_DISBURSED = "approval.disbursed", _("Request disbursed")
 
 
 class Channel(models.TextChoices):

@@ -4,6 +4,7 @@ from drf_spectacular.utils import OpenApiExample, OpenApiResponse, extend_schema
 from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.exceptions import MethodNotAllowed
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from apps.notifications import selectors, services
@@ -32,14 +33,15 @@ class NotificationViewSet(TenantSafeModelViewSet):
     http_method_names = ["get", "post", "head", "options"]
     filterset_fields = ("event_type", "read_at")
     ordering_fields = ("created_at",)
-    # `read`, `read_all`, `unread_count` are own-row operations gated at :read.
-    required_perms = {
-        "list": "notifications:read",
-        "retrieve": "notifications:read",
-        "read": "notifications:read",
-        "read_all": "notifications:read",
-        "unread_count": "notifications:read",
-    }
+
+    def get_permissions(self):
+        # The in-app feed + read receipts are ALWAYS own-row only (get_queryset is
+        # scoped to request.user), so any authenticated user may read/manage their
+        # OWN notifications — gating these at a role code would lock teachers/
+        # students/cashiers out of their own feed even though they receive
+        # notifications. Writes by a read-only impersonation token are still blocked
+        # by TenantSafeModelViewSet.initial (assert_not_read_only_write).
+        return [IsAuthenticated()]
 
     def get_queryset(self):
         # Schema introspection (drf-spectacular) hits this without an auth'd user.

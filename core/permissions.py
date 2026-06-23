@@ -179,6 +179,17 @@ def default_perms(resource: str) -> dict[str, str]:
     return {action: f"{resource}:{verb}" for action, verb in DEFAULT_VERB_FOR_ACTION.items()}
 
 
+def roles_with_permission(code: str) -> set[str]:
+    """Every role whose matrix grants `code` (exact, resource-wildcard, or *:*).
+    Used to find notification recipients for a permission (e.g. who can disburse)."""
+    resource, _, _verb = code.partition(":")
+    out: set[str] = set()
+    for role, perms in ROLE_PERMISSION_MATRIX.items():
+        if "*:*" in perms or f"{resource}:*" in perms or code in perms:
+            out.add(role)
+    return out
+
+
 def has_permission_code(roles: Iterable[str], code: str) -> bool:
     resource, _, _verb = code.partition(":")
     for role in roles:
