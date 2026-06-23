@@ -48,7 +48,7 @@ premium AI tiering (Opus/Sonnet/Haiku, metered).
 | D-3 | `LessonType` model (dynamic, manager-created) + `Lesson.lesson_type` FK | F3 dashboard | TODO |
 | D-4 | `PlacementTest` + `PlacementQuestion` + `PlacementAttempt` (+ AI gen + approval state) | F1 | TODO |
 | D-5 | `Form` + `FormQuestion` + `FormResponse` + `FormAnswer` (anonymity flag) | F3/F4 forms | TODO |
-| D-6 | `Thread` + `Message` + `MessageAttachment` (student↔teacher) | F4 messaging | TODO |
+| D-6 | `Thread` + `Message` + `ThreadParticipant` (attachments as JSON S3 keys on Message) | F4 messaging | DONE (`apps.messaging`) |
 | D-7 | `ContentLibrary`/`LessonFile` approval + `is_downloadable`/`view_only` flags | F4 library | TODO |
 | D-8 | `CenterSettings` booleans for each dynamic on/off knob (group-acceptance, downloads, library-approval, ...) | all | PARTIAL |
 | D-9 | `MeetingSlot`/`StaffMeeting` (teacher meetings, next-meeting) | F3 | TODO |
@@ -92,7 +92,7 @@ premium AI tiering (Opus/Sonnet/Haiku, metered).
 | F4-1 | Student dashboard aggregate | `GET /students/me/dashboard/` → group, next lessons, open homework, recent grades, outstanding balance, pending rule-acks | new selector | F3-3 | DONE |
 | F4-2 | Homework: see / submit / mark done | mostly exists (`assignments`) — confirm "mark done" + own-feed | reuse | — | PARTIAL(exists) |
 | F4-3 | Multiple teachers + assistants per group | already exists (`CohortCoTeacher`: co_teacher/assistant) | reuse | — | DONE(exists) |
-| F4-4 | In-app messaging: student↔teacher(s) text + images | `Thread`/`Message`/attachment; many teachers per thread | new (D-6) | — | TODO |
+| F4-4 | In-app messaging: student↔teacher(s) text + images | `apps.messaging`: threads + participants + append-only messages (S3-key attachments), `/api/v1/messaging/threads/` (create/messages/read), strict participant isolation, unread counts, realtime via notifications dispatch, student↔staff safeguarding | new (D-6) | — | DONE |
 | F4-5 | Library: dual approval (teacher+manager) + view-only / download toggle | `is_approved_teacher`/`is_approved_manager`, `is_downloadable`; toggles in CenterSettings | extend content (D-7,D-8) | — | TODO |
 
 ---

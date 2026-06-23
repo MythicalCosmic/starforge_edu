@@ -88,6 +88,9 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "tasks:read",
         "tasks:write",
         "tasks:assign_any",
+        # F4-4: messaging.
+        "messaging:read",
+        "messaging:write",
     },
     Role.TEACHER: {
         "students:read",
@@ -117,6 +120,9 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         # F5: teachers task their assistants/lower grades + see their own tasks.
         "tasks:read",
         "tasks:write",
+        # F4-4: teachers message students/parents.
+        "messaging:read",
+        "messaging:write",
     },
     Role.STUDENT: {
         # students:read is row-scoped to self by apps/students/selectors.py
@@ -129,6 +135,9 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "assignments:submit",  # D2-D-6: students submit their own work
         "content:read",
         "forms:read",  # F3-3: students fill surveys/forms addressed to them
+        # F4-4: a student messages their teachers (the service blocks student↔student).
+        "messaging:read",
+        "messaging:write",
     },
     Role.PARENT: {
         # Row-scoped by selectors: students -> guardian-linked children only,
@@ -143,6 +152,9 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "schedule:read",
         "notifications:read",
         "forms:read",  # F3-3: parents fill forms addressed to families
+        # F4-4: parents message staff (the service blocks parent↔student/parent).
+        "messaging:read",
+        "messaging:write",
     },
     Role.ACCOUNTANT: {
         "finance:*",
@@ -187,6 +199,9 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         # F5: reception creates + tracks tasks.
         "tasks:read",
         "tasks:write",
+        # F4-4: reception messages students/parents.
+        "messaging:read",
+        "messaging:write",
     },
     Role.SUPPORT: {"users:read", "audit:read", "tasks:read"},
 }

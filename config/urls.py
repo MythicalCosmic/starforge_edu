@@ -31,6 +31,7 @@ api_v1_patterns = [
     path("access/", include("apps.access.urls")),
     path("forms/", include("apps.forms.urls")),
     path("tasks/", include("apps.tasks.urls")),
+    path("messaging/", include("apps.messaging.urls")),
 ]
 
 urlpatterns = [

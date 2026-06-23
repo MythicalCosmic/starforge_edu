@@ -152,6 +152,7 @@ TENANT_APPS = [
     "apps.access.apps.AccessConfig",  # A-2: dynamic, center-configurable permissions
     "apps.forms.apps.FormsConfig",  # F3-3: forms / surveys engine
     "apps.tasks.apps.TasksConfig",  # F5: tasks + role hierarchy
+    "apps.messaging.apps.MessagingConfig",  # F4-4: in-app messaging
 ]
 
 INSTALLED_APPS = list(SHARED_APPS) + [a for a in TENANT_APPS if a not in SHARED_APPS]
