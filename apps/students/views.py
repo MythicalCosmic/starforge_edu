@@ -1,6 +1,8 @@
+from django.utils.translation import gettext_lazy as _
 from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema
 from rest_framework import status
 from rest_framework.decorators import action
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from apps.students import selectors, services
@@ -17,9 +19,31 @@ from apps.students.serializers import (
     StudentUpdateSerializer,
     TransitionSerializer,
 )
+from core.exceptions import NotFoundException
 from core.permissions import default_perms, get_user_roles
 from core.throttles import BulkImportThrottle
-from core.viewsets import TenantSafeModelViewSet
+from core.viewsets import TenantSafeAPIView, TenantSafeModelViewSet
+
+
+class StudentDashboardView(TenantSafeAPIView):
+    """GET /api/v1/students/me/dashboard/ — the signed-in student's own cockpit
+    (group, next lessons, open homework, recent grades, outstanding balance,
+    outstanding rule acknowledgments). 404 not_a_student if the user isn't one."""
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="The signed-in student's dashboard",
+        responses={200: OpenApiResponse(description="dashboard object"), 404: OpenApiResponse()},
+        tags=["students"],
+    )
+    def get(self, request):
+        student = selectors.student_profile_for(request.user)
+        if student is None:
+            raise NotFoundException(_("You do not have a student profile."), code="not_a_student")
+        return Response(
+            selectors.student_dashboard(student=student, user=request.user, roles=get_user_roles(request))
+        )
 
 
 class StudentViewSet(TenantSafeModelViewSet):

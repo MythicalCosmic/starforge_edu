@@ -89,7 +89,7 @@ premium AI tiering (Opus/Sonnet/Haiku, metered).
 ## Feature 4 — Student dashboard, homework, library, messaging
 | # | Feature | Acceptance | Reuse/New | Deps | Status |
 |---|---------|-----------|-----------|------|--------|
-| F4-1 | Student dashboard aggregate | `GET /students/me/dashboard/` → homework, next lesson, forms-to-fill, grades, library access | new selector | F3-3 | TODO |
+| F4-1 | Student dashboard aggregate | `GET /students/me/dashboard/` → group, next lessons, open homework, recent grades, outstanding balance, pending rule-acks | new selector | F3-3 | DONE |
 | F4-2 | Homework: see / submit / mark done | mostly exists (`assignments`) — confirm "mark done" + own-feed | reuse | — | PARTIAL(exists) |
 | F4-3 | Multiple teachers + assistants per group | already exists (`CohortCoTeacher`: co_teacher/assistant) | reuse | — | DONE(exists) |
 | F4-4 | In-app messaging: student↔teacher(s) text + images | `Thread`/`Message`/attachment; many teachers per thread | new (D-6) | — | TODO |

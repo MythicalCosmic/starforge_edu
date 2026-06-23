@@ -58,6 +58,74 @@ def students_with_upcoming_birthdays(
     return qs
 
 
+def student_profile_for(user) -> StudentProfile | None:
+    return StudentProfile.objects.select_related("current_cohort").filter(user=user).first()
+
+
+def student_dashboard(*, student: StudentProfile, user, roles) -> dict:
+    """The signed-in student's cockpit (F4-1): their group, next lessons, open
+    homework, recent published grades, outstanding balance, and outstanding rule
+    acknowledgments — one read across the apps that already hold the data."""
+    from apps.academics.models import ExamResult
+    from apps.assignments.models import Assignment, Submission
+    from apps.compliance import selectors as compliance_selectors
+    from apps.finance.selectors import outstanding_balance
+    from apps.schedule.models import Lesson
+
+    now = timezone.now()
+    cohort = student.current_cohort
+    cohort_id = cohort.id if cohort else None
+
+    next_lessons: list[dict] = []
+    open_homework: list[dict] = []
+    if cohort_id:
+        next_lessons = [
+            {
+                "id": lesson.id,
+                "title": lesson.title,
+                "starts_at": lesson.starts_at,
+                "lesson_type": lesson.lesson_type.name if lesson.lesson_type else None,
+            }
+            for lesson in Lesson.objects.filter(
+                cohort_id=cohort_id, starts_at__gte=now, status=Lesson.Status.SCHEDULED
+            )
+            .select_related("lesson_type")
+            .order_by("starts_at")[:5]
+        ]
+        submitted = set(Submission.objects.filter(student=student).values_list("assignment_id", flat=True))
+        open_homework = [
+            {"id": a.id, "title": a.title, "due_at": a.due_at}
+            for a in Assignment.objects.filter(
+                cohort_id=cohort_id, status=Assignment.Status.PUBLISHED, due_at__gte=now
+            )
+            .exclude(id__in=submitted)
+            .order_by("due_at")[:10]
+        ]
+
+    recent_grades = [
+        {
+            "exam": result.exam.title,
+            "score": str(result.score),
+            "max_score": str(result.exam.max_score),
+            "exam_date": result.exam.exam_date,
+        }
+        for result in ExamResult.objects.filter(student=student, exam__is_published=True)
+        .select_related("exam")
+        .order_by("-exam__exam_date")[:5]
+    ]
+
+    return {
+        "group": cohort.name if cohort else None,
+        "level": cohort.level if cohort else None,
+        "next_lessons": next_lessons,
+        "open_homework": open_homework,
+        "open_homework_count": len(open_homework),
+        "recent_grades": recent_grades,
+        "outstanding_uzs": str(outstanding_balance(student.pk)),
+        "pending_rule_acknowledgments": len(compliance_selectors.pending_rules(user, roles)),
+    }
+
+
 def student_stats(qs: QuerySet[StudentProfile]) -> dict:
     """Snapshot counts over an already-scoped student queryset (F2-4).
 
