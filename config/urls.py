@@ -27,6 +27,7 @@ api_v1_patterns = [
     path("audit/", include("apps.audit.urls")),
     path("reports/", include("apps.reports.urls")),
     path("approvals/", include("apps.approvals.urls")),
+    path("rulebook/", include("apps.compliance.urls")),
 ]
 
 urlpatterns = [

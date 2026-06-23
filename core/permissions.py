@@ -78,6 +78,9 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "approvals:read",
         "approvals:write",
         "approvals:approve",
+        # #12: HOD can author + see the rule book.
+        "compliance:read",
+        "compliance:write",
     },
     Role.TEACHER: {
         "students:read",
@@ -142,7 +145,7 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
     Role.CASHIER: {"finance:read", "payments:write", "approvals:read", "approvals:disburse", "ledger:read"},
     Role.LIBRARIAN: {"content:*", "students:read", "cohorts:read"},
     Role.SECURITY: {"attendance:write", "users:read"},
-    Role.IT: {"users:read", "audit:read", "org:*"},
+    Role.IT: {"users:read", "audit:read", "org:*", "compliance:read", "compliance:write"},
     Role.REGISTRAR: {
         "students:*",
         "users:write",
