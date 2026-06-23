@@ -4,6 +4,7 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     IcalFeedView,
     IcalUrlView,
+    LessonTypeViewSet,
     LessonViewSet,
     RecurrenceRuleViewSet,
     TermViewSet,
@@ -13,6 +14,7 @@ from .views import (
 router = DefaultRouter()
 router.register("terms", TermViewSet, basename="term")
 router.register("timeslots", TimeSlotViewSet, basename="timeslot")
+router.register("lesson-types", LessonTypeViewSet, basename="lesson-type")
 router.register("rules", RecurrenceRuleViewSet, basename="rule")
 router.register("lessons", LessonViewSet, basename="lesson")
 

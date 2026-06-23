@@ -9,11 +9,12 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.schedule import selectors, services
-from apps.schedule.models import Lesson, RecurrenceRule, Term, TimeSlot
+from apps.schedule.models import Lesson, LessonType, RecurrenceRule, Term, TimeSlot
 from apps.schedule.serializers import (
     BulkRescheduleSerializer,
     CancelLessonSerializer,
     LessonSerializer,
+    LessonTypeSerializer,
     MoveLessonSerializer,
     RecurrenceRuleSerializer,
     RecurrenceRuleWriteSerializer,
@@ -40,6 +41,18 @@ class TimeSlotViewSet(TenantSafeModelViewSet):
     object_scope = "branch"
     filterset_fields = ("branch",)
     ordering_fields = ("order", "start_time")
+
+
+class LessonTypeViewSet(TenantSafeModelViewSet):
+    """Dynamic lesson kinds (F3-1). Managers (schedule:write) create/edit; everyone
+    with schedule:read lists them."""
+
+    queryset = LessonType.objects.all()
+    serializer_class = LessonTypeSerializer
+    resource = "schedule"
+    filterset_fields = ("is_active",)
+    search_fields = ("name", "slug")
+    ordering_fields = ("name",)
 
 
 class RecurrenceRuleViewSet(TenantSafeModelViewSet):

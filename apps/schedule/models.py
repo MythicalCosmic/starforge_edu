@@ -71,6 +71,9 @@ class RecurrenceRule(models.Model):
     room = models.ForeignKey(
         "org.Room", on_delete=models.PROTECT, null=True, blank=True, related_name="rules"
     )
+    lesson_type = models.ForeignKey(
+        "schedule.LessonType", on_delete=models.SET_NULL, null=True, blank=True, related_name="rules"
+    )
     title = models.CharField(max_length=200)
     rrule = models.TextField()  # RFC 5545 RRULE, validated by parsing
     start_date = models.DateField()
@@ -100,6 +103,24 @@ class RecurrenceRule(models.Model):
         return self.title
 
 
+class LessonType(models.Model):
+    """Dynamic, manager-created lesson kind (F3-1): "Video Lesson", "Speaking",
+    "Main", "Hangout", … — defined per Center so it fits any curriculum."""
+
+    name = models.CharField(max_length=64)
+    slug = models.SlugField(max_length=64, unique=True)
+    color = models.CharField(max_length=16, blank=True)  # optional UI hint, e.g. "#3b82f6"
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("name",)
+
+    def __str__(self) -> str:  # pragma: no cover
+        return self.name
+
+
 class Lesson(models.Model):
     class Status(models.TextChoices):
         SCHEDULED = "scheduled", _("Scheduled")
@@ -115,6 +136,9 @@ class Lesson(models.Model):
     teacher = models.ForeignKey("teachers.TeacherProfile", on_delete=models.PROTECT, related_name="lessons")
     room = models.ForeignKey(
         "org.Room", on_delete=models.PROTECT, null=True, blank=True, related_name="lessons"
+    )
+    lesson_type = models.ForeignKey(
+        LessonType, on_delete=models.SET_NULL, null=True, blank=True, related_name="lessons"
     )
     title = models.CharField(max_length=200)
     starts_at = models.DateTimeField()

@@ -124,6 +124,7 @@ def materialize_rule(rule: RecurrenceRule) -> list[Lesson]:
                 cohort=rule.cohort,
                 teacher=rule.teacher,
                 room=rule.room,
+                lesson_type=rule.lesson_type,
                 title=rule.title,
                 starts_at=starts_at,
                 ends_at=ends_at,

@@ -1,6 +1,21 @@
+from django.utils.text import slugify
 from rest_framework import serializers
 
-from apps.schedule.models import Lesson, RecurrenceRule, Term, TimeSlot
+from apps.schedule.models import Lesson, LessonType, RecurrenceRule, Term, TimeSlot
+
+
+class LessonTypeSerializer(serializers.ModelSerializer):
+    # Slug is auto-derived from the name when omitted, so managers just type a label.
+    slug = serializers.SlugField(required=False)
+
+    class Meta:
+        model = LessonType
+        fields = ("id", "name", "slug", "color", "is_active")
+
+    def validate(self, attrs):
+        if not attrs.get("slug") and attrs.get("name"):
+            attrs["slug"] = slugify(attrs["name"])[:64]
+        return attrs
 
 
 class TermSerializer(serializers.ModelSerializer):
@@ -24,6 +39,7 @@ class RecurrenceRuleSerializer(serializers.ModelSerializer):
             "cohort",
             "teacher",
             "room",
+            "lesson_type",
             "title",
             "rrule",
             "start_date",
@@ -44,6 +60,7 @@ class RecurrenceRuleWriteSerializer(serializers.ModelSerializer):
             "cohort",
             "teacher",
             "room",
+            "lesson_type",
             "title",
             "rrule",
             "start_date",
@@ -64,6 +81,7 @@ class LessonSerializer(serializers.ModelSerializer):
             "cohort",
             "teacher",
             "room",
+            "lesson_type",
             "title",
             "starts_at",
             "ends_at",
