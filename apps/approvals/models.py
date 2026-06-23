@@ -74,7 +74,7 @@ class ApprovalRequest(models.Model):
     )
     title = models.CharField(max_length=200)
     description = models.TextField(blank=True)
-    # Null amount = a decision-only request (e.g. payment_delay) that never disburses.
+    # Null amount = a decision-only request (e.g. discount / payment_delay) that never disburses.
     amount_uzs = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
     payload = models.JSONField(default=dict, blank=True)  # kind-specific data
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING, db_index=True)

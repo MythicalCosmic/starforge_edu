@@ -44,7 +44,7 @@ def test_approving_discount_request_materializes_discount(tenant_a, as_role):
     body = r.json()
     rid = body["id"]
     assert body["amount_uzs"] is None  # decision-only — amount dropped
-    assert body["payload"]["percent"] == "20"  # normalized + stored as string
+    assert body["payload"]["percent"] == "20.00"  # normalized to NUMERIC(5,2) scale
 
     ap = director.post(f"{REQ}{rid}/approve/", {"note": "earned it"}, format="json")
     assert ap.status_code == 200, ap.content
@@ -133,3 +133,133 @@ def test_discount_percent_out_of_range(tenant_a, as_role):
     )
     assert r.status_code == 400
     assert r.json()["error"]["code"] == "discount_percent_range"
+
+
+def test_discount_type_invalid_rejected(tenant_a, as_role):
+    teacher, _ = as_role(Role.TEACHER)
+    sid = _student_id(tenant_a)
+    r = teacher.post(
+        REQ,
+        {
+            "kind": "discount",
+            "title": "x",
+            "payload": {"student_id": sid, "percent": "10", "discount_type": "bogus"},
+        },
+        format="json",
+    )
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "discount_type_invalid"
+
+
+def test_fixed_amount_overflow_rejected(tenant_a, as_role):
+    # NUMERIC(18,2) -> at most 16 integer digits; reject as a clean 400, not a DB 500.
+    teacher, _ = as_role(Role.TEACHER)
+    sid = _student_id(tenant_a)
+    r = teacher.post(
+        REQ,
+        {
+            "kind": "discount",
+            "title": "x",
+            "payload": {"student_id": sid, "fixed_amount_uzs": "100000000000000000"},  # 1e17
+        },
+        format="json",
+    )
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "discount_fixed_range"
+
+
+def test_percent_quantized_to_two_places(tenant_a, as_role):
+    """The audited payload must equal the discount that actually bills the student
+    (Postgres NUMERIC(5,2) would otherwise silently round on insert)."""
+    teacher, _ = as_role(Role.TEACHER)
+    director, _ = as_role(Role.DIRECTOR)
+    sid = _student_id(tenant_a)
+    body = teacher.post(
+        REQ,
+        {"kind": "discount", "title": "x", "payload": {"student_id": sid, "percent": "33.333"}},
+        format="json",
+    ).json()
+    assert body["payload"]["percent"] == "33.33"  # normalized at the gate
+
+    director.post(f"{REQ}{body['id']}/approve/", {}, format="json")
+    with schema_context(tenant_a.schema_name):
+        from apps.finance.models import Discount
+
+        assert Discount.objects.get(student_id=sid).percent == Decimal("33.33")
+
+
+def test_cannot_approve_own_request(tenant_a, as_role):
+    """Maker-checker: a user holding both approvals:write and approvals:approve
+    (e.g. director) may not sign off their own request — the effect must not fire."""
+    director, _ = as_role(Role.DIRECTOR)
+    sid = _student_id(tenant_a)
+    rid = director.post(
+        REQ,
+        {"kind": "discount", "title": "self", "payload": {"student_id": sid, "percent": "10"}},
+        format="json",
+    ).json()["id"]
+
+    resp = director.post(f"{REQ}{rid}/approve/", {}, format="json")
+    assert resp.status_code == 403
+    assert resp.json()["error"]["code"] == "self_approval"
+
+    with schema_context(tenant_a.schema_name):
+        from apps.approvals.models import ApprovalRequest
+        from apps.finance.models import Discount
+
+        assert ApprovalRequest.objects.get(pk=rid).status == ApprovalRequest.Status.PENDING
+        assert not Discount.objects.filter(student_id=sid).exists()  # no effect fired
+
+
+def test_rejecting_approved_discount_deactivates_it(tenant_a, as_role):
+    """A rejected price cut must stop cutting prices: reject-after-approve
+    deactivates the standing Discount so billing no longer applies it."""
+    teacher, _ = as_role(Role.TEACHER)
+    director, _ = as_role(Role.DIRECTOR)
+    sid = _student_id(tenant_a)
+    rid = teacher.post(
+        REQ,
+        {"kind": "discount", "title": "x", "payload": {"student_id": sid, "percent": "15"}},
+        format="json",
+    ).json()["id"]
+    director.post(f"{REQ}{rid}/approve/", {}, format="json")
+    with schema_context(tenant_a.schema_name):
+        from apps.finance.models import Discount
+
+        assert Discount.objects.get(student_id=sid).is_active is True
+
+    rej = director.post(f"{REQ}{rid}/reject/", {"note": "reconsidered"}, format="json")
+    assert rej.status_code == 200
+    assert rej.json()["status"] == "rejected"
+    with schema_context(tenant_a.schema_name):
+        from apps.finance.models import Discount
+
+        assert Discount.objects.get(student_id=sid).is_active is False
+
+
+def test_discount_student_deleted_before_approve(tenant_a, as_role):
+    """The existence guard at approve time rolls the whole approval back (422,
+    request stays pending, no orphan Discount)."""
+    teacher, _ = as_role(Role.TEACHER)
+    director, _ = as_role(Role.DIRECTOR)
+    sid = _student_id(tenant_a)
+    rid = teacher.post(
+        REQ,
+        {"kind": "discount", "title": "x", "payload": {"student_id": sid, "percent": "15"}},
+        format="json",
+    ).json()["id"]
+
+    with schema_context(tenant_a.schema_name):
+        from apps.students.models import StudentProfile
+
+        StudentProfile.objects.filter(pk=sid).delete()
+
+    resp = director.post(f"{REQ}{rid}/approve/", {}, format="json")
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "discount_student_missing"
+    with schema_context(tenant_a.schema_name):
+        from apps.approvals.models import ApprovalRequest
+        from apps.finance.models import Discount
+
+        assert ApprovalRequest.objects.get(pk=rid).status == ApprovalRequest.Status.PENDING
+        assert not Discount.objects.filter(student_id=sid).exists()

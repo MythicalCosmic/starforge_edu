@@ -70,7 +70,7 @@ def test_decision_only_request_cannot_disburse(tenant_a, as_role):
     cashier, _ = as_role(Role.CASHIER)
     method_id = _payment_method(tenant_a)
 
-    rid = teacher.post(REQ, {"kind": "payment_delay", "title": "Delay to 15th"}, format="json").json()["id"]
+    rid = teacher.post(REQ, {"kind": "other", "title": "Note only"}, format="json").json()["id"]
     director.post(f"{REQ}{rid}/approve/", {}, format="json")
     # an amount-less request approves fine but has nothing to disburse
     assert cashier.post(f"{REQ}{rid}/disburse/", {"payment_method": method_id}, format="json").status_code == 422

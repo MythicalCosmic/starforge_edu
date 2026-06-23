@@ -15,12 +15,21 @@ from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
 from apps.approvals.models import ApprovalRequest, LedgerEntry
-from core.exceptions import NotFoundException, UnprocessableEntity, ValidationException
+from core.exceptions import (
+    NotFoundException,
+    PermissionException,
+    UnprocessableEntity,
+    ValidationException,
+)
 from core.permissions import roles_with_permission
 
 # Kinds whose payload is validated at creation time and which carry an
 # on-approval side-effect (see _apply_approval_effect).
 KIND_DISCOUNT = "discount"
+KIND_PAYMENT_DELAY = "payment_delay"
+
+# Money/percent columns are NUMERIC(_, 2); normalize payload values to that scale.
+_TWO_PLACES = Decimal("0.01")
 
 
 def _notify(*, event_type: str, recipient_id: int | None, req: ApprovalRequest) -> None:
@@ -98,7 +107,10 @@ def _validate_discount_payload(payload: dict) -> dict:
             ) from None
         if not (Decimal("0") < pv <= Decimal("100")):
             raise ValidationException(_("percent must be between 0 and 100."), code="discount_percent_range")
-        clean["percent"] = str(pv)
+        # Quantize to the Discount column's scale (NUMERIC(5,2)) at the gate, so the
+        # audited payload always equals the discount that actually bills the student
+        # (Postgres would otherwise silently round on insert -> audit divergence).
+        clean["percent"] = str(pv.quantize(_TWO_PLACES))
     else:
         try:
             fv = Decimal(str(fixed))
@@ -108,7 +120,11 @@ def _validate_discount_payload(payload: dict) -> dict:
             ) from None
         if fv <= 0:
             raise ValidationException(_("fixed_amount_uzs must be positive."), code="discount_fixed_range")
-        clean["fixed_amount_uzs"] = str(fv)
+        # NUMERIC(18,2): at most 16 integer digits. Reject the overflow at the gate
+        # as a clean 400 rather than letting it surface as a DB 500 at approve time.
+        if fv >= Decimal("1e16"):
+            raise ValidationException(_("fixed_amount_uzs is too large."), code="discount_fixed_range")
+        clean["fixed_amount_uzs"] = str(fv.quantize(_TWO_PLACES))
 
     for key in ("valid_from", "valid_until"):
         raw = payload.get(key)
@@ -121,6 +137,55 @@ def _validate_discount_payload(payload: dict) -> dict:
                     code="discount_date_invalid",
                 ) from None
     return clean
+
+
+def _validate_payment_delay_payload(payload: dict) -> dict:
+    """Validate + normalize a payment-delay payload at creation time. Shape:
+
+        {invoice_id, new_due_date}
+
+    The target must be an OPEN invoice with a due date, and new_due_date must be
+    strictly later than the current one (you can only delay, never advance/backdate).
+    Re-checked again at approve time, since the invoice may move in between.
+    """
+    from apps.finance.models import Invoice
+    from apps.finance.services import OPEN_STATUSES
+
+    invoice_id = payload.get("invoice_id")
+    invoice = Invoice.objects.filter(pk=invoice_id).first() if isinstance(invoice_id, int) else None
+    if invoice is None:
+        raise ValidationException(
+            _("A payment-delay request needs a valid invoice_id in its payload."),
+            code="payment_delay_invoice_required",
+            fields={"payload": ["invoice_id"]},
+        )
+    if invoice.status not in OPEN_STATUSES:
+        raise ValidationException(
+            _("Only an open invoice's payment can be delayed."), code="payment_delay_invoice_not_open"
+        )
+    if invoice.due_date is None:
+        raise ValidationException(
+            _("This invoice has no due date to extend."), code="payment_delay_no_due_date"
+        )
+
+    try:
+        new_due = date.fromisoformat(str(payload.get("new_due_date")))
+    except ValueError:
+        raise ValidationException(
+            _("new_due_date must be an ISO date (YYYY-MM-DD)."), code="payment_delay_date_invalid"
+        ) from None
+    if new_due <= invoice.due_date:
+        raise ValidationException(
+            _("A payment delay can only move the due date later."), code="payment_delay_not_later"
+        )
+    if new_due < timezone.now().date():
+        # A delay into the past is meaningless: it would leave the bill overdue with
+        # no observable grace. Require it to land today or later.
+        raise ValidationException(
+            _("A payment delay must move the due date to today or later."),
+            code="payment_delay_in_past",
+        )
+    return {"invoice_id": invoice_id, "new_due_date": new_due.isoformat()}
 
 
 @transaction.atomic
@@ -139,6 +204,10 @@ def create_request(
         # A discount is decision-only (the Discount it grants is the effect, not a
         # cash payout) — it never disburses, so drop any amount the caller passed.
         payload = _validate_discount_payload(payload)
+        amount_uzs = None
+    elif kind == KIND_PAYMENT_DELAY:
+        # Also decision-only: the effect is moving a due date, not paying money out.
+        payload = _validate_payment_delay_payload(payload)
         amount_uzs = None
     return ApprovalRequest.objects.create(
         kind=kind,
@@ -180,12 +249,79 @@ def _apply_discount_effect(req: ApprovalRequest, actor) -> None:
     req.payload = {**p, "discount_id": discount.pk}
 
 
+def _apply_payment_delay_effect(req: ApprovalRequest, actor) -> None:
+    """On approval, a payment-delay request pushes its target invoice's due date
+    via the finance service (which re-validates + un-overdues atomically). The
+    prior due date/status are snapshotted (so a later rejection can restore them)
+    and the applied date/status are stamped into the payload as the audit trail."""
+    from apps.finance.models import Invoice
+    from apps.finance.services import extend_invoice_due_date
+
+    p = dict(req.payload or {})
+    before = Invoice.objects.filter(pk=p["invoice_id"]).only("due_date", "status").first()
+    previous_due = before.due_date.isoformat() if before and before.due_date else None
+    previous_status = before.status if before else None
+    invoice = extend_invoice_due_date(
+        invoice_id=p["invoice_id"],
+        new_due_date=date.fromisoformat(p["new_due_date"]),
+        actor=actor,
+    )
+    req.payload = {
+        **p,
+        "previous_due_date": previous_due,
+        "previous_status": previous_status,
+        "applied_due_date": invoice.due_date.isoformat() if invoice.due_date else None,
+        "invoice_status": invoice.status,
+    }
+
+
 def _apply_approval_effect(req: ApprovalRequest, actor) -> None:
     """Dispatch the kind-specific side-effect that fires the instant a request is
     APPROVED. Money-moving kinds (loan/expense/...) act at disburse time instead;
-    decision kinds with an effect (discount) act here."""
+    decision kinds with an effect (discount, payment_delay) act here."""
     if req.kind == KIND_DISCOUNT:
         _apply_discount_effect(req, actor)
+    elif req.kind == KIND_PAYMENT_DELAY:
+        _apply_payment_delay_effect(req, actor)
+
+
+def _reverse_discount_effect(req: ApprovalRequest) -> None:
+    """Deactivate the granted Discount so it stops auto-applying — a rejected price
+    cut must not keep cutting prices."""
+    from apps.finance.models import Discount
+
+    p = dict(req.payload or {})
+    discount_id = p.get("discount_id")
+    if discount_id:
+        Discount.objects.filter(pk=discount_id).update(is_active=False)
+        req.payload = {**p, "effect_reversed": True}
+
+
+def _reverse_payment_delay_effect(req: ApprovalRequest, actor) -> None:
+    """Put the invoice's due date back to its pre-extension value (snapshotted at
+    approve time), re-flagging OVERDUE if appropriate."""
+    from apps.finance.services import restore_invoice_due_date
+
+    p = dict(req.payload or {})
+    invoice_id = p.get("invoice_id")
+    if invoice_id and "previous_due_date" in p:
+        prev = p["previous_due_date"]
+        restore_invoice_due_date(
+            invoice_id=invoice_id,
+            due_date=date.fromisoformat(prev) if prev else None,
+            actor=actor,
+        )
+        req.payload = {**p, "effect_reversed": True}
+
+
+def _reverse_approval_effect(req: ApprovalRequest, actor) -> None:
+    """Compensate the on-approval side-effect when an already-APPROVED request is
+    overturned (rejected). Money-moving kinds need no reversal here — they only act
+    at disburse. Runs inside reject()'s transaction so the undo is atomic."""
+    if req.kind == KIND_DISCOUNT:
+        _reverse_discount_effect(req)
+    elif req.kind == KIND_PAYMENT_DELAY:
+        _reverse_payment_delay_effect(req, actor)
 
 
 def _locked(request_id: int) -> ApprovalRequest:
@@ -195,11 +331,22 @@ def _locked(request_id: int) -> ApprovalRequest:
     return req
 
 
+def _assert_not_self_approval(req: ApprovalRequest, actor) -> None:
+    """Segregation of duties / maker-checker: the person who raised a request may
+    never sign it off (anti-fraud DNA — "no untracked favours"). Enforced in the
+    service so every caller is covered, not just the view. Superusers are exempt."""
+    if actor is None or getattr(actor, "is_superuser", False):
+        return
+    if req.requested_by_id and req.requested_by_id == getattr(actor, "id", None):
+        raise PermissionException(_("You cannot approve your own request."), code="self_approval")
+
+
 @transaction.atomic
 def approve(*, request_id: int, actor=None, note: str = "") -> ApprovalRequest:
     req = _locked(request_id)
     if req.status != ApprovalRequest.Status.PENDING:
         raise UnprocessableEntity(_("Only a pending request can be approved."), code="approval_not_pending")
+    _assert_not_self_approval(req, actor)
     req.status = ApprovalRequest.Status.APPROVED
     req.decided_by = actor
     req.decided_at = timezone.now()
@@ -224,11 +371,16 @@ def reject(*, request_id: int, actor=None, note: str = "") -> ApprovalRequest:
         raise UnprocessableEntity(
             _("This request can no longer be rejected."), code="approval_not_rejectable"
         )
+    was_approved = req.status == ApprovalRequest.Status.APPROVED
     req.status = ApprovalRequest.Status.REJECTED
     req.decided_by = actor
     req.decided_at = timezone.now()
     req.decision_note = note
-    req.save(update_fields=["status", "decided_by", "decided_at", "decision_note", "updated_at"])
+    if was_approved:
+        # Overturning an approval whose effect already fired (discount / payment_delay)
+        # must undo that effect, atomically, or a "rejected" decision still bites.
+        _reverse_approval_effect(req, actor)
+    req.save(update_fields=["status", "decided_by", "decided_at", "decision_note", "payload", "updated_at"])
     _notify(event_type="approval.rejected", recipient_id=req.requested_by_id, req=req)
     return req
 

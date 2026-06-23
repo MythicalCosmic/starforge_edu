@@ -348,6 +348,58 @@ def void_invoice(*, invoice: Invoice, actor=None) -> Invoice:
     return invoice
 
 
+@transaction.atomic
+def extend_invoice_due_date(*, invoice_id: int, new_due_date: date, actor=None) -> Invoice:
+    """Push an open invoice's due date later — a sanctioned payment delay whose
+    sign-off lives in the Approvals engine (the `payment_delay` KIND). You can
+    only delay: `new_due_date` must be strictly after the current one, never
+    advance or backdate (anti-fraud). If the invoice had tipped OVERDUE and the
+    new deadline is today or later, it is un-overdued — status recomputes to
+    issued / partially_paid from its payments so it leaves the dunning queue."""
+    invoice = Invoice.objects.select_for_update().filter(pk=invoice_id).first()
+    if invoice is None:
+        raise NotFoundException(_("Invoice not found."), code="invoice_not_found")
+    if invoice.status not in OPEN_STATUSES:
+        raise UnprocessableEntity(
+            _("Only an open invoice can have its due date extended."), code="invoice_not_open"
+        )
+    if invoice.due_date is None:
+        raise UnprocessableEntity(_("This invoice has no due date to extend."), code="invoice_no_due_date")
+    if new_due_date <= invoice.due_date:
+        raise UnprocessableEntity(
+            _("A payment delay can only move the due date later."), code="due_date_not_later"
+        )
+    was_overdue = invoice.status == Invoice.Status.OVERDUE
+    invoice.due_date = new_due_date
+    invoice.save(update_fields=["due_date", "updated_at"])
+    # An extension whose new deadline is today-or-later rescues an overdue bill;
+    # recompute its status from payments via the single source of truth
+    # (_refresh_invoice_status -> issued / partially_paid / paid).
+    if was_overdue and new_due_date >= timezone.now().date():
+        _refresh_invoice_status(invoice)
+    return invoice
+
+
+@transaction.atomic
+def restore_invoice_due_date(*, invoice_id: int, due_date: date | None, actor=None) -> Invoice:
+    """Undo a payment-delay extension: put the due date back and recompute status
+    (re-flagging OVERDUE when the restored date is now past and the bill still
+    owes money). Used to reverse the effect when an approved payment_delay is
+    later rejected. A voided invoice is left untouched."""
+    invoice = Invoice.objects.select_for_update().filter(pk=invoice_id).first()
+    if invoice is None:
+        raise NotFoundException(_("Invoice not found."), code="invoice_not_found")
+    if invoice.status == Invoice.Status.VOID:
+        return invoice
+    invoice.due_date = due_date
+    invoice.save(update_fields=["due_date", "updated_at"])
+    _refresh_invoice_status(invoice)  # issued / partially_paid / paid from allocations
+    if invoice.status == Invoice.Status.ISSUED and due_date is not None and due_date < timezone.now().date():
+        invoice.status = Invoice.Status.OVERDUE
+        invoice.save(update_fields=["status", "updated_at"])
+    return invoice
+
+
 # ---------------------------------------------------------------------------
 # Auto-issue on enrollment (D3-A-3)
 # ---------------------------------------------------------------------------
