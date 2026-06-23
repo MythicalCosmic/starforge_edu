@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from django.core.cache import cache
 from django.shortcuts import get_object_or_404
+from django.utils.translation import gettext_lazy as _
 from drf_spectacular.utils import (
     OpenApiExample,
     OpenApiParameter,
@@ -170,21 +171,49 @@ class InvoiceViewSet(TenantSafeModelViewSet):
 
 
 class DiscountViewSet(TenantSafeModelViewSet):
-    """Discounts are finance:write on every action (creating/editing money rules)."""
+    """Discounts are GRANTED only through the Approvals engine (the `discount` KIND,
+    F15-3) so every price cut carries sign-off — there is NO direct create / edit /
+    delete here, which would side-step the approval gate and let anyone with
+    finance:write mutate the audited discount out-of-band. Discounts are therefore
+    read-only over CRUD; they can be ENDED via the explicit `deactivate` action
+    (ending a benefit, lower fraud-risk than granting one) at finance:write."""
 
     serializer_class = DiscountSerializer
     resource = "finance"
-    required_perms = {action: "finance:write" for action in default_perms("finance")}
+    required_perms = {
+        "list": "finance:read",
+        "retrieve": "finance:read",
+        "deactivate": "finance:write",
+    }
+    # No put / patch / delete; create is overridden below to a hard 405.
+    http_method_names = ["get", "post", "head", "options"]
     queryset = Discount.objects.select_related("student__user", "approved_by").all()
     filterset_fields = ("student", "discount_type", "is_active")
     ordering_fields = ("created_at",)
 
-    def perform_create(self, serializer):
-        serializer.save(approved_by=self.request.user)
+    def create(self, request, *args, **kwargs):
+        raise MethodNotAllowed(
+            "POST",
+            detail=_("Discounts are granted through an approval request, not created directly."),
+        )
 
     @extend_schema(tags=["finance"])
     def list(self, request, *args, **kwargs):
         return super().list(request, *args, **kwargs)
+
+    @extend_schema(
+        summary="End a standing discount (stops it applying to future invoices)",
+        request=None,
+        responses={200: DiscountSerializer},
+        tags=["finance"],
+    )
+    @action(detail=True, methods=["post"])
+    def deactivate(self, request, pk=None):
+        discount = self.get_object()
+        if discount.is_active:
+            discount.is_active = False
+            discount.save(update_fields=["is_active", "updated_at"])
+        return Response(DiscountSerializer(discount).data)
 
 
 class PaymentMethodViewSet(TenantSafeModelViewSet):
