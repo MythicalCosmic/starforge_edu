@@ -82,7 +82,7 @@ premium AI tiering (Opus/Sonnet/Haiku, metered).
 |---|---------|-----------|-----------|------|--------|
 | F3-1 | Dynamic lesson types (Video/Speaking/Main/Hangout…) | manager CRUD `/schedule/lesson-types/`; `Lesson.lesson_type` FK | new (D-3) | — | DONE |
 | F3-2 | Teacher dashboard aggregate | `GET /teachers/dashboard/` → my students, groups, level-groups, next lesson(+type), upcoming exams, expected graduations, warnings, forms-to-fill | new selector | F3-1, F3-3 | TODO |
-| F3-3 | Forms/surveys engine (anonymous optional) | manager/teacher builds form; recipients fill; `Form/FormResponse` | new (D-5) | — | TODO |
+| F3-3 | Forms/surveys engine (anonymous optional) | `apps.forms`: build (`Form`+ordered `FormField`s, 8 field types) → publish → submit (`FormResponse`/`FormAnswer`, per-type+required validation) → `responses/` + aggregate `summary/`. Anonymous (drops respondent), one-per-respondent dedupe (partial unique on dedupe_token; `allow_multiple` opt-out). forms:read/write; responders see only published | new app | — | DONE |
 | F3-4 | Manager views + AI-analyzes form responses with charts | reuse `reports` generators; AI summary + chart data | reuse+new | F3-3 | TODO |
 | F3-5 | Staff meetings / next-meeting for teachers | `StaffMeeting` + surfaced on dashboard | new (D-9) | F3-2 | TODO |
 

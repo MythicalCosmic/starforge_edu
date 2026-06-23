@@ -29,6 +29,7 @@ api_v1_patterns = [
     path("approvals/", include("apps.approvals.urls")),
     path("rulebook/", include("apps.compliance.urls")),
     path("access/", include("apps.access.urls")),
+    path("forms/", include("apps.forms.urls")),
 ]
 
 urlpatterns = [

@@ -81,6 +81,9 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         # #12: HOD can author + see the rule book.
         "compliance:read",
         "compliance:write",
+        # F3-3: managers build + analyze forms/surveys.
+        "forms:read",
+        "forms:write",
     },
     Role.TEACHER: {
         "students:read",
@@ -104,6 +107,9 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         # A-1: teachers can raise requests (expense/loan/discount/salary-prep).
         "approvals:read",
         "approvals:write",
+        # F3-3: teachers build surveys for their groups + fill manager forms.
+        "forms:read",
+        "forms:write",
     },
     Role.STUDENT: {
         # students:read is row-scoped to self by apps/students/selectors.py
@@ -115,6 +121,7 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "assignments:read",
         "assignments:submit",  # D2-D-6: students submit their own work
         "content:read",
+        "forms:read",  # F3-3: students fill surveys/forms addressed to them
     },
     Role.PARENT: {
         # Row-scoped by selectors: students -> guardian-linked children only,
@@ -128,6 +135,7 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "finance:read_own",
         "schedule:read",
         "notifications:read",
+        "forms:read",  # F3-3: parents fill forms addressed to families
     },
     Role.ACCOUNTANT: {
         "finance:*",
@@ -158,6 +166,9 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         # A-1: reception can raise requests too.
         "approvals:read",
         "approvals:write",
+        # F3-3: reception builds + fills forms.
+        "forms:read",
+        "forms:write",
     },
     Role.SUPPORT: {"users:read", "audit:read"},
 }

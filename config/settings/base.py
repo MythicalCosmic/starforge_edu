@@ -150,6 +150,7 @@ TENANT_APPS = [
     "apps.approvals.apps.ApprovalsConfig",  # A-1: approvals + ledger engine
     "apps.compliance.apps.ComplianceConfig",  # rule book / policy acknowledgment (#12)
     "apps.access.apps.AccessConfig",  # A-2: dynamic, center-configurable permissions
+    "apps.forms.apps.FormsConfig",  # F3-3: forms / surveys engine
 ]
 
 INSTALLED_APPS = list(SHARED_APPS) + [a for a in TENANT_APPS if a not in SHARED_APPS]
