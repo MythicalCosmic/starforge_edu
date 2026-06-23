@@ -342,3 +342,61 @@ class CashierShift(models.Model):
 
     def __str__(self) -> str:  # pragma: no cover
         return f"shift#{self.pk}:{self.cashier_id}:{self.status}"
+
+
+class PaymentMethod(models.Model):
+    """Dynamic disbursement/receipt method (F14): cash, card, bank transfer, …
+    Admin-managed per Center so it fits any center's accounting."""
+
+    name = models.CharField(max_length=64)
+    slug = models.SlugField(max_length=64, unique=True)
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("name",)
+
+    def __str__(self) -> str:  # pragma: no cover
+        return self.name
+
+
+class Expense(models.Model):
+    """A center expense: created -> approved -> paid (or rejected). The money is
+    disbursed in a chosen PaymentMethod on the pay step (F14-1)."""
+
+    class Status(models.TextChoices):
+        PENDING = "pending", _("Pending approval")
+        APPROVED = "approved", _("Approved")
+        PAID = "paid", _("Paid")
+        REJECTED = "rejected", _("Rejected")
+
+    branch = models.ForeignKey("org.Branch", on_delete=models.PROTECT, related_name="expenses")
+    category = models.CharField(max_length=80, blank=True)
+    description = models.CharField(max_length=255)
+    amount_uzs = models.DecimalField(max_digits=18, decimal_places=2)
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING, db_index=True)
+    payment_method = models.ForeignKey(
+        PaymentMethod, on_delete=models.PROTECT, null=True, blank=True, related_name="expenses"
+    )
+    created_by = models.ForeignKey("users.User", on_delete=models.SET_NULL, null=True, related_name="+")
+    approved_by = models.ForeignKey(
+        "users.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    paid_by = models.ForeignKey(
+        "users.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    reject_reason = models.CharField(max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    approved_at = models.DateTimeField(null=True, blank=True)
+    paid_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+        indexes = [models.Index(fields=("status", "branch"))]
+        constraints = [
+            models.CheckConstraint(condition=models.Q(amount_uzs__gt=0), name="expense_amount_positive"),
+        ]
+
+    def __str__(self) -> str:  # pragma: no cover
+        return f"expense#{self.pk}:{self.status}:{self.amount_uzs}"

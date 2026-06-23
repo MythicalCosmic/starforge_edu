@@ -18,16 +18,21 @@ from rest_framework.permissions import BasePermission
 from rest_framework.response import Response
 
 from apps.finance import selectors, services
-from apps.finance.models import CashierShift, Discount, FeeSchedule
+from apps.finance.models import CashierShift, Discount, Expense, FeeSchedule, PaymentMethod
 from apps.finance.serializers import (
     CashierShiftCloseSerializer,
     CashierShiftOpenSerializer,
     CashierShiftReadSerializer,
     DiscountSerializer,
+    ExpenseCreateSerializer,
+    ExpensePaySerializer,
+    ExpenseReadSerializer,
+    ExpenseRejectSerializer,
     FeeScheduleSerializer,
     InvoiceCreateSerializer,
     InvoiceReadSerializer,
     OutstandingSerializer,
+    PaymentMethodSerializer,
     PaymentPlanCreateSerializer,
     PaymentPlanReadSerializer,
     StatementRequestSerializer,
@@ -180,6 +185,83 @@ class DiscountViewSet(TenantSafeModelViewSet):
     @extend_schema(tags=["finance"])
     def list(self, request, *args, **kwargs):
         return super().list(request, *args, **kwargs)
+
+
+class PaymentMethodViewSet(TenantSafeModelViewSet):
+    """Dynamic disbursement methods (cash/card/…). Managed at finance:write; any
+    finance:read holder may list them (the expense pay step needs the choices)."""
+
+    serializer_class = PaymentMethodSerializer
+    resource = "finance"
+    queryset = PaymentMethod.objects.all()
+    filterset_fields = ("is_active",)
+    search_fields = ("name", "slug")
+    ordering_fields = ("name",)
+
+
+class ExpenseViewSet(TenantSafeModelViewSet):
+    """Expense lifecycle (F14-1): create -> approve/reject -> pay (chosen method).
+    Transitions are explicit actions; no raw PUT/DELETE."""
+
+    serializer_class = ExpenseReadSerializer
+    resource = "finance"
+    required_perms = {
+        "list": "finance:read",
+        "retrieve": "finance:read",
+        "create": "finance:write",
+        "approve": "finance:write",
+        "reject": "finance:write",
+        "pay": "finance:write",
+    }
+    queryset = Expense.objects.select_related(
+        "branch", "payment_method", "created_by", "approved_by", "paid_by"
+    ).all()
+    filterset_fields = ("status", "branch", "category")
+    ordering_fields = ("created_at", "amount_uzs")
+    http_method_names = ["get", "post", "head", "options"]
+
+    @extend_schema(request=ExpenseCreateSerializer, responses={201: ExpenseReadSerializer}, tags=["finance"])
+    def create(self, request, *args, **kwargs):
+        ser = ExpenseCreateSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        data = ser.validated_data
+        expense = services.create_expense(
+            branch=data["branch"],
+            description=data["description"],
+            amount_uzs=data["amount_uzs"],
+            category=data.get("category", ""),
+            created_by=request.user,
+        )
+        return Response(ExpenseReadSerializer(expense).data, status=status.HTTP_201_CREATED)
+
+    @extend_schema(request=None, responses={200: ExpenseReadSerializer}, tags=["finance"])
+    @action(detail=True, methods=["post"])
+    def approve(self, request, pk=None):
+        expense = self.get_object()
+        expense = services.approve_expense(expense_id=expense.pk, actor=request.user)
+        return Response(ExpenseReadSerializer(expense).data)
+
+    @extend_schema(request=ExpenseRejectSerializer, responses={200: ExpenseReadSerializer}, tags=["finance"])
+    @action(detail=True, methods=["post"])
+    def reject(self, request, pk=None):
+        expense = self.get_object()
+        ser = ExpenseRejectSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        expense = services.reject_expense(
+            expense_id=expense.pk, reason=ser.validated_data["reason"], actor=request.user
+        )
+        return Response(ExpenseReadSerializer(expense).data)
+
+    @extend_schema(request=ExpensePaySerializer, responses={200: ExpenseReadSerializer}, tags=["finance"])
+    @action(detail=True, methods=["post"])
+    def pay(self, request, pk=None):
+        expense = self.get_object()
+        ser = ExpensePaySerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        expense = services.pay_expense(
+            expense_id=expense.pk, payment_method_id=ser.validated_data["payment_method"], actor=request.user
+        )
+        return Response(ExpenseReadSerializer(expense).data)
 
 
 class CashierShiftViewSet(TenantSafeModelViewSet):

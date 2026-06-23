@@ -4,18 +4,22 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from django.utils.text import slugify
 from rest_framework import serializers
 
 from apps.finance.models import (
     CashierShift,
     Discount,
+    Expense,
     FeeSchedule,
     Invoice,
     InvoiceLine,
     PaymentAllocation,
+    PaymentMethod,
     PaymentPlan,
     PaymentPlanInstallment,
 )
+from apps.org.models import Branch
 
 
 class FeeScheduleSerializer(serializers.ModelSerializer):
@@ -203,3 +207,56 @@ class CashierShiftCloseSerializer(serializers.Serializer):
 
 class StatementRequestSerializer(serializers.Serializer):
     locale = serializers.ChoiceField(choices=("uz", "ru", "en"), required=False, default="en")
+
+
+# --------------------------------------------------------------------------- #
+# Expenses + payment methods (F14)
+# --------------------------------------------------------------------------- #
+class PaymentMethodSerializer(serializers.ModelSerializer):
+    slug = serializers.SlugField(required=False)
+
+    class Meta:
+        model = PaymentMethod
+        fields = ("id", "name", "slug", "is_active")
+
+    def validate(self, attrs):
+        if not attrs.get("slug") and attrs.get("name"):
+            attrs["slug"] = slugify(attrs["name"])[:64]
+        return attrs
+
+
+class ExpenseReadSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Expense
+        fields = (
+            "id",
+            "branch",
+            "category",
+            "description",
+            "amount_uzs",
+            "status",
+            "payment_method",
+            "reject_reason",
+            "created_by",
+            "approved_by",
+            "paid_by",
+            "created_at",
+            "approved_at",
+            "paid_at",
+        )
+        read_only_fields = fields
+
+
+class ExpenseCreateSerializer(serializers.Serializer):
+    branch = serializers.PrimaryKeyRelatedField(queryset=Branch.objects.filter(archived_at__isnull=True))
+    description = serializers.CharField(max_length=255)
+    amount_uzs = serializers.DecimalField(max_digits=18, decimal_places=2, min_value=Decimal("0.01"))
+    category = serializers.CharField(max_length=80, required=False, allow_blank=True, default="")
+
+
+class ExpensePaySerializer(serializers.Serializer):
+    payment_method = serializers.IntegerField()
+
+
+class ExpenseRejectSerializer(serializers.Serializer):
+    reason = serializers.CharField(max_length=255, required=False, allow_blank=True, default="")

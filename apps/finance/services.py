@@ -28,10 +28,12 @@ from django.utils.translation import gettext_lazy as _
 from apps.finance.models import (
     CashierShift,
     Discount,
+    Expense,
     FeeSchedule,
     Invoice,
     InvoiceLine,
     PaymentAllocation,
+    PaymentMethod,
     PaymentPlan,
     PaymentPlanInstallment,
     Refund,
@@ -39,7 +41,7 @@ from apps.finance.models import (
 from apps.finance.signals import invoice_issued
 from apps.org.selectors import get_center_settings
 from apps.students.models import StudentProfile
-from core.exceptions import ConflictException, NotFoundException, ValidationException
+from core.exceptions import ConflictException, NotFoundException, UnprocessableEntity, ValidationException
 from core.utils import current_schema, stable_hash
 
 _ZERO = Decimal("0")
@@ -837,3 +839,67 @@ def generate_statement(student_id: int, *, locale: str = "en") -> str:
 
     upload_bytes(key, pdf, content_type="application/pdf")
     return key
+
+
+# ---------------------------------------------------------------------------
+# Expenses (F14-1): created -> approved -> paid (or rejected)
+# ---------------------------------------------------------------------------
+@transaction.atomic
+def create_expense(
+    *, branch, description: str, amount_uzs: Decimal, category: str = "", created_by=None
+) -> Expense:
+    return Expense.objects.create(
+        branch=branch,
+        description=description,
+        amount_uzs=amount_uzs,
+        category=category,
+        created_by=created_by,
+    )
+
+
+def _locked_expense(expense_id: int) -> Expense:
+    expense = Expense.objects.select_for_update().filter(pk=expense_id).first()
+    if expense is None:
+        raise NotFoundException(_("Expense not found."), code="expense_not_found")
+    return expense
+
+
+@transaction.atomic
+def approve_expense(*, expense_id: int, actor=None) -> Expense:
+    expense = _locked_expense(expense_id)
+    if expense.status != Expense.Status.PENDING:
+        raise UnprocessableEntity(_("Only a pending expense can be approved."), code="expense_not_pending")
+    expense.status = Expense.Status.APPROVED
+    expense.approved_by = actor
+    expense.approved_at = timezone.now()
+    expense.save(update_fields=["status", "approved_by", "approved_at"])
+    return expense
+
+
+@transaction.atomic
+def reject_expense(*, expense_id: int, reason: str = "", actor=None) -> Expense:
+    expense = _locked_expense(expense_id)
+    if expense.status not in (Expense.Status.PENDING, Expense.Status.APPROVED):
+        raise UnprocessableEntity(_("This expense can no longer be rejected."), code="expense_not_rejectable")
+    expense.status = Expense.Status.REJECTED
+    expense.reject_reason = reason
+    expense.approved_by = actor
+    expense.save(update_fields=["status", "reject_reason", "approved_by"])
+    return expense
+
+
+@transaction.atomic
+def pay_expense(*, expense_id: int, payment_method_id: int, actor=None) -> Expense:
+    """Disburse an APPROVED expense via a chosen (active) PaymentMethod."""
+    expense = _locked_expense(expense_id)
+    if expense.status != Expense.Status.APPROVED:
+        raise UnprocessableEntity(_("Only an approved expense can be paid."), code="expense_not_approved")
+    method = PaymentMethod.objects.filter(pk=payment_method_id, is_active=True).first()
+    if method is None:
+        raise UnprocessableEntity(_("Unknown or inactive payment method."), code="payment_method_invalid")
+    expense.status = Expense.Status.PAID
+    expense.payment_method = method
+    expense.paid_by = actor
+    expense.paid_at = timezone.now()
+    expense.save(update_fields=["status", "payment_method", "paid_by", "paid_at"])
+    return expense
