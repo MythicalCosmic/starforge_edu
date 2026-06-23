@@ -100,6 +100,10 @@ SHARED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
+    # Required for schedule.Lesson's GiST ExclusionConstraint (no models, so it
+    # lives in SHARED_APPS only) — silences postgres.E005 so a fresh `migrate`
+    # passes the system check instead of aborting.
+    "django.contrib.postgres",
     # TD-3 / ADR-007: identity also lives in the public schema so platform staff
     # can log into the apex /admin/ and IsAdminUser works on the platform API.
     # These stay in TENANT_APPS too (a table per tenant schema as well).
