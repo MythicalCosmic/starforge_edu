@@ -74,6 +74,10 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "ai:write",
         "printing:read",  # D4-LD-7
         "printing:write",
+        # A-1: HOD is a manager-level approver (request + approve, not disburse).
+        "approvals:read",
+        "approvals:write",
+        "approvals:approve",
     },
     Role.TEACHER: {
         "students:read",
@@ -94,6 +98,9 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "reports:write",
         "printing:read",  # D4-LD-7: request prints
         "printing:write",
+        # A-1: teachers can raise requests (expense/loan/discount/salary-prep).
+        "approvals:read",
+        "approvals:write",
     },
     Role.STUDENT: {
         # students:read is row-scoped to self by apps/students/selectors.py
@@ -119,8 +126,20 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "schedule:read",
         "notifications:read",
     },
-    Role.ACCOUNTANT: {"finance:*", "payments:*", "reports:read", "reports:write"},
-    Role.CASHIER: {"finance:read", "payments:write"},
+    Role.ACCOUNTANT: {
+        "finance:*",
+        "payments:*",
+        "reports:read",
+        "reports:write",
+        # A-1: accountant requests, approves, disburses, and reads the ledger.
+        "approvals:read",
+        "approvals:write",
+        "approvals:approve",
+        "approvals:disburse",
+        "ledger:read",
+    },
+    # A-1: the cashier disburses approved requests + reads the ledger (the till).
+    Role.CASHIER: {"finance:read", "payments:write", "approvals:read", "approvals:disburse", "ledger:read"},
     Role.LIBRARIAN: {"content:*", "students:read", "cohorts:read"},
     Role.SECURITY: {"attendance:write", "users:read"},
     Role.IT: {"users:read", "audit:read", "org:*"},
@@ -133,6 +152,9 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "schedule:*",
         "printing:read",  # D4-LD-7: manage printers/agents
         "printing:write",
+        # A-1: reception can raise requests too.
+        "approvals:read",
+        "approvals:write",
     },
     Role.SUPPORT: {"users:read", "audit:read"},
 }

@@ -143,6 +143,7 @@ TENANT_APPS = [
     "apps.ai.apps.AIConfig",
     "apps.audit.apps.AuditConfig",
     "apps.reports.apps.ReportsConfig",
+    "apps.approvals.apps.ApprovalsConfig",  # A-1: approvals + ledger engine
 ]
 
 INSTALLED_APPS = list(SHARED_APPS) + [a for a in TENANT_APPS if a not in SHARED_APPS]
