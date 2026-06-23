@@ -1,13 +1,42 @@
 # Feature Backlog
 
-This is the decomposition of `FEATURE_LIST.md` (the owner's raw idea inbox) into
-discrete, buildable features. **Owner adds ideas to `FEATURE_LIST.md`; this file
-is the engineering breakdown.** Each item has acceptance criteria + a STATUS.
+This is the decomposition of `FEATURE_LIST.md` (the owner's raw idea inbox) +
+`docs/PRODUCT_VISION.md` (the canonical strategy) into discrete, buildable
+features. Each item has acceptance criteria + a STATUS.
 
 Roles mapping (from `core/permissions.py`): **manager = `director`** (and `head_of_dept`
 for dept-scoped), **receptionist = `registrar`**. New resources get matrix entries.
 
 Status legend: `TODO` · `WIP` · `DONE` · `BLOCKED(reason)`.
+
+---
+
+## ★ ARCHITECTURE FOUNDATIONS (from PRODUCT_VISION — build these FIRST, they collapse dozens of features)
+The vision's biggest leverage is that most "features" are instances of a few engines.
+Build the engine once; the rest is configuration.
+
+| # | Foundation | Why it collapses N features | Status |
+|---|-----------|------------------------------|--------|
+| **A-1** | **Approvals + Ledger engine** (`apps.approvals` + `apps.ledger`): `request → N approvals → cashier disburses → notify → immutable ledger row` | Expenses, staff loans, procurement (#15), payment-delay (#5), discount requests (#5/#7), partial-pay, salary-prep (#7), event cost-split (#14), book cash-sales (#8), rewards/points payouts (#6/#7) — ALL one engine. The ledger is the anti-fraud moat ("money can't disappear"). | WIP |
+| **A-2** | **Dynamic permission system** (CRITICAL/security): center-configurable custom roles + granular permissions, **enforced live server-side**, instant revocation | Replaces the static `ROLE_PERMISSION_MATRIX`. Born from a real breach (localStorage-only auth). Every gated endpoint depends on it. | TODO |
+| **A-3** | **Intelligence/metrics pipeline**: one computed feed over attendance/grades/submissions/payments | Risk flags ⭐ (dropout = #1 revenue leak), family-health, branch ranking, teacher value-add, journey timeline — all views on it. Start as transparent RULES, not black-box AI. | TODO |
+| **A-4** | **Two surfaces** framing: owner ops platform vs student engagement layer | Sequencing rule, not a feature: owner-paid ops (payments/camera/attendance/payroll) first; student delight (games/podcasts/mocks/CBT/speaking) as the retention flywheel. | NOTE |
+
+**Reconciliation:** the standalone **Expenses (F14-1, already shipped)** is the first
+instance of A-1 — it will be folded into the generic engine; new money features
+(loans/procurement/discount-requests/salary-prep) are built ON A-1 directly.
+
+**Cross-cutting DNA to honor in every feature:** anti-fraud/accountability · dignity/
+shame-reduction · paper-elimination · dedicated-in-country-server (biometric law) ·
+premium AI tiering (Opus/Sonnet/Haiku, metered).
+
+**Re-sequenced top of the build order:**
+1. **A-1 Approvals+Ledger engine** (spine) ← *in progress* → migrate Expenses, add loans/procurement.
+2. **A-2 Dynamic permissions** (security-critical foundation).
+3. Forms engine (F3-3) + **A-3 risk-flag rules** (cheap, killer).
+4. Teacher/student dashboards (F3-2/F4-1) as views on the engines.
+5. Telegram-first parent notifications; lead→trial→enrolled CRM funnel.
+6. Engagement layer (games/podcasts/mocks/CBT/speaking) — later track.
 
 ---
 
@@ -51,7 +80,7 @@ Status legend: `TODO` · `WIP` · `DONE` · `BLOCKED(reason)`.
 ## Feature 3 — Teacher dashboard
 | # | Feature | Acceptance | Reuse/New | Deps | Status |
 |---|---------|-----------|-----------|------|--------|
-| F3-1 | Dynamic lesson types (Video/Speaking/Main/Hangout…) | manager CRUD `/schedule/lesson-types/`; `Lesson.lesson_type` FK | new (D-3) | — | TODO |
+| F3-1 | Dynamic lesson types (Video/Speaking/Main/Hangout…) | manager CRUD `/schedule/lesson-types/`; `Lesson.lesson_type` FK | new (D-3) | — | DONE |
 | F3-2 | Teacher dashboard aggregate | `GET /teachers/dashboard/` → my students, groups, level-groups, next lesson(+type), upcoming exams, expected graduations, warnings, forms-to-fill | new selector | F3-1, F3-3 | TODO |
 | F3-3 | Forms/surveys engine (anonymous optional) | manager/teacher builds form; recipients fill; `Form/FormResponse` | new (D-5) | — | TODO |
 | F3-4 | Manager views + AI-analyzes form responses with charts | reuse `reports` generators; AI summary + chart data | reuse+new | F3-3 | TODO |
@@ -128,7 +157,7 @@ Status legend: `TODO` · `WIP` · `DONE` · `BLOCKED(reason)`.
 ## Theme E — Finance & HR (#13 fairness, #14 expenses, #21 loans, #17 rewards, #23 absence-pay)
 | # | Feature | Acceptance | New/Reuse | Status |
 |---|---------|-----------|-----------|--------|
-| F14-1 | Expenses: create → approve → pay; dynamic payment methods (cash/card/…) admin-managed | `Expense` + `PaymentMethod` (dynamic) + approval state; permission-gated | new (finance) | TODO |
+| F14-1 | Expenses: create → approve → pay; dynamic payment methods (cash/card/…) admin-managed | `Expense` + `PaymentMethod` (dynamic) + approval state; permission-gated | new (finance) | DONE |
 | F21-1 | Staff loan request → manager approve → cashier notified → disburse (cash/card) | `LoanRequest` state machine + notification to cashier | new (finance) | TODO |
 | F13-1 | Fairness/salary engine: percentage-of-salary by performance/attendance, manager-set % | needs spec (docs/production-vision.md); compute payout | new | BLOCKED(spec) |
 | F17-1 | Rewards: manager creates reward types (cash/holiday/…) and grants to teachers | `RewardType` + `RewardGrant` | new | TODO |
