@@ -25,7 +25,7 @@ def test_branches_list_query_count(as_role, tenant_a, django_assert_max_num_quer
             for weekday in range(3):
                 BranchWorkingHoursFactory.create(branch=branch, weekday=weekday)
 
-    with django_assert_max_num_queries(10):
+    with django_assert_max_num_queries(11):  # +1: A-2 per-request permission-override load
         body = client.get("/api/v1/org/branches/").json()
 
     assert set(body) == {"count", "next", "previous", "results"}

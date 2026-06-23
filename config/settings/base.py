@@ -149,6 +149,7 @@ TENANT_APPS = [
     "apps.reports.apps.ReportsConfig",
     "apps.approvals.apps.ApprovalsConfig",  # A-1: approvals + ledger engine
     "apps.compliance.apps.ComplianceConfig",  # rule book / policy acknowledgment (#12)
+    "apps.access.apps.AccessConfig",  # A-2: dynamic, center-configurable permissions
 ]
 
 INSTALLED_APPS = list(SHARED_APPS) + [a for a in TENANT_APPS if a not in SHARED_APPS]

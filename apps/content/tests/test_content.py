@@ -654,7 +654,7 @@ def test_files_list_query_budget(tenant_a, user_in, as_user, django_assert_max_n
             LessonFileFactory(folder=folder, status=LessonFile.Status.CLEAN)
 
     client = as_user(tenant_a, director)
-    with django_assert_max_num_queries(8):
+    with django_assert_max_num_queries(9):  # +1: A-2 per-request permission-override load
         body = client.get("/api/v1/content/files/").json()
     assert set(body) == {"count", "next", "previous", "results"}
     assert body["count"] == 5
@@ -667,7 +667,7 @@ def test_libraries_list_query_budget(tenant_a, user_in, as_user, django_assert_m
             ContentLibraryFactory(visibility="tenant")
 
     client = as_user(tenant_a, director)
-    with django_assert_max_num_queries(8):
+    with django_assert_max_num_queries(9):  # +1: A-2 per-request permission-override load
         body = client.get("/api/v1/content/libraries/").json()
     assert body["count"] == 5
 

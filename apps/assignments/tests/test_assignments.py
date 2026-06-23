@@ -570,7 +570,7 @@ def test_assignments_list_query_budget(tenant_a, user_in, as_user, django_assert
             AssignmentFactory(cohort=cohort, status=Assignment.Status.PUBLISHED)
 
     client = as_user(tenant_a, director)
-    with django_assert_max_num_queries(8):
+    with django_assert_max_num_queries(9):  # +1: A-2 per-request permission-override load
         body = client.get("/api/v1/assignments/").json()
     assert set(body) == {"count", "next", "previous", "results"}
     assert body["count"] == 5
@@ -589,7 +589,7 @@ def test_submissions_list_query_budget(tenant_a, user_in, as_user, django_assert
         assignment_id = assignment.id
 
     client = as_user(tenant_a, teacher_user)
-    with django_assert_max_num_queries(8):
+    with django_assert_max_num_queries(9):  # +1: A-2 per-request permission-override load
         resp = client.get(f"/api/v1/assignments/{assignment_id}/submissions/")
     assert resp.status_code == 200
     assert len(resp.json()) == 5

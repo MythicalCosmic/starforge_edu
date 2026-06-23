@@ -440,7 +440,7 @@ class TestAuditAPIAppendOnly:
         with schema_context(tenant_a.schema_name):
             for i in range(60):
                 AuditLogFactory(actor=UserFactory(), resource_id=str(i))
-        with django_assert_max_num_queries(8):
+        with django_assert_max_num_queries(9):  # +1: A-2 per-request permission-override load
             body = client.get(AUDIT_URL).json()
         assert set(body) == {"results", "next", "previous"}
 

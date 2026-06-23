@@ -662,6 +662,6 @@ def test_exams_list_query_budget(tenant_a, user_in, as_user, django_assert_max_n
             )
 
     client = as_user(tenant_a, director)
-    with django_assert_max_num_queries(8):
+    with django_assert_max_num_queries(9):  # +1: A-2 per-request permission-override load
         body = client.get("/api/v1/academics/exams/").json()
     assert body["count"] == 5

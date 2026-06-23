@@ -233,6 +233,6 @@ def test_invoice_list_query_budget(as_role, tenant_a, django_assert_max_num_quer
         for _ in range(20):
             InvoiceFactory(student=student, total_uzs=Decimal("100000.00"))
     # +1 for billing paywall middleware subscription check
-    with django_assert_max_num_queries(9):
+    with django_assert_max_num_queries(10):  # +1: A-2 per-request permission-override load
         body = client.get(INVOICES_URL).json()
     assert set(body) == {"count", "next", "previous", "results"}

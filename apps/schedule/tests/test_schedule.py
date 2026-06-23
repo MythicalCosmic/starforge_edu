@@ -567,6 +567,6 @@ def test_lessons_list_query_budget(tenant_a, as_role, django_assert_max_num_quer
         ctx = _setup()
         _make_rule(ctx)
         _make_rule(_setup())
-    with django_assert_max_num_queries(8):
+    with django_assert_max_num_queries(9):  # +1: A-2 per-request permission-override load
         body = client.get("/api/v1/schedule/lessons/").json()
     assert set(body) == {"count", "next", "previous", "results"}

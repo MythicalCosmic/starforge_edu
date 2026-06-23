@@ -182,26 +182,103 @@ def default_perms(resource: str) -> dict[str, str]:
     return {action: f"{resource}:{verb}" for action, verb in DEFAULT_VERB_FOR_ACTION.items()}
 
 
-def roles_with_permission(code: str) -> set[str]:
-    """Every role whose matrix grants `code` (exact, resource-wildcard, or *:*).
-    Used to find notification recipients for a permission (e.g. who can disburse)."""
+def _load_tenant_overrides() -> dict[str, dict[str, str]]:
+    """`{role: {permission: effect}}` for the active tenant (A-2). One small query
+    over the (tiny) override table. Empty on the public schema (the table is
+    tenant-only) or if it is not yet migrated, so the static matrix always governs
+    as a safe fallback. Loaded once per request (memoized on the request by the
+    permission classes) — there is no cross-request cache, so a grant/revoke takes
+    effect on the very next request with no staleness window."""
+    from django_tenants.utils import get_public_schema_name
+
+    from core.utils import current_schema
+
+    if current_schema() == get_public_schema_name():
+        return {}
+    # The override table is in TENANT_APPS, so it exists in every migrated tenant
+    # schema — the only way it is absent is pre-migration, which never coincides
+    # with request-flow permission checks. So we read it directly (one cheap SELECT,
+    # no per-request savepoint overhead); a genuinely missing table would surface
+    # loudly as a setup error rather than being silently swallowed.
+    out: dict[str, dict[str, str]] = {}
+    from apps.access.models import RolePermissionOverride
+
+    for ov in RolePermissionOverride.objects.all().only("role", "permission", "effect"):
+        out.setdefault(ov.role, {})[ov.permission] = ov.effect
+    return out
+
+
+def _request_overrides(request: Request) -> dict[str, dict[str, str]]:
+    """The override map, fetched once per request and memoized (mirrors
+    get_role_memberships) so multiple permission checks share a single query."""
+    cached = getattr(request, "_perm_overrides_cache", None)
+    if cached is None:
+        cached = _load_tenant_overrides()
+        request._perm_overrides_cache = cached  # type: ignore[attr-defined]
+    return cached
+
+
+def _role_grant_revoke(role: str, overrides: dict[str, dict[str, str]]) -> tuple[set[str], set[str]]:
+    """`(granted, revoked)` permission-code sets for `role`: the static matrix plus
+    this tenant's grant overrides, and the revoke overrides kept separate (they are
+    applied at match time so they can override a resource-wildcard grant)."""
+    granted = set(ROLE_PERMISSION_MATRIX.get(role, set()))
+    revoked: set[str] = set()
+    for permission, effect in overrides.get(role, {}).items():
+        (granted if effect == "grant" else revoked).add(permission)
+    return granted, revoked
+
+
+def _code_allowed(granted: set[str], revoked: set[str], code: str) -> bool:
+    """Does `(granted, revoked)` authorize `code`?
+
+    The master wildcard `*:*` is absolute and revoke-immune (a director keeping it
+    can never be locked out). Otherwise a revoke — exact OR the covering
+    resource-wildcard — denies the code even when a resource-wildcard grant would
+    cover it, so a center can genuinely carve a verb out of a wildcard role. A grant
+    then allows via exact code or the resource-wildcard.
+    """
+    if "*:*" in granted:
+        return True
     resource, _, _verb = code.partition(":")
+    if code in revoked or f"{resource}:*" in revoked:
+        return False
+    return f"{resource}:*" in granted or code in granted
+
+
+def role_effective_permissions(
+    role: str, overrides: dict[str, dict[str, str]] | None = None
+) -> dict[str, list[str]]:
+    """`{"granted": [...], "revoked": [...]}` for `role` with this tenant's overrides
+    applied — the honest representation for the admin UI (a revoke can scope a verb
+    out of a wildcard grant, which a single flat set could not express)."""
+    if overrides is None:
+        overrides = _load_tenant_overrides()
+    granted, revoked = _role_grant_revoke(role, overrides)
+    return {"granted": sorted(granted), "revoked": sorted(revoked)}
+
+
+def roles_with_permission(code: str, overrides: dict[str, dict[str, str]] | None = None) -> set[str]:
+    """Every role whose EFFECTIVE permissions authorize `code` (overrides included).
+    Used to find notification recipients for a permission (e.g. who can disburse)."""
+    if overrides is None:
+        overrides = _load_tenant_overrides()
     out: set[str] = set()
-    for role, perms in ROLE_PERMISSION_MATRIX.items():
-        if "*:*" in perms or f"{resource}:*" in perms or code in perms:
+    for role in ROLE_PERMISSION_MATRIX:
+        granted, revoked = _role_grant_revoke(role, overrides)
+        if _code_allowed(granted, revoked, code):
             out.add(role)
     return out
 
 
-def has_permission_code(roles: Iterable[str], code: str) -> bool:
-    resource, _, _verb = code.partition(":")
+def has_permission_code(
+    roles: Iterable[str], code: str, overrides: dict[str, dict[str, str]] | None = None
+) -> bool:
+    if overrides is None:
+        overrides = _load_tenant_overrides()
     for role in roles:
-        perms = ROLE_PERMISSION_MATRIX.get(role, set())
-        if "*:*" in perms:
-            return True
-        if f"{resource}:*" in perms:
-            return True
-        if code in perms:
+        granted, revoked = _role_grant_revoke(role, overrides)
+        if _code_allowed(granted, revoked, code):
             return True
     return False
 
@@ -241,7 +318,7 @@ class RolePermission(BasePermission):
             if resource is None or verb is None:
                 return False  # TD-4: deny, never fall through to permissive default
             required = f"{resource}:{verb}"
-        return has_permission_code(get_user_roles(request), required)
+        return has_permission_code(get_user_roles(request), required, _request_overrides(request))
 
 
 class ObjectScopedPermission(BasePermission):
