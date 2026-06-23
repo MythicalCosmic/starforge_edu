@@ -1,5 +1,7 @@
-from drf_spectacular.utils import extend_schema
+from django.utils.translation import gettext_lazy as _
+from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import status
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from apps.teachers import selectors, services
@@ -8,7 +10,9 @@ from apps.teachers.serializers import (
     TeacherReadSerializer,
     TeacherUpdateSerializer,
 )
-from core.viewsets import TenantSafeModelViewSet
+from core.exceptions import NotFoundException
+from core.permissions import get_user_roles
+from core.viewsets import TenantSafeAPIView, TenantSafeModelViewSet
 
 
 class TeacherViewSet(TenantSafeModelViewSet):
@@ -39,3 +43,25 @@ class TeacherViewSet(TenantSafeModelViewSet):
         serializer.is_valid(raise_exception=True)
         teacher = services.create_teacher(**serializer.validated_data)
         return Response(TeacherReadSerializer(teacher).data, status=status.HTTP_201_CREATED)
+
+
+class TeacherDashboardView(TenantSafeAPIView):
+    """GET /api/v1/teachers/dashboard/ — the signed-in teacher's own cockpit
+    (groups, students, level groups, next lessons + type, upcoming exams, expected
+    graduations, outstanding rule acknowledgments). Any authenticated user with a
+    teacher profile; 404 not_a_teacher otherwise."""
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="The signed-in teacher's dashboard",
+        responses={200: OpenApiResponse(description="dashboard object"), 404: OpenApiResponse()},
+        tags=["teachers"],
+    )
+    def get(self, request):
+        teacher = selectors.teacher_profile_for(request.user)
+        if teacher is None:
+            raise NotFoundException(_("You do not have a teacher profile."), code="not_a_teacher")
+        return Response(
+            selectors.teacher_dashboard(teacher=teacher, user=request.user, roles=get_user_roles(request))
+        )
