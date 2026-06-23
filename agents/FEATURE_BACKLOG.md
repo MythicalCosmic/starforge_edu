@@ -125,9 +125,9 @@ premium AI tiering (Opus/Sonnet/Haiku, metered).
 ## Theme A — Dynamic org hierarchy, grades & tasks (#5, #6, #7, #20)
 | # | Feature | Acceptance | New/Reuse | Status |
 |---|---------|-----------|-----------|--------|
-| F5-1 | `RoleGrade` — per-tenant ordered role hierarchy (e.g. assistant < teacher < manager < CEO), editable per center | manager configures order/level numbers; drives "can assign to lower grade" | new model + CenterSettings | TODO |
-| F5-2 | `Task` + assignment: create/assign to a staff member or a whole department | `Task` (title, body, due, status, assignee, dept, created_by) | new app `apps.tasks` | TODO |
-| F5-3 | Hierarchy-gated assignment: you may task only equal/lower grades (configurable) | enforced in service via RoleGrade; manager/CEO/permission-holder bypass | new | TODO |
+| F5-1 | `RoleGrade` — per-tenant ordered role hierarchy (e.g. assistant < teacher < manager < CEO), editable per center | `apps.tasks.RoleGrade` (role unique, level); ungraded=0. `/api/v1/tasks/grades/` (read tasks:read; edit tasks:assign_any) | new app | DONE |
+| F5-2 | `Task` + assignment: create/assign to a staff member or a whole department | `apps.tasks.Task` (title/desc/priority/status lifecycle/assignee/dept/branch/due/created_by). `/api/v1/tasks/` create + assign + transition + mine; scoped (assignee/dept/manager-branch) | new app `apps.tasks` | DONE |
+| F5-3 | Hierarchy-gated assignment: you may task only equal/lower grades (configurable) | `can_assign` in service: actor_grade ≥ target_grade, else 403 cannot_assign_grade; `tasks:assign_any` (HOD) + superuser bypass. Enforced on create AND reassign | new | DONE |
 | F5-4 | AI fair task auto-split across a department's staff | balance by current open-task load / capacity; "fair" vs "free" modes | reuse `ai` + new | TODO |
 | F5-5 | CEO scope: all branches' data; manager scope: their 1–2 branches | extend RoleMembership/scoping to multi-branch CEO read | extend permissions | TODO |
 | *related* | task templates, recurring tasks, SLA + escalation on overdue, task comments/attachments, Kanban board, dependencies | — | idea | — |

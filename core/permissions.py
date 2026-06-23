@@ -84,6 +84,10 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         # F3-3: managers build + analyze forms/surveys.
         "forms:read",
         "forms:write",
+        # F5: HOD manages tasks + outranks within the dept (assign_any bypass).
+        "tasks:read",
+        "tasks:write",
+        "tasks:assign_any",
     },
     Role.TEACHER: {
         "students:read",
@@ -110,6 +114,9 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         # F3-3: teachers build surveys for their groups + fill manager forms.
         "forms:read",
         "forms:write",
+        # F5: teachers task their assistants/lower grades + see their own tasks.
+        "tasks:read",
+        "tasks:write",
     },
     Role.STUDENT: {
         # students:read is row-scoped to self by apps/students/selectors.py
@@ -148,12 +155,20 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "approvals:approve",
         "approvals:disburse",
         "ledger:read",
+        "tasks:read",  # F5: assignable + tracks own tasks
     },
     # A-1: the cashier disburses approved requests + reads the ledger (the till).
-    Role.CASHIER: {"finance:read", "payments:write", "approvals:read", "approvals:disburse", "ledger:read"},
-    Role.LIBRARIAN: {"content:*", "students:read", "cohorts:read"},
-    Role.SECURITY: {"attendance:write", "users:read"},
-    Role.IT: {"users:read", "audit:read", "org:*", "compliance:read", "compliance:write"},
+    Role.CASHIER: {
+        "finance:read",
+        "payments:write",
+        "approvals:read",
+        "approvals:disburse",
+        "ledger:read",
+        "tasks:read",
+    },
+    Role.LIBRARIAN: {"content:*", "students:read", "cohorts:read", "tasks:read"},
+    Role.SECURITY: {"attendance:write", "users:read", "tasks:read"},
+    Role.IT: {"users:read", "audit:read", "org:*", "compliance:read", "compliance:write", "tasks:read"},
     Role.REGISTRAR: {
         "students:*",
         "users:write",
@@ -169,8 +184,11 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         # F3-3: reception builds + fills forms.
         "forms:read",
         "forms:write",
+        # F5: reception creates + tracks tasks.
+        "tasks:read",
+        "tasks:write",
     },
-    Role.SUPPORT: {"users:read", "audit:read"},
+    Role.SUPPORT: {"users:read", "audit:read", "tasks:read"},
 }
 
 
