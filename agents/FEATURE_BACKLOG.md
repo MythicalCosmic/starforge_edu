@@ -82,3 +82,98 @@ Status legend: `TODO` · `WIP` · `DONE` · `BLOCKED(reason)`.
 - "month/level created by hand" → modeled as free-text `academic_level` + dynamic `LessonType`/cohort `level`; a "month" filter = join-date month bucket. Confirm if you meant named "level" + "month" lookup tables.
 - Placement test vs `academics.Exam`: building placement as a SEPARATE entity (prospective students, no cohort) to avoid overloading the cohort-scoped Exam.
 - "blocked" = soft bar (still enrolled), distinct from `withdrawn`.
+
+---
+
+# Round 2 ideas (FEATURE_LIST #5–24) — refined
+
+**Reality checks (corrections to assumptions in the raw ideas):**
+- There is NO `docs/Production Vision` doc yet (#13) — created as a stub `docs/production-vision.md` for the owner to fill; the fairness engine spec lives there.
+- There is NO Cards implementation (#12) — net-new. Assumed meaning: physical **student access/ID cards** (QR/NFC) tied to attendance + a stored-value wallet. Confirm.
+- "Fairness engine" (#13) is mostly NEW — only `TeacherProfile.salary_type`+`rate` (flat) exist today.
+- Printer race-conditions (#19) are ALREADY solved (`claim_job` uses `select_for_update(skip_locked=True)`); #16 backend (per-branch `BranchAgent` job pull) exists — the desktop app is a separate client repo + even-distribution logic.
+
+## Theme A — Dynamic org hierarchy, grades & tasks (#5, #6, #7, #20)
+| # | Feature | Acceptance | New/Reuse | Status |
+|---|---------|-----------|-----------|--------|
+| F5-1 | `RoleGrade` — per-tenant ordered role hierarchy (e.g. assistant < teacher < manager < CEO), editable per center | manager configures order/level numbers; drives "can assign to lower grade" | new model + CenterSettings | TODO |
+| F5-2 | `Task` + assignment: create/assign to a staff member or a whole department | `Task` (title, body, due, status, assignee, dept, created_by) | new app `apps.tasks` | TODO |
+| F5-3 | Hierarchy-gated assignment: you may task only equal/lower grades (configurable) | enforced in service via RoleGrade; manager/CEO/permission-holder bypass | new | TODO |
+| F5-4 | AI fair task auto-split across a department's staff | balance by current open-task load / capacity; "fair" vs "free" modes | reuse `ai` + new | TODO |
+| F5-5 | CEO scope: all branches' data; manager scope: their 1–2 branches | extend RoleMembership/scoping to multi-branch CEO read | extend permissions | TODO |
+| *related* | task templates, recurring tasks, SLA + escalation on overdue, task comments/attachments, Kanban board, dependencies | — | idea | — |
+
+## Theme B — Assessment & mobile test-taking (#8) — extends F1 placement
+| # | Feature | Acceptance | New/Reuse | Status |
+|---|---------|-----------|-----------|--------|
+| F8-1 | Dynamic answer types: multiple-choice, true/false (default), writing, reading, listening, speaking, vocabulary | per-question type; manager enables types | extend D-4 | TODO |
+| F8-2 | Test session lockdown: timer, answer-only, **mobile-app only (web blocked by tenant flag)** | session token; `X-Client: mobile` gate + CenterSettings | new | TODO |
+| F8-3 | Marking by AI / manager / permission-holder (default manager) | per-test grader policy | reuse ai | TODO |
+| *related* | shared question bank, randomized order, anti-cheat (tab-switch/proctor photo), retake policy, pass certificate | — | idea | — |
+
+## Theme C — AI usage-billing & content (#9)
+| # | Feature | Acceptance | New/Reuse | Status |
+|---|---------|-----------|-----------|--------|
+| F9-1 | AI library-material generation | manager requests; AI drafts a library item | reuse `ai` + `content` | TODO |
+| F9-2 | Metered/usage billing for AI gen (NOT in plan; charged per use) | record cost per gen → platform invoice line; reuse `ai.AIRequest.cost_microusd` + `billing` | extend billing | TODO |
+| *related* | per-tenant spend cap + alerts, prepaid AI credits, cost preview before generate | — | idea | — |
+
+## Theme D — Communication / SMS campaigns (#10)
+| # | Feature | Acceptance | New/Reuse | Status |
+|---|---------|-----------|-----------|--------|
+| F10-1 | SMS campaign: send to a student filter/segment, scheduled (dynamic date) | reuse Eskiz client + `notifications`; Celery-scheduled | reuse+new | TODO |
+| F10-2 | AI-assisted message templates with examples | low-cost AI drafts template variants | reuse ai | TODO |
+| *related* | opt-out/consent, delivery-status tracking, cost estimate before send, Telegram/WhatsApp channels, segment by F2 filters | — | idea | — |
+
+## Theme E — Finance & HR (#13 fairness, #14 expenses, #21 loans, #17 rewards, #23 absence-pay)
+| # | Feature | Acceptance | New/Reuse | Status |
+|---|---------|-----------|-----------|--------|
+| F14-1 | Expenses: create → approve → pay; dynamic payment methods (cash/card/…) admin-managed | `Expense` + `PaymentMethod` (dynamic) + approval state; permission-gated | new (finance) | TODO |
+| F21-1 | Staff loan request → manager approve → cashier notified → disburse (cash/card) | `LoanRequest` state machine + notification to cashier | new (finance) | TODO |
+| F13-1 | Fairness/salary engine: percentage-of-salary by performance/attendance, manager-set % | needs spec (docs/production-vision.md); compute payout | new | BLOCKED(spec) |
+| F17-1 | Rewards: manager creates reward types (cash/holiday/…) and grants to teachers | `RewardType` + `RewardGrant` | new | TODO |
+| F23-1 | Absence → payment deduction; manager toggles discount-for-absence (with/without reason) | per-center policy in CenterSettings; finance hook | new + CenterSettings | TODO |
+| *related* | expense categories+receipts, multi-level approval chains, payslips/payroll runs, petty-cash reconcile, budgets per branch, reward leaderboards | — | idea | — |
+
+## Theme F — Student engagement, attendance sheets, achievements, discounts, cards (#15, #12)
+| # | Feature | Acceptance | New/Reuse | Status |
+|---|---------|-----------|-----------|--------|
+| F15-1 | Student app attendance sheet + paid-status of the monthly invoice + classroom rank | reuse attendance/finance/academics; student-scoped | reuse | TODO |
+| F15-2 | Custom achievements: manager global / teacher own-group; teacher→manager request for global | `Achievement` + grant + request-approve | new | TODO |
+| F15-3 | Teacher-given discounts, manager-approved | reuse `finance.Discount` + approval | extend finance | TODO |
+| F12-1 | Cards: student access/ID cards (QR/NFC), card↔attendance, stored-value wallet | `Card` + scan check-in; manager creates/names card types | new | TODO(confirm) |
+| *related* | streaks, parent-visible progress, points/badges, card top-up wallet, lost-card reissue | — | idea | — |
+
+## Theme G — Printing (#16, #19)
+| # | Feature | Acceptance | New/Reuse | Status |
+|---|---------|-----------|-----------|--------|
+| F19-1 | Printer job race-safety | already done (`claim_job` skip_locked) | reuse | DONE(exists) |
+| F16-1 | Even job distribution to all available printers (round-robin) in a branch | extend `claim_job`/enqueue to balance across `Printer`s | extend printing | TODO |
+| F16-2 | Desktop print-agent app (separate client repo) | out of this backend's scope; backend `BranchAgent` API exists | reuse | N/A(client) |
+
+## Theme H — Cover system (#17, #18)
+| # | Feature | Acceptance | New/Reuse | Status |
+|---|---------|-----------|-----------|--------|
+| F18-1 | Cover request: teacher asks cover for a lesson/period → manager approves OR open to teacher pool | `CoverRequest` state machine on a `Lesson` | new | TODO |
+| F18-2 | Cover "global chat" channel for teachers to claim covers | realtime channel (reuse `infrastructure/websocket`) | reuse+new | TODO |
+| *related* | substitute pool, auto-suggest available teachers, cover-pay differential | — | idea | — |
+
+## Theme I — Compliance (#24)
+| # | Feature | Acceptance | New/Reuse | Status |
+|---|---------|-----------|-----------|--------|
+| F24-1 | Law/rule book uploaded by manager/CEO; penalties applied to staff/students on breach | `Rule` + `Penalty` (points/fine) + apply workflow | new | TODO |
+| *related* | incident reports, appeal workflow, penalty-point decay, audit trail (reuse `audit`) | — | idea | — |
+
+## Cross-cutting (#22)
+| # | Feature | Acceptance | Status |
+|---|---------|-----------|--------|
+| X-1 | Performance: every list/metric accurate + N+1-free | add `select_related`/`prefetch_related`, query-count tests (`django_assert_max_num_queries`) per list | ONGOING |
+
+## Round-2 data-model additions
+`RoleGrade`, `apps.tasks.Task`, `PaymentMethod`, `Expense`, `LoanRequest`, `RewardType`/`RewardGrant`,
+`Achievement`(+grant/request), `Card`(+scan/wallet), `CoverRequest`, `Rule`/`Penalty`, SMS `Campaign`,
++ answer-type extension on placement questions, + CenterSettings toggles (absence-discount policy, web-test-block, AI-material-billing).
+
+## Build order (round 2 inserted)
+After F2: **F3-1 lesson types** → **Expenses (F14-1)** → **Staff loans (F21-1)** → forms engine (F3-3) →
+dashboards (F3-2/F4-1) → tasks+hierarchy (F5) → assessment/mobile (F8) → the rest by value.
