@@ -157,6 +157,7 @@ TENANT_APPS = [
     "apps.achievements.apps.AchievementsConfig",  # F15-2: custom achievements
     "apps.rewards.apps.RewardsConfig",  # F17-1: staff rewards
     "apps.covers.apps.CoversConfig",  # F18-1: lesson cover requests
+    "apps.loans.apps.LoansConfig",  # F21-1: staff loans (A-1 kind + repayments)
 ]
 
 INSTALLED_APPS = list(SHARED_APPS) + [a for a in TENANT_APPS if a not in SHARED_APPS]

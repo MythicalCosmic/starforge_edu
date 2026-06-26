@@ -104,6 +104,9 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "cover:read",
         "cover:write",
         "cover:approve",
+        # F21-1: HOD raises + tracks staff loans.
+        "loan:read",
+        "loan:write",
     },
     Role.TEACHER: {
         "students:read",
@@ -145,6 +148,9 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         # F18-1: teachers request cover for their lessons + claim pooled ones.
         "cover:read",
         "cover:write",
+        # F21-1: teachers can request a staff loan + see their own.
+        "loan:read",
+        "loan:write",
     },
     Role.STUDENT: {
         # students:read is row-scoped to self by apps/students/selectors.py
@@ -195,6 +201,10 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "ledger:read",
         "tasks:read",  # F5: assignable + tracks own tasks
         "rewards:read",  # F17-1: receives + sees own rewards
+        # F21-1: accountant raises, tracks, and collects repayments on loans.
+        "loan:read",
+        "loan:write",
+        "loan:collect",
     },
     # A-1: the cashier disburses approved requests + reads the ledger (the till).
     Role.CASHIER: {
@@ -205,6 +215,9 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "ledger:read",
         "tasks:read",
         "rewards:read",
+        # F21-1: the cashier collects loan repayments (money into the till).
+        "loan:read",
+        "loan:collect",
     },
     Role.LIBRARIAN: {"content:*", "students:read", "cohorts:read", "tasks:read", "rewards:read"},
     Role.SECURITY: {"attendance:write", "users:read", "tasks:read", "rewards:read"},
@@ -248,6 +261,9 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "cover:read",
         "cover:write",
         "cover:approve",
+        # F21-1: reception raises + tracks staff loans.
+        "loan:read",
+        "loan:write",
     },
     Role.SUPPORT: {"users:read", "audit:read", "tasks:read", "rewards:read"},
 }

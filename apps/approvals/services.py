@@ -27,6 +27,9 @@ from core.permissions import roles_with_permission
 # on-approval side-effect (see _apply_approval_effect).
 KIND_DISCOUNT = "discount"
 KIND_PAYMENT_DELAY = "payment_delay"
+# A money-moving kind (acts at disburse, not approve) that additionally needs a
+# validated borrower in its payload — see _validate_loan_payload (F21-1).
+KIND_LOAN = "loan"
 
 # Money/percent columns are NUMERIC(_, 2); normalize payload values to that scale.
 _TWO_PLACES = Decimal("0.01")
@@ -188,6 +191,44 @@ def _validate_payment_delay_payload(payload: dict) -> dict:
     return {"invoice_id": invoice_id, "new_due_date": new_due.isoformat()}
 
 
+def _validate_loan_payload(payload: dict) -> dict:
+    """Validate a staff-loan payload at creation time. Shape: {borrower_id}.
+
+    The borrower must be an active STAFF member (never a student/parent — a "staff
+    loan" pays staff, mirroring the F17-1 rewards recipient guard). Their display
+    name is stamped into the payload as `party_label` (truncated to the ledger
+    column width), so both the disbursement (money OUT) and every repayment (money
+    IN) name the BORROWER on the ledger — not whoever keyed the request — which is
+    the "who actually owes the centre" audit line.
+    """
+    from apps.users.models import User
+    from core.permissions import Role
+
+    staff_roles = tuple(r for r in Role.ALL if r not in (Role.STUDENT, Role.PARENT))
+    borrower_id = payload.get("borrower_id")
+    borrower = (
+        User.objects.filter(
+            pk=borrower_id,
+            is_active=True,
+            # Positive role condition on the join → only users WITH a live staff
+            # membership match (avoids the LEFT-JOIN isnull trap matching everyone).
+            role_memberships__revoked_at__isnull=True,
+            role_memberships__role__in=staff_roles,
+        )
+        .distinct()
+        .first()
+        if isinstance(borrower_id, int)
+        else None
+    )
+    if borrower is None:
+        raise ValidationException(
+            _("A loan request needs a valid staff borrower_id in its payload."),
+            code="loan_borrower_required",
+            fields={"payload": ["borrower_id"]},
+        )
+    return {"borrower_id": borrower_id, "party_label": (borrower.get_full_name() or borrower.username)[:200]}
+
+
 @transaction.atomic
 def create_request(
     *,
@@ -209,6 +250,11 @@ def create_request(
         # Also decision-only: the effect is moving a due date, not paying money out.
         payload = _validate_payment_delay_payload(payload)
         amount_uzs = None
+    elif kind == KIND_LOAN:
+        # Money-moving: a loan must carry the amount to be paid out, and a borrower.
+        if amount_uzs is None:
+            raise ValidationException(_("A loan request must have an amount."), code="loan_amount_required")
+        payload = {**(payload or {}), **_validate_loan_payload(payload)}
     return ApprovalRequest.objects.create(
         kind=kind,
         title=title,
@@ -341,12 +387,27 @@ def _assert_not_self_approval(req: ApprovalRequest, actor) -> None:
         raise PermissionException(_("You cannot approve your own request."), code="self_approval")
 
 
+def _assert_not_loan_self_dealing(req: ApprovalRequest, actor) -> None:
+    """Segregation of duties extends to the BENEFICIARY, not just the maker: a loan's
+    borrower may neither approve nor disburse their own loan. Without this, a
+    colleague keys a loan naming the borrower, and the borrower (if they hold
+    approve/disburse rights) signs off the payout to themselves — the requester
+    self-approval block alone misses it. Superusers are exempt."""
+    if actor is None or getattr(actor, "is_superuser", False):
+        return
+    if req.kind == KIND_LOAN and req.payload.get("borrower_id") == getattr(actor, "id", None):
+        raise PermissionException(
+            _("You cannot approve or disburse your own loan."), code="loan_self_dealing"
+        )
+
+
 @transaction.atomic
 def approve(*, request_id: int, actor=None, note: str = "") -> ApprovalRequest:
     req = _locked(request_id)
     if req.status != ApprovalRequest.Status.PENDING:
         raise UnprocessableEntity(_("Only a pending request can be approved."), code="approval_not_pending")
     _assert_not_self_approval(req, actor)
+    _assert_not_loan_self_dealing(req, actor)
     req.status = ApprovalRequest.Status.APPROVED
     req.decided_by = actor
     req.decided_at = timezone.now()
@@ -420,6 +481,7 @@ def disburse(
         raise UnprocessableEntity(
             _("Only an approved request can be disbursed."), code="approval_not_approved"
         )
+    _assert_not_loan_self_dealing(req, actor)
     if req.amount_uzs is None:
         raise UnprocessableEntity(_("This request has no amount to disburse."), code="approval_no_amount")
     method = PaymentMethod.objects.filter(pk=payment_method_id, is_active=True).first()
@@ -433,9 +495,13 @@ def disburse(
         branch=req.branch,
         # Explicit label wins; else a payload-supplied payee (e.g. a reward's
         # recipient, who is NOT the requester); else fall back to the requester.
-        party_label=party_label
-        or req.payload.get("party_label")
-        or (req.requested_by.get_full_name() if req.requested_by else ""),
+        # Truncated to the column width (varchar(200)) — a long full name must not
+        # surface as a DB 500.
+        party_label=(
+            party_label
+            or req.payload.get("party_label")
+            or (req.requested_by.get_full_name() if req.requested_by else "")
+        )[:200],
         payment_method=method,
         source_kind="approval_request",
         source_id=req.pk,

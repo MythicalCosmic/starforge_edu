@@ -22,12 +22,22 @@ def _payment_method(tenant) -> int:
 
 
 def test_request_approve_disburse_writes_ledger(tenant_a, as_role):
-    teacher, _ = as_role(Role.TEACHER)
+    teacher, teacher_user = as_role(Role.TEACHER)
     director, _ = as_role(Role.DIRECTOR)
     cashier, _ = as_role(Role.CASHIER)
     method_id = _payment_method(tenant_a)
 
-    r = teacher.post(REQ, {"kind": "loan", "title": "Salary advance", "amount_uzs": "500000.00"}, format="json")
+    # a loan kind carries a borrower in its payload (F21-1)
+    r = teacher.post(
+        REQ,
+        {
+            "kind": "loan",
+            "title": "Salary advance",
+            "amount_uzs": "500000.00",
+            "payload": {"borrower_id": teacher_user.id},
+        },
+        format="json",
+    )
     assert r.status_code == 201, r.content
     rid = r.json()["id"]
     assert r.json()["status"] == "pending"
@@ -83,11 +93,15 @@ def test_student_cannot_request(tenant_a, as_role):
 
 
 def test_approval_notifies_requester_and_disburser(tenant_a, as_role):
-    teacher, _ = as_role(Role.TEACHER)
+    teacher, teacher_user = as_role(Role.TEACHER)
     director, _ = as_role(Role.DIRECTOR)
     cashier, _ = as_role(Role.CASHIER)
 
-    rid = teacher.post(REQ, {"kind": "loan", "title": "Advance", "amount_uzs": "100000.00"}, format="json").json()["id"]
+    rid = teacher.post(
+        REQ,
+        {"kind": "loan", "title": "Advance", "amount_uzs": "100000.00", "payload": {"borrower_id": teacher_user.id}},
+        format="json",
+    ).json()["id"]
     director.post(f"{REQ}{rid}/approve/", {}, format="json")
 
     teacher_events = {n["event_type"] for n in teacher.get("/api/v1/notifications/").json()["results"]}
