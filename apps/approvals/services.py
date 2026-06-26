@@ -488,20 +488,26 @@ def disburse(
     if method is None:
         raise UnprocessableEntity(_("Unknown or inactive payment method."), code="payment_method_invalid")
 
+    pinned_payee = req.payload.get("party_label")
+    if pinned_payee:
+        # A request that pre-designated its payee (loan borrower / procurement
+        # supplier / reward recipient) gets an IMMUTABLE ledger row: the disburser
+        # cannot silently substitute who got paid, flip the sign, or recategorise it
+        # away from the approved kind. The payee, money-OUT direction, and entry_type
+        # are fixed by the approved request, not the cashier (anti-fraud DNA).
+        party_label = pinned_payee
+        direction = LedgerEntry.Direction.OUT
+        entry_type = req.kind
+
     entry = LedgerEntry.objects.create(
         direction=direction,
         entry_type=entry_type or req.kind,
         amount_uzs=req.amount_uzs,
         branch=req.branch,
-        # Explicit label wins; else a payload-supplied payee (e.g. a reward's
-        # recipient, who is NOT the requester); else fall back to the requester.
-        # Truncated to the column width (varchar(200)) — a long full name must not
-        # surface as a DB 500.
-        party_label=(
-            party_label
-            or req.payload.get("party_label")
-            or (req.requested_by.get_full_name() if req.requested_by else "")
-        )[:200],
+        # For a pinned-payee kind the payload payee already won above; otherwise an
+        # explicit label wins, else fall back to the requester. Truncated to the
+        # column width (varchar(200)) — a long full name must not surface as a DB 500.
+        party_label=(party_label or (req.requested_by.get_full_name() if req.requested_by else ""))[:200],
         payment_method=method,
         source_kind="approval_request",
         source_id=req.pk,

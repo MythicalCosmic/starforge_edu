@@ -158,6 +158,7 @@ TENANT_APPS = [
     "apps.rewards.apps.RewardsConfig",  # F17-1: staff rewards
     "apps.covers.apps.CoversConfig",  # F18-1: lesson cover requests
     "apps.loans.apps.LoansConfig",  # F21-1: staff loans (A-1 kind + repayments)
+    "apps.procurement.apps.ProcurementConfig",  # #15: procurement / purchase orders (A-1 kind)
 ]
 
 INSTALLED_APPS = list(SHARED_APPS) + [a for a in TENANT_APPS if a not in SHARED_APPS]

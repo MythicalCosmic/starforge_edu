@@ -107,6 +107,9 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         # F21-1: HOD raises + tracks staff loans.
         "loan:read",
         "loan:write",
+        # #15: HOD raises + tracks purchase orders.
+        "procurement:read",
+        "procurement:write",
     },
     Role.TEACHER: {
         "students:read",
@@ -205,6 +208,9 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "loan:read",
         "loan:write",
         "loan:collect",
+        # #15: accountant raises + reviews purchase orders.
+        "procurement:read",
+        "procurement:write",
     },
     # A-1: the cashier disburses approved requests + reads the ledger (the till).
     Role.CASHIER: {
@@ -218,6 +224,8 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         # F21-1: the cashier collects loan repayments (money into the till).
         "loan:read",
         "loan:collect",
+        # #15: the cashier sees the POs they pay out.
+        "procurement:read",
     },
     Role.LIBRARIAN: {"content:*", "students:read", "cohorts:read", "tasks:read", "rewards:read"},
     Role.SECURITY: {"attendance:write", "users:read", "tasks:read", "rewards:read"},
@@ -264,6 +272,9 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         # F21-1: reception raises + tracks staff loans.
         "loan:read",
         "loan:write",
+        # #15: reception raises purchase orders (supplies).
+        "procurement:read",
+        "procurement:write",
     },
     Role.SUPPORT: {"users:read", "audit:read", "tasks:read", "rewards:read"},
 }
