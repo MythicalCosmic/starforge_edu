@@ -6,6 +6,7 @@ from apps.intelligence.views import (
     RiskDetailView,
     RiskListView,
     RulesView,
+    StudentJourneyView,
 )
 
 urlpatterns = [
@@ -13,5 +14,6 @@ urlpatterns = [
     path("risk/<int:student_id>/", RiskDetailView.as_view(), name="risk-detail"),
     path("branches/", BranchRankingView.as_view(), name="branch-ranking"),
     path("families/", FamilyHealthView.as_view(), name="family-health"),
+    path("journey/<int:student_id>/", StudentJourneyView.as_view(), name="student-journey"),
     path("rules/", RulesView.as_view(), name="risk-rules"),
 ]

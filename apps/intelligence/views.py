@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from django.utils.translation import gettext_lazy as _
 from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from apps.intelligence import selectors
@@ -155,6 +156,50 @@ class FamilyHealthView(TenantSafeAPIView):
             _scoped_branches(request), include_finance=_can_see_finance(request)
         )
         return Response({"count": len(results), "levels": selectors.FAMILY_HEALTH_LEVELS, "results": results})
+
+
+def _is_family(request, student) -> bool:
+    """The student themselves, or one of their guardians."""
+    if student.user_id == request.user.id:
+        return True
+    from apps.parents.models import Guardian
+
+    return Guardian.objects.filter(student=student, parent__user=request.user).exists()
+
+
+class StudentJourneyView(TenantSafeAPIView):
+    """GET /api/v1/intelligence/journey/<student_id>/ — one student's chronological
+    story (enrollment moves, published grades, achievements, and — finance-gated —
+    invoices), newest first. Family-facing: the student and their guardians see their
+    own; a STAFF caller must actually hold students:read (so e.g. the IT role, walled
+    off academic data everywhere else, can't read it). Invoices need finance:read or
+    being the family. 404 if out of scope."""
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="A student's journey timeline",
+        responses={200: OpenApiResponse(description="{student, events:[{at, type, title, detail}]}")},
+        tags=["intelligence"],
+    )
+    def get(self, request, student_id):
+        roles = get_user_roles(request)
+        student = scoped_students(user=request.user, roles=roles).filter(pk=student_id).first()
+        if student is None:
+            raise NotFoundException(_("Student not found."), code="not_found")
+        overrides = _request_overrides(request)
+        is_family = _is_family(request, student)
+        # scoped_students alone would admit any STAFF_ROLES member (incl. IT, who is
+        # denied student records everywhere else) — require the real read perm for staff.
+        if not (
+            request.user.is_superuser or is_family or has_permission_code(roles, "students:read", overrides)
+        ):
+            raise NotFoundException(_("Student not found."), code="not_found")
+        include_finance = (
+            request.user.is_superuser or is_family or has_permission_code(roles, "finance:read", overrides)
+        )
+        events = selectors.student_journey(student, include_finance=include_finance)
+        return Response({"student": student.id, "events": events})
 
 
 class RulesView(TenantSafeAPIView):

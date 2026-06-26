@@ -380,6 +380,56 @@ def family_health(branches, *, now=None, include_finance: bool = True) -> list[d
     return out
 
 
+# --- A-3 facet: student journey timeline ------------------------------------------ #
+# One student's story in one chronological feed — enrollment moves, published grades,
+# achievements, and (finance-gated) invoices — so the family and staff can see the
+# whole journey at a glance instead of digging through five screens (paper-elimination
+# / dignity DNA). Compute-on-read; the invoice events are omitted unless the caller may
+# see finance (the view passes include_finance=False for everyone but finance + the
+# student/guardian themselves).
+def student_journey(student: StudentProfile, *, include_finance: bool = True, limit: int = 100) -> list[dict]:
+    from apps.achievements.models import AchievementGrant
+
+    events: list[dict] = []
+
+    for ev in student.enrollment_events.all():
+        events.append(
+            {
+                "at": ev.created_at,
+                "type": "enrollment",
+                "title": f"{ev.from_status or 'new'} → {ev.to_status}",
+                "detail": ev.reason_code or ev.note[:140],
+            }
+        )
+    for r in ExamResult.objects.filter(student=student, exam__is_published=True).select_related(
+        "exam__subject"
+    ):
+        max_score = r.exam.max_score
+        pct = round(float(r.score) * 100.0 / float(max_score), 1) if max_score else None
+        detail = f"{r.score}/{max_score}" + (f" ({pct}%)" if pct is not None else "")
+        events.append({"at": r.graded_at, "type": "grade", "title": r.exam.subject.name, "detail": detail})
+    for g in AchievementGrant.objects.filter(student=student).select_related("achievement"):
+        events.append(
+            {"at": g.granted_at, "type": "achievement", "title": g.achievement.name, "detail": g.note}
+        )
+    if include_finance:
+        for inv in Invoice.objects.filter(student=student):
+            events.append(
+                {
+                    "at": inv.created_at,
+                    "type": "invoice",
+                    "title": f"Invoice {inv.number}",
+                    "detail": f"{inv.total_uzs} UZS — {inv.status}",
+                }
+            )
+
+    events.sort(key=lambda e: e["at"], reverse=True)
+    events = events[:limit]
+    for e in events:
+        e["at"] = e["at"].isoformat()  # serialise the datetime for the API
+    return events
+
+
 def student_risk_detail(student: StudentProfile, *, now=None, include_finance: bool = True) -> dict:
     """Full risk picture for ONE student (transparency view) — the flags it fires
     plus a 'none' result when it's healthy, so a center can always see the reasoning."""
