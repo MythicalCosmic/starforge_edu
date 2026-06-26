@@ -93,6 +93,10 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "messaging:write",
         # A-3: HOD sees the risk-flag feed for their students.
         "intelligence:read",
+        # F15-2: HOD manages achievements incl. approving teacher global requests.
+        "achievements:read",
+        "achievements:write",
+        "achievements:approve",
     },
     Role.TEACHER: {
         "students:read",
@@ -127,6 +131,9 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "messaging:write",
         # A-3: teachers see at-risk students in their groups.
         "intelligence:read",
+        # F15-2: teachers create group achievements + grant; request globals.
+        "achievements:read",
+        "achievements:write",
     },
     Role.STUDENT: {
         # students:read is row-scoped to self by apps/students/selectors.py
@@ -142,6 +149,8 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         # F4-4: a student messages their teachers (the service blocks student↔student).
         "messaging:read",
         "messaging:write",
+        # F15-2: a student sees their own wall of achievements.
+        "achievements:read",
     },
     Role.PARENT: {
         # Row-scoped by selectors: students -> guardian-linked children only,
@@ -159,6 +168,8 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         # F4-4: parents message staff (the service blocks parent↔student/parent).
         "messaging:read",
         "messaging:write",
+        # F15-2: parents see their children's achievements.
+        "achievements:read",
     },
     Role.ACCOUNTANT: {
         "finance:*",
@@ -208,6 +219,9 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "messaging:write",
         # A-3: reception sees the at-risk feed (retention follow-up).
         "intelligence:read",
+        # F15-2: reception manages + grants achievements.
+        "achievements:read",
+        "achievements:write",
     },
     Role.SUPPORT: {"users:read", "audit:read", "tasks:read"},
 }

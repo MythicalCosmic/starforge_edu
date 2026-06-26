@@ -154,6 +154,7 @@ TENANT_APPS = [
     "apps.tasks.apps.TasksConfig",  # F5: tasks + role hierarchy
     "apps.messaging.apps.MessagingConfig",  # F4-4: in-app messaging
     "apps.intelligence.apps.IntelligenceConfig",  # A-3: risk flags / intelligence
+    "apps.achievements.apps.AchievementsConfig",  # F15-2: custom achievements
 ]
 
 INSTALLED_APPS = list(SHARED_APPS) + [a for a in TENANT_APPS if a not in SHARED_APPS]

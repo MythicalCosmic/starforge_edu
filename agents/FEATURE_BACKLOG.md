@@ -168,7 +168,7 @@ premium AI tiering (Opus/Sonnet/Haiku, metered).
 | # | Feature | Acceptance | New/Reuse | Status |
 |---|---------|-----------|-----------|--------|
 | F15-1 | Student app attendance sheet + paid-status of the monthly invoice + classroom rank | reuse attendance/finance/academics; student-scoped | reuse | TODO |
-| F15-2 | Custom achievements: manager global / teacher own-group; teacher→manager request for global | `Achievement` + grant + request-approve | new | TODO |
+| F15-2 | Custom achievements: manager global / teacher own-group; teacher→manager request for global | `apps.achievements`: Achievement (scope global/group, status active/pending/rejected) + AchievementGrant (unique per student). `/api/v1/achievements/` create + approve/reject + grant + `mine` (student wall) + grants. Teacher group=active; teacher global=pending→manager approves. Grant guards (active-only, group-membership, dedupe 409) | new app | DONE |
 | F15-3 | Teacher-given discounts, manager-approved | `discount` KIND of A-1: request (payload: student/percent\|fixed) → approve materializes a standing `finance.Discount` (auto-applied as a negative invoice line at next issue); discount_id stamped back as audit link | extend approvals | DONE |
 | F12-1 | Cards: student access/ID cards (QR/NFC), card↔attendance, stored-value wallet | `Card` + scan check-in; manager creates/names card types | new | TODO(confirm) |
 | *related* | streaks, parent-visible progress, points/badges, card top-up wallet, lost-card reissue | — | idea | — |

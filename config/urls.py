@@ -33,6 +33,7 @@ api_v1_patterns = [
     path("tasks/", include("apps.tasks.urls")),
     path("messaging/", include("apps.messaging.urls")),
     path("intelligence/", include("apps.intelligence.urls")),
+    path("achievements/", include("apps.achievements.urls")),
 ]
 
 urlpatterns = [
