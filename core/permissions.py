@@ -97,6 +97,9 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "achievements:read",
         "achievements:write",
         "achievements:approve",
+        # F17-1: HOD defines reward types + grants them to staff.
+        "rewards:read",
+        "rewards:write",
     },
     Role.TEACHER: {
         "students:read",
@@ -134,6 +137,7 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         # F15-2: teachers create group achievements + grant; request globals.
         "achievements:read",
         "achievements:write",
+        "rewards:read",  # F17-1: teachers see rewards they received
     },
     Role.STUDENT: {
         # students:read is row-scoped to self by apps/students/selectors.py
@@ -183,6 +187,7 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "approvals:disburse",
         "ledger:read",
         "tasks:read",  # F5: assignable + tracks own tasks
+        "rewards:read",  # F17-1: receives + sees own rewards
     },
     # A-1: the cashier disburses approved requests + reads the ledger (the till).
     Role.CASHIER: {
@@ -192,10 +197,19 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "approvals:disburse",
         "ledger:read",
         "tasks:read",
+        "rewards:read",
     },
-    Role.LIBRARIAN: {"content:*", "students:read", "cohorts:read", "tasks:read"},
-    Role.SECURITY: {"attendance:write", "users:read", "tasks:read"},
-    Role.IT: {"users:read", "audit:read", "org:*", "compliance:read", "compliance:write", "tasks:read"},
+    Role.LIBRARIAN: {"content:*", "students:read", "cohorts:read", "tasks:read", "rewards:read"},
+    Role.SECURITY: {"attendance:write", "users:read", "tasks:read", "rewards:read"},
+    Role.IT: {
+        "users:read",
+        "audit:read",
+        "org:*",
+        "compliance:read",
+        "compliance:write",
+        "tasks:read",
+        "rewards:read",
+    },
     Role.REGISTRAR: {
         "students:*",
         "users:write",
@@ -222,8 +236,9 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         # F15-2: reception manages + grants achievements.
         "achievements:read",
         "achievements:write",
+        "rewards:read",  # F17-1
     },
-    Role.SUPPORT: {"users:read", "audit:read", "tasks:read"},
+    Role.SUPPORT: {"users:read", "audit:read", "tasks:read", "rewards:read"},
 }
 
 

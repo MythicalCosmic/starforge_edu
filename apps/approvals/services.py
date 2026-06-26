@@ -431,7 +431,11 @@ def disburse(
         entry_type=entry_type or req.kind,
         amount_uzs=req.amount_uzs,
         branch=req.branch,
-        party_label=party_label or (req.requested_by.get_full_name() if req.requested_by else ""),
+        # Explicit label wins; else a payload-supplied payee (e.g. a reward's
+        # recipient, who is NOT the requester); else fall back to the requester.
+        party_label=party_label
+        or req.payload.get("party_label")
+        or (req.requested_by.get_full_name() if req.requested_by else ""),
         payment_method=method,
         source_kind="approval_request",
         source_id=req.pk,

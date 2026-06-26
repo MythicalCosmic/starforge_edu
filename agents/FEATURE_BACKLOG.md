@@ -160,7 +160,7 @@ premium AI tiering (Opus/Sonnet/Haiku, metered).
 | F14-1 | Expenses: create → approve → pay; dynamic payment methods (cash/card/…) admin-managed | `Expense` + `PaymentMethod` (dynamic) + approval state; permission-gated | new (finance) | DONE |
 | F21-1 | Staff loan request → manager approve → cashier notified → disburse (cash/card) | `LoanRequest` state machine + notification to cashier | new (finance) | TODO |
 | F13-1 | Fairness/salary engine: percentage-of-salary by performance/attendance, manager-set % | needs spec (docs/production-vision.md); compute payout | new | BLOCKED(spec) |
-| F17-1 | Rewards: manager creates reward types (cash/holiday/…) and grants to teachers | `RewardType` + `RewardGrant` | new | TODO |
+| F17-1 | Rewards: manager creates reward types (cash/holiday/…) and grants to teachers | `apps.rewards`: RewardType (cash/non-cash catalog) + RewardGrant (to staff). `/api/v1/rewards/types|grants/` + `mine`. CASH grant routes its payout through A-1 (a `reward`-kind ApprovalRequest → approve → cashier disburse → ledger); non-cash recorded. Recipient = staff only | new app | DONE |
 | F23-1 | Absence → payment deduction; manager toggles discount-for-absence (with/without reason) | per-center policy in CenterSettings; finance hook | new + CenterSettings | TODO |
 | *related* | expense categories+receipts, multi-level approval chains, payslips/payroll runs, petty-cash reconcile, budgets per branch, reward leaderboards | — | idea | — |
 
