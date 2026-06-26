@@ -226,6 +226,10 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         # #15: accountant raises + reviews purchase orders.
         "procurement:read",
         "procurement:write",
+        # #8: accountant sees + can refund book/material sales.
+        "sale:read",
+        "sale:write",
+        "sale:refund",
     },
     # A-1: the cashier disburses approved requests + reads the ledger (the till).
     Role.CASHIER: {
@@ -241,6 +245,10 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "loan:collect",
         # #15: the cashier sees the POs they pay out.
         "procurement:read",
+        # #8: the cashier rings up book/material sales + refunds (the till).
+        "sale:read",
+        "sale:write",
+        "sale:refund",
     },
     Role.LIBRARIAN: {"content:*", "students:read", "cohorts:read", "tasks:read", "rewards:read"},
     Role.SECURITY: {"attendance:write", "users:read", "tasks:read", "rewards:read"},
@@ -298,6 +306,9 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "penalty:read",
         "penalty:write",
         "penalty:waive",
+        # #8: reception rings up book/material sales (refunds stay with finance).
+        "sale:read",
+        "sale:write",
     },
     Role.SUPPORT: {"users:read", "audit:read", "tasks:read", "rewards:read"},
 }
