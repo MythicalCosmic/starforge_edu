@@ -141,6 +141,170 @@ def _flags_for(att, avg_pct, is_overdue) -> list[dict]:
     return flags
 
 
+# --- A-3 facet: branch performance ranking --------------------------------------- #
+# A transparent owner view: how each branch is doing across attendance, published
+# grades, and dropout-risk, blended into one 0-100 score. Model-less / compute-on-read
+# like the risk flags. The weights are documented and exposed verbatim via the API.
+ACTIVE_STUDENT_STATUSES = (StudentProfile.Status.ENROLLED, StudentProfile.Status.ACTIVE)
+BRANCH_WEIGHT_ATTENDANCE = 50  # show-up rate is the strongest health signal
+BRANCH_WEIGHT_GRADES = 30
+BRANCH_WEIGHT_LOW_RISK = 20  # the inverse of the at-risk share
+# Small-cell suppression (k-anonymity): a branch with fewer than this many active
+# students has its per-student-revealing metrics (and score) suppressed, so a "branch
+# aggregate" can never round-trip one identifiable student's attendance/grade/risk.
+MIN_BRANCH_CELL = 3
+
+BRANCH_METRICS: dict[str, dict[str, Any]] = {
+    "attendance_rate": {
+        "weight": BRANCH_WEIGHT_ATTENDANCE,
+        "description": "Share of recent non-excused marks that were present or late.",
+    },
+    "avg_grade_pct": {
+        "weight": BRANCH_WEIGHT_GRADES,
+        "description": "Average score across the branch's published exam results.",
+    },
+    "low_risk": {
+        "weight": BRANCH_WEIGHT_LOW_RISK,
+        "description": "1 minus the share of active students carrying a dropout-risk flag.",
+    },
+}
+
+
+def _branch_score(attendance_rate, avg_grade_pct, at_risk_rate) -> float:
+    """Blend the signals into 0-100. Called only for a branch that HAS an academic
+    signal (attendance or grades), so a no-data branch is left unranked (None) by the
+    caller rather than earning spurious risk credit. A raw score that overshoots (e.g.
+    a bonus exam score above max) is clamped to the advertised 0-100 range."""
+    att = attendance_rate if attendance_rate is not None else 0.0
+    grade = (avg_grade_pct / 100.0) if avg_grade_pct is not None else 0.0
+    low_risk = (1.0 - at_risk_rate) if at_risk_rate is not None else 1.0
+    raw = att * BRANCH_WEIGHT_ATTENDANCE + grade * BRANCH_WEIGHT_GRADES + low_risk * BRANCH_WEIGHT_LOW_RISK
+    return round(max(0.0, min(100.0, raw)), 1)
+
+
+def branch_ranking(branches, *, now=None, include_finance: bool = True) -> list[dict]:
+    """Rank an already-scoped Branch queryset by a transparent performance score over
+    each branch's ACTIVE/ENROLLED students. A handful of grouped aggregates (not one
+    query per branch) keep it cheap. `include_finance=False` omits the overdue count
+    for callers without finance:read.
+
+    Privacy: a branch with fewer than MIN_BRANCH_CELL active students has its metrics
+    and score SUPPRESSED (set to None, `suppressed=True`), because at small n a "branch
+    aggregate" would be one identifiable student's attendance/grade/risk. A branch with
+    no academic signal at all (no attendance, no grades) is left unranked (score None)
+    rather than handed a spurious score. Unscored rows sort last."""
+    now = now or timezone.now()
+    branch_ids = list(branches.values_list("id", flat=True))
+    if not branch_ids:
+        return []
+    window = now - timedelta(days=ATTENDANCE_WINDOW_DAYS)
+    students = StudentProfile.objects.filter(branch_id__in=branch_ids, status__in=ACTIVE_STUDENT_STATUSES)
+
+    active_by_branch = {
+        row["branch_id"]: row["n"] for row in students.values("branch_id").annotate(n=Count("id"))
+    }
+    attendance = {
+        row["student__branch_id"]: row
+        for row in AttendanceRecord.objects.filter(
+            student__branch_id__in=branch_ids,
+            student__status__in=ACTIVE_STUDENT_STATUSES,
+            lesson__starts_at__gte=window,
+        )
+        .values("student__branch_id")
+        .annotate(
+            total=Count("id", filter=~Q(status=AttendanceRecord.Status.EXCUSED)),
+            attended=Count(
+                "id",
+                filter=Q(status__in=(AttendanceRecord.Status.PRESENT, AttendanceRecord.Status.LATE)),
+            ),
+        )
+    }
+    grades = {
+        row["student__branch_id"]: row["avg_pct"]
+        for row in ExamResult.objects.filter(
+            student__branch_id__in=branch_ids,
+            student__status__in=ACTIVE_STUDENT_STATUSES,
+            exam__is_published=True,
+        )
+        .values("student__branch_id")
+        .annotate(
+            avg_pct=Avg(
+                ExpressionWrapper(F("score") * 100.0 / F("exam__max_score"), output_field=FloatField())
+            )
+        )
+    }
+    # At-risk count per branch: compute risk once over all active students, map to branch.
+    risk_ids = {r["student"] for r in student_risk(students, now=now, include_finance=include_finance)}
+    at_risk_by_branch: dict[int, int] = {}
+    if risk_ids:
+        for _sid, bid in StudentProfile.objects.filter(id__in=risk_ids).values_list("id", "branch_id"):
+            at_risk_by_branch[bid] = at_risk_by_branch.get(bid, 0) + 1
+
+    overdue_by_branch: dict[int, int] = {}
+    if include_finance:
+        overdue_by_branch = {
+            row["student__branch_id"]: row["n"]
+            for row in Invoice.objects.filter(
+                student__branch_id__in=branch_ids,
+                student__status__in=ACTIVE_STUDENT_STATUSES,
+                status=Invoice.Status.OVERDUE,
+            )
+            .values("student__branch_id")
+            .annotate(n=Count("student_id", distinct=True))
+        }
+
+    names = dict(branches.values_list("id", "name"))
+    out: list[dict] = []
+    for bid in branch_ids:
+        active = active_by_branch.get(bid, 0)
+        suppressed = 0 < active < MIN_BRANCH_CELL
+        if suppressed:
+            # Too few students to anonymise — expose only the headcount, nothing that
+            # could round-trip an individual student's attendance/grade/risk.
+            out.append(
+                {
+                    "branch": bid,
+                    "name": names.get(bid, ""),
+                    "active_students": active,
+                    "attendance_rate": None,
+                    "avg_grade_pct": None,
+                    "at_risk": None,
+                    "at_risk_rate": None,
+                    "overdue_students": None,
+                    "suppressed": True,
+                    "score": None,
+                }
+            )
+            continue
+        att = attendance.get(bid)
+        attendance_rate = (att["attended"] / att["total"]) if att and att["total"] else None
+        avg_grade = grades.get(bid)
+        at_risk = at_risk_by_branch.get(bid, 0)
+        at_risk_rate = (at_risk / active) if active else None
+        # Only score a branch that has an academic signal; a no-data branch stays
+        # unranked rather than collecting a spurious low-risk credit.
+        has_signal = attendance_rate is not None or avg_grade is not None
+        out.append(
+            {
+                "branch": bid,
+                "name": names.get(bid, ""),
+                "active_students": active,
+                "attendance_rate": round(attendance_rate, 3) if attendance_rate is not None else None,
+                "avg_grade_pct": round(avg_grade, 1) if avg_grade is not None else None,
+                "at_risk": at_risk if active else None,
+                "at_risk_rate": round(at_risk_rate, 3) if at_risk_rate is not None else None,
+                "overdue_students": overdue_by_branch.get(bid, 0) if include_finance else None,
+                "suppressed": False,
+                "score": _branch_score(attendance_rate, avg_grade, at_risk_rate) if has_signal else None,
+            }
+        )
+    # Highest score first; unscored rows (empty / suppressed / no-signal) sort last.
+    out.sort(key=lambda r: (r["score"] is None, -(r["score"] or 0.0), r["branch"]))
+    for rank, row in enumerate(out, start=1):
+        row["rank"] = rank
+    return out
+
+
 def student_risk_detail(student: StudentProfile, *, now=None, include_finance: bool = True) -> dict:
     """Full risk picture for ONE student (transparency view) — the flags it fires
     plus a 'none' result when it's healthy, so a center can always see the reasoning."""
