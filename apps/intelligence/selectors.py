@@ -18,6 +18,7 @@ from django.utils import timezone
 from apps.academics.models import ExamResult
 from apps.attendance.models import AttendanceRecord
 from apps.finance.models import Invoice
+from apps.parents.models import Guardian
 from apps.students.models import StudentProfile
 
 # --- transparent, documented thresholds (will move to CenterSettings later) ----- #
@@ -302,6 +303,80 @@ def branch_ranking(branches, *, now=None, include_finance: bool = True) -> list[
     out.sort(key=lambda r: (r["score"] is None, -(r["score"] or 0.0), r["branch"]))
     for rank, row in enumerate(out, start=1):
         row["rank"] = rank
+    return out
+
+
+# --- A-3 facet: family health (retention) ---------------------------------------- #
+# A per-FAMILY view for the retention desk: which families have an at-risk or
+# overdue child and so are worth a call before they leave. Deliberately NOT
+# anonymised — the whole point is to name the family to follow up — so it is gated to
+# roles that already see family records (parents:read) and the overdue signal is
+# finance-gated. Transparent levels, like the risk rules.
+FAMILY_HEALTH_LEVELS: dict[str, str] = {
+    "at_risk": "An overdue child, or at least half the children carry a dropout-risk flag.",
+    "watch": "At least one child carries a dropout-risk flag.",
+    "good": "No dropout-risk flags and nothing overdue.",
+}
+
+
+def _family_health_level(children: int, at_risk: int, overdue: int | None) -> str:
+    if (overdue or 0) > 0 or (children and at_risk / children >= 0.5):
+        return "at_risk"
+    if at_risk > 0:
+        return "watch"
+    return "good"
+
+
+def family_health(branches, *, now=None, include_finance: bool = True) -> list[dict]:
+    """Score each family (a guardian + the children they guard, within the scoped
+    branches) for retention risk. Reuses the dropout-risk rules for the children and,
+    when finance is visible, their overdue invoices. Worst-health families first."""
+    now = now or timezone.now()
+    branch_ids = list(branches.values_list("id", flat=True))
+    if not branch_ids:
+        return []
+    students = StudentProfile.objects.filter(branch_id__in=branch_ids, status__in=ACTIVE_STUDENT_STATUSES)
+    student_ids = set(students.values_list("id", flat=True))
+    if not student_ids:
+        return []
+
+    families: dict[int, dict] = {}
+    for g in Guardian.objects.filter(student_id__in=student_ids).select_related("parent__user"):
+        parent_user = g.parent.user
+        fam = families.setdefault(
+            g.parent_id,
+            {"name": parent_user.get_full_name() if parent_user else "", "children": set()},
+        )
+        fam["children"].add(g.student_id)
+    if not families:
+        return []
+
+    at_risk_ids = {r["student"] for r in student_risk(students, now=now, include_finance=include_finance)}
+    overdue_ids: set[int] = set()
+    if include_finance:
+        overdue_ids = set(
+            Invoice.objects.filter(student_id__in=student_ids, status=Invoice.Status.OVERDUE).values_list(
+                "student_id", flat=True
+            )
+        )
+
+    out: list[dict] = []
+    for parent_id, fam in families.items():
+        children = fam["children"]
+        at_risk = len(children & at_risk_ids)
+        overdue = len(children & overdue_ids) if include_finance else None
+        out.append(
+            {
+                "family": parent_id,
+                "name": fam["name"],
+                "children": len(children),
+                "at_risk_children": at_risk,
+                "overdue_children": overdue,
+                "health": _family_health_level(len(children), at_risk, overdue),
+            }
+        )
+    order = {"at_risk": 0, "watch": 1, "good": 2}
+    out.sort(key=lambda r: (order.get(r["health"], 9), -r["at_risk_children"], r["family"]))
     return out
 
 

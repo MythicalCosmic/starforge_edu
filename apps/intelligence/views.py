@@ -7,7 +7,7 @@ from rest_framework.response import Response
 from apps.intelligence import selectors
 from apps.org.models import Branch
 from apps.students.selectors import scoped_students
-from core.exceptions import NotFoundException
+from core.exceptions import NotFoundException, PermissionException
 from core.permissions import (
     Role,
     _request_overrides,
@@ -26,14 +26,20 @@ def _can_see_finance(request) -> bool:
     )
 
 
+# Only STAFF memberships grant a branch scope for the intelligence facets — a
+# student/parent membership must never (e.g. via an A-2 grant of intelligence:read)
+# resolve to a branch and open the branch-level feeds. This fails closed for them.
+_STAFF_ROLES = frozenset(r for r in Role.ALL if r not in (Role.STUDENT, Role.PARENT))
+
+
 def _scoped_branches(request):
     """Branches the caller may rank: the director/superuser sees every (live) branch
-    — the multi-branch owner's whole estate — while a branch-scoped role sees only the
-    branch(es) they belong to."""
+    — the multi-branch owner's whole estate — while a branch-scoped STAFF role sees
+    only the branch(es) they belong to. Non-staff callers resolve to no branches."""
     qs = Branch.objects.filter(archived_at__isnull=True)
     if request.user.is_superuser or Role.DIRECTOR in get_user_roles(request):
         return qs
-    my = {m.branch_id for m in get_role_memberships(request) if m.branch_id}
+    my = {m.branch_id for m in get_role_memberships(request) if m.branch_id and m.role in _STAFF_ROLES}
     return qs.filter(id__in=my)
 
 
@@ -117,6 +123,38 @@ class BranchRankingView(TenantSafeAPIView):
                 "results": results,
             }
         )
+
+
+class FamilyHealthView(TenantSafeAPIView):
+    """GET /api/v1/intelligence/families/ — the retention desk's family-health feed
+    (A-3 facet): each family (a guardian + the children they guard, in the caller's
+    branch scope) flagged good/watch/at_risk so the centre can call before a family
+    leaves. Worst first. Deliberately per-family (NOT anonymised — the point is to name
+    who to follow up), so it is double-gated: intelligence:read AND parents:read (the
+    retention desk, never teachers or parents themselves). Overdue is finance-gated."""
+
+    resource = "intelligence"
+    required_perms = {"get": "intelligence:read"}
+
+    @extend_schema(
+        summary="Family-health retention feed",
+        responses={200: OpenApiResponse(description="{count, levels, results:[{family, health, ...}]}")},
+        tags=["intelligence"],
+    )
+    def get(self, request):
+        # Naming a family + surfacing their children's risk needs family-record
+        # visibility — gate out teachers (intelligence:read but no parents:read).
+        if not (
+            request.user.is_superuser
+            or has_permission_code(get_user_roles(request), "parents:read", _request_overrides(request))
+        ):
+            raise PermissionException(
+                _("Family health needs visibility of family records."), code="not_permitted"
+            )
+        results = selectors.family_health(
+            _scoped_branches(request), include_finance=_can_see_finance(request)
+        )
+        return Response({"count": len(results), "levels": selectors.FAMILY_HEALTH_LEVELS, "results": results})
 
 
 class RulesView(TenantSafeAPIView):
