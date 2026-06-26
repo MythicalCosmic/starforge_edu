@@ -110,6 +110,10 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         # #15: HOD raises + tracks purchase orders.
         "procurement:read",
         "procurement:write",
+        # F10-1: HOD runs SMS campaigns to their students' families.
+        "campaign:read",
+        "campaign:write",
+        "campaign:send",
     },
     Role.TEACHER: {
         "students:read",
@@ -275,6 +279,10 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         # #15: reception raises purchase orders (supplies).
         "procurement:read",
         "procurement:write",
+        # F10-1: reception runs SMS campaigns (the core outreach desk).
+        "campaign:read",
+        "campaign:write",
+        "campaign:send",
     },
     Role.SUPPORT: {"users:read", "audit:read", "tasks:read", "rewards:read"},
 }

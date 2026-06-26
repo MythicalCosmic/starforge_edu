@@ -1,0 +1,79 @@
+"""SMS campaigns (F10-1) — send one message to a student SEGMENT, reusing the Eskiz
+client and recording every recipient.
+
+A `Campaign` is built against a segment (branch + optional status/cohort filter); at
+build time every matching student is frozen into a `CampaignRecipient` with the phone
+the message will go to (the primary guardian's, else the student's own). Sending walks
+the pending recipients once and stamps each as sent/failed — so the campaign and its
+recipients ARE the audit trail of who was contacted, with what, and whether it landed
+(the accountability/paper-elimination DNA: no untracked blasts).
+"""
+
+from __future__ import annotations
+
+from django.db import models
+from django.utils.translation import gettext_lazy as _
+
+
+class Campaign(models.Model):
+    class Status(models.TextChoices):
+        DRAFT = "draft", _("Draft")
+        SENDING = "sending", _("Sending")  # claimed for a send pass (no re-send)
+        SENT = "sent", _("Sent")
+        FAILED = "failed", _("Failed")
+
+    name = models.CharField(max_length=200)
+    message = models.TextField()
+    # The audience filter: {status?, cohort?}; the branch is the campaign's own branch.
+    segment = models.JSONField(default=dict, blank=True)
+    branch = models.ForeignKey(
+        "org.Branch", on_delete=models.PROTECT, null=True, blank=True, related_name="campaigns"
+    )
+    status = models.CharField(max_length=8, choices=Status.choices, default=Status.DRAFT, db_index=True)
+    total = models.PositiveIntegerField(default=0)
+    sent_count = models.PositiveIntegerField(default=0)
+    failed_count = models.PositiveIntegerField(default=0)
+    skipped_count = models.PositiveIntegerField(default=0)  # no resolvable phone
+    created_by = models.ForeignKey("users.User", on_delete=models.SET_NULL, null=True, related_name="+")
+    sent_by = models.ForeignKey(
+        "users.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    sent_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+        indexes = [
+            models.Index(fields=("branch", "status")),
+        ]
+
+    def __str__(self) -> str:  # pragma: no cover
+        return f"campaign#{self.pk}:{self.name}:{self.status}"
+
+
+class CampaignRecipient(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "pending", _("Pending")
+        SENT = "sent", _("Sent")
+        FAILED = "failed", _("Failed")
+        SKIPPED = "skipped", _("Skipped")  # no phone to send to
+
+    campaign = models.ForeignKey(Campaign, on_delete=models.CASCADE, related_name="recipients")
+    student = models.ForeignKey("students.StudentProfile", on_delete=models.PROTECT, related_name="+")
+    phone = models.CharField(max_length=32, blank=True)
+    status = models.CharField(max_length=8, choices=Status.choices, default=Status.PENDING, db_index=True)
+    error = models.CharField(max_length=255, blank=True)
+    sent_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("id",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=("campaign", "student"), name="one_recipient_per_campaign_student"
+            ),
+        ]
+
+    def __str__(self) -> str:  # pragma: no cover
+        return f"recipient#{self.pk}:c{self.campaign_id}:s{self.student_id}:{self.status}"
