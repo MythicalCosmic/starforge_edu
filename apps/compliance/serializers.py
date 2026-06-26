@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from rest_framework import serializers
 
-from apps.compliance.models import Rule
+from apps.compliance.models import Penalty, Rule
+from apps.students.models import StudentProfile
 
 
 class RuleSerializer(serializers.ModelSerializer):
@@ -20,3 +21,36 @@ class RuleSerializer(serializers.ModelSerializer):
         )
         # version is service-managed (auto-bumps on body change).
         read_only_fields = ("id", "version", "created_at", "updated_at")
+
+
+class PenaltySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Penalty
+        fields = (
+            "id",
+            "rule",
+            "student",
+            "points",
+            "reason",
+            "branch",
+            "status",
+            "issued_by",
+            "issued_at",
+            "waived_by",
+            "waived_at",
+            "waive_reason",
+        )
+        read_only_fields = fields
+
+
+class IssuePenaltySerializer(serializers.Serializer):
+    student = serializers.PrimaryKeyRelatedField(queryset=StudentProfile.objects.all())
+    points = serializers.IntegerField(min_value=1)
+    reason = serializers.CharField(max_length=255)
+    rule = serializers.PrimaryKeyRelatedField(
+        queryset=Rule.objects.filter(is_active=True), required=False, allow_null=True
+    )
+
+
+class WaivePenaltySerializer(serializers.Serializer):
+    reason = serializers.CharField(max_length=255, required=False, allow_blank=True, default="")

@@ -190,7 +190,7 @@ premium AI tiering (Opus/Sonnet/Haiku, metered).
 ## Theme I — Compliance (#24)
 | # | Feature | Acceptance | New/Reuse | Status |
 |---|---------|-----------|-----------|--------|
-| F24-1 | Law/rule book uploaded by manager/CEO; penalties applied to staff/students on breach | `Rule` + `Penalty` (points/fine) + apply workflow | new | TODO |
+| F24-1 | Law/rule book uploaded by manager/CEO; penalties applied to staff/students on breach | `Rule` + `Penalty` (points/fine) + apply workflow | new | **PARTIAL** (`apps.compliance.Penalty`): student demerits tied to the rule book — a teacher/manager (`penalty:write`) issues a points penalty against a student (optionally citing a `Rule`); a manager (`penalty:waive`, a SEPARATE perm = segregation of duties) reverses it with a reason; waive is locked + active-only (no double-waive). Branch-scoped: a teacher can only penalise/see their own branch's students; the student + guardians read their OWN record (`/api/v1/rulebook/penalties/`). TODO: staff penalties; point-threshold auto-escalation; FINE penalties as an A-1 money kind. |
 | *related* | incident reports, appeal workflow, penalty-point decay, audit trail (reuse `audit`) | — | idea | — |
 
 ## Cross-cutting (#22)

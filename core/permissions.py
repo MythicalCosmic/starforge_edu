@@ -114,6 +114,10 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "campaign:read",
         "campaign:write",
         "campaign:send",
+        # F24-1: HOD issues + reverses student demerits.
+        "penalty:read",
+        "penalty:write",
+        "penalty:waive",
     },
     Role.TEACHER: {
         "students:read",
@@ -158,6 +162,9 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         # F21-1: teachers can request a staff loan + see their own.
         "loan:read",
         "loan:write",
+        # F24-1: teachers issue demerits to students (managers waive).
+        "penalty:read",
+        "penalty:write",
     },
     Role.STUDENT: {
         # students:read is row-scoped to self by apps/students/selectors.py
@@ -175,6 +182,8 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "messaging:write",
         # F15-2: a student sees their own wall of achievements.
         "achievements:read",
+        # F24-1: a student sees their own demerit record (row-scoped to self).
+        "penalty:read",
     },
     Role.PARENT: {
         # Row-scoped by selectors: students -> guardian-linked children only,
@@ -194,6 +203,8 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "messaging:write",
         # F15-2: parents see their children's achievements.
         "achievements:read",
+        # F24-1: parents see their children's demerit record.
+        "penalty:read",
     },
     Role.ACCOUNTANT: {
         "finance:*",
@@ -283,6 +294,10 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "campaign:read",
         "campaign:write",
         "campaign:send",
+        # F24-1: reception issues + reverses student demerits.
+        "penalty:read",
+        "penalty:write",
+        "penalty:waive",
     },
     Role.SUPPORT: {"users:read", "audit:read", "tasks:read", "rewards:read"},
 }

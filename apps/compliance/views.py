@@ -1,17 +1,24 @@
 from __future__ import annotations
 
+from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from django.utils.translation import gettext_lazy as _
 from drf_spectacular.utils import OpenApiResponse, extend_schema
+from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from apps.compliance import selectors, services
-from apps.compliance.models import Rule
-from apps.compliance.serializers import RuleSerializer
+from apps.compliance.models import Penalty, Rule
+from apps.compliance.serializers import (
+    IssuePenaltySerializer,
+    PenaltySerializer,
+    RuleSerializer,
+    WaivePenaltySerializer,
+)
 from core.exceptions import PermissionException
-from core.permissions import default_perms, get_user_roles
+from core.permissions import Role, default_perms, get_role_memberships, get_user_roles, has_permission_code
 from core.viewsets import TenantSafeModelViewSet
 
 _SELF_ACTIONS = {"mine", "pending", "acknowledge"}
@@ -89,3 +96,72 @@ class RuleViewSet(TenantSafeModelViewSet):
             raise PermissionException(_("This rule does not apply to you."), code="rule_not_applicable")
         ack = services.acknowledge(rule=rule, user=request.user)
         return Response({"acknowledged": True, "version": ack.version})
+
+
+class PenaltyViewSet(TenantSafeModelViewSet):
+    """Student demerits (F24-1). A teacher/manager (penalty:write) issues a penalty for
+    a rule breach; a manager (penalty:waive) can reverse it (separate perm = SoD). The
+    student (and their guardians) read their OWN record; staff read their branch's."""
+
+    serializer_class = PenaltySerializer
+    resource = "penalty"
+    required_perms = {
+        "list": "penalty:read",
+        "retrieve": "penalty:read",
+        "create": "penalty:write",
+        "waive": "penalty:waive",
+    }
+    http_method_names = ["get", "post", "head", "options"]
+    filterset_fields = ("status", "student", "branch")
+    ordering_fields = ("issued_at", "points")
+
+    def _branch_ids(self) -> set[int]:
+        return {m.branch_id for m in get_role_memberships(self.request) if m.branch_id}
+
+    def get_queryset(self):
+        qs = Penalty.objects.select_related(
+            "rule", "student", "student__user", "branch", "issued_by", "waived_by"
+        )
+        user = self.request.user
+        roles = get_user_roles(self.request)
+        if user.is_superuser or Role.DIRECTOR in roles:
+            return qs
+        # Staff who issue or waive see their branch's penalties.
+        if has_permission_code(roles, "penalty:write") or has_permission_code(roles, "penalty:waive"):
+            return qs.filter(branch_id__in=self._branch_ids())
+        # Everyone else sees only their own record (student) / their children's (parent).
+        return qs.filter(Q(student__user=user) | Q(student__guardians__parent__user=user)).distinct()
+
+    def _assert_student_in_scope(self, student) -> None:
+        user = self.request.user
+        if user.is_superuser or Role.DIRECTOR in get_user_roles(self.request):
+            return
+        if student.branch_id not in self._branch_ids():
+            raise PermissionException(
+                _("You can only penalise a student in your own branch."), code="branch_out_of_scope"
+            )
+
+    @extend_schema(request=IssuePenaltySerializer, responses={201: PenaltySerializer}, tags=["compliance"])
+    def create(self, request, *args, **kwargs):
+        ser = IssuePenaltySerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        student = ser.validated_data["student"]
+        self._assert_student_in_scope(student)
+        penalty = services.issue_penalty(
+            student=student,
+            points=ser.validated_data["points"],
+            reason=ser.validated_data["reason"],
+            issued_by=request.user,
+            rule=ser.validated_data.get("rule"),
+        )
+        return Response(PenaltySerializer(penalty).data, status=status.HTTP_201_CREATED)
+
+    @extend_schema(request=WaivePenaltySerializer, responses={200: PenaltySerializer}, tags=["compliance"])
+    @action(detail=True, methods=["post"])
+    def waive(self, request, pk=None):
+        ser = WaivePenaltySerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        penalty = services.waive_penalty(
+            penalty_id=self.get_object().pk, actor=request.user, reason=ser.validated_data["reason"]
+        )
+        return Response(PenaltySerializer(penalty).data)

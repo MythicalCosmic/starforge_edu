@@ -20,7 +20,9 @@ def test_rule_acknowledge_and_version_reaccept(tenant_a, as_role):
     teacher, _ = as_role(Role.TEACHER)
 
     made = director.post(
-        RULES, {"title": "No phones in class", "body": "v1 text", "applies_to_roles": ["teacher"]}, format="json"
+        RULES,
+        {"title": "No phones in class", "body": "v1 text", "applies_to_roles": ["teacher"]},
+        format="json",
     )
     assert made.status_code == 201, made.content
     rid = made.json()["id"]

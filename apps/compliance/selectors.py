@@ -20,9 +20,7 @@ def rules_for_roles(roles) -> list[Rule]:
 
 def acknowledged_rule_ids_current(user, rules) -> set[int]:
     """Rule ids the user has acknowledged AT each rule's CURRENT version."""
-    acks = set(
-        RuleAcknowledgment.objects.filter(user=user, rule__in=rules).values_list("rule_id", "version")
-    )
+    acks = set(RuleAcknowledgment.objects.filter(user=user, rule__in=rules).values_list("rule_id", "version"))
     return {r.id for r in rules if (r.id, r.version) in acks}
 
 
