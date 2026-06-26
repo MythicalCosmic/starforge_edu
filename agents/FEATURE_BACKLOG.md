@@ -183,7 +183,7 @@ premium AI tiering (Opus/Sonnet/Haiku, metered).
 ## Theme H — Cover system (#17, #18)
 | # | Feature | Acceptance | New/Reuse | Status |
 |---|---------|-----------|-----------|--------|
-| F18-1 | Cover request: teacher asks cover for a lesson/period → manager approves OR open to teacher pool | `CoverRequest` state machine on a `Lesson` | new | TODO |
+| F18-1 | Cover request: teacher asks cover for a lesson/period → manager approves OR open to teacher pool | `CoverRequest` state machine on a `Lesson` | new | **DONE** (`apps.covers`): request → assign / open-to-pool → claim, with the lesson's `teacher` actually reassigned on approval (the cover is real — new teacher takes attendance). Branch-scoped throughout; cover teacher must belong to the lesson's branch; busy-teacher reassignment caught by the schedule exclusion constraint → clean 409; lesson re-validated as still SCHEDULED at approve; one OPEN request per lesson (approved is historical → re-cover chain allowed). |
 | F18-2 | Cover "global chat" channel for teachers to claim covers | realtime channel (reuse `infrastructure/websocket`) | reuse+new | TODO |
 | *related* | substitute pool, auto-suggest available teachers, cover-pay differential | — | idea | — |
 

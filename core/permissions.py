@@ -100,6 +100,10 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         # F17-1: HOD defines reward types + grants them to staff.
         "rewards:read",
         "rewards:write",
+        # F18-1: HOD assigns/opens/rejects cover requests.
+        "cover:read",
+        "cover:write",
+        "cover:approve",
     },
     Role.TEACHER: {
         "students:read",
@@ -138,6 +142,9 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "achievements:read",
         "achievements:write",
         "rewards:read",  # F17-1: teachers see rewards they received
+        # F18-1: teachers request cover for their lessons + claim pooled ones.
+        "cover:read",
+        "cover:write",
     },
     Role.STUDENT: {
         # students:read is row-scoped to self by apps/students/selectors.py
@@ -237,6 +244,10 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "achievements:read",
         "achievements:write",
         "rewards:read",  # F17-1
+        # F18-1: reception coordinates cover (assign/open/reject).
+        "cover:read",
+        "cover:write",
+        "cover:approve",
     },
     Role.SUPPORT: {"users:read", "audit:read", "tasks:read", "rewards:read"},
 }

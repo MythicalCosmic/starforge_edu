@@ -35,6 +35,7 @@ api_v1_patterns = [
     path("intelligence/", include("apps.intelligence.urls")),
     path("achievements/", include("apps.achievements.urls")),
     path("rewards/", include("apps.rewards.urls")),
+    path("cover/", include("apps.covers.urls")),
 ]
 
 urlpatterns = [
