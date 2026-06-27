@@ -203,7 +203,11 @@ class PlacementAttemptViewSet(TenantSafeModelViewSet):
     http_method_names = ["get", "post", "head", "options"]  # no DELETE on graded artifacts
     # assigning + reading group suggestions are staff actions; reading/submitting an
     # attempt are self-actions (IsAuthenticated, row-scoped) — see get_permissions.
-    required_perms = {"create": "placement:write", "suggestions": "placement:write"}
+    required_perms = {
+        "create": "placement:write",
+        "suggestions": "placement:write",
+        "mark_writing": "placement:write",
+    }
     filterset_fields = ("status", "test", "student")
 
     # Reading + submitting are open to any authenticated user and row-scoped below
@@ -297,6 +301,23 @@ class PlacementAttemptViewSet(TenantSafeModelViewSet):
         and seats. Staff-only — it's reception's placing tool, not the lead's."""
         attempt = self.get_object()
         return Response(selectors.suggest_cohorts(student=attempt.student))
+
+    @extend_schema(
+        request=None,
+        responses={202: OpenApiResponse(description="{request_id, status} — poll /ai/requests/{id}/")},
+        tags=["placement"],
+    )
+    @action(detail=True, methods=["post"], url_path="mark-writing")
+    def mark_writing(self, request, pk=None):
+        """F8-3: AI-mark this submitted attempt's writing answers (async). Staff-only —
+        a lead can't mark their own work. The scores are applied + the grade recomputed."""
+        ai_request = services.request_writing_marking(
+            attempt=self.get_object(), requested_by=request.user
+        )
+        return Response(
+            {"request_id": ai_request.pk, "status": ai_request.status},
+            status=status.HTTP_202_ACCEPTED,
+        )
 
 
 class GroupProposalViewSet(TenantSafeModelViewSet):

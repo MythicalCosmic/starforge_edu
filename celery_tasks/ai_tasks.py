@@ -378,6 +378,63 @@ def run_form_analysis(self, ai_request_id: int, *, params: dict | None = None) -
     return _run_with_retry(self, ai_request_id, build_prompt=_build)
 
 
+# ---------------------------------------------------------------------------
+# Placement writing marking (F8-3)
+# ---------------------------------------------------------------------------
+
+_MAX_MARKING_CHARS = 12_000  # keep the writing answers within the reserved token budget
+
+
+@app.task(bind=True, max_retries=3, retry_backoff=True, acks_late=True)
+def run_writing_marking(self, ai_request_id: int, *, params: dict | None = None) -> str | None:
+    """Score a placement attempt's writing answers; the persist hook clamps + applies
+    the scores and recomputes the attempt grade."""
+    params = params or {}
+    attempt_id = int(params.get("attempt_id") or 0)
+
+    def _build(prompt, request):
+        from apps.placement.models import PlacementAttempt, PlacementQuestion
+        from apps.placement.services import apply_writing_marks
+
+        attempt = PlacementAttempt.objects.filter(pk=attempt_id).select_related("student").first()
+        if attempt is None:
+            return "No attempt.\n", [], lambda restored: None
+        writing = attempt.answers.select_related("question").filter(
+            question__question_type=PlacementQuestion.QuestionType.WRITING
+        )
+        item_lines = [
+            f"question_id {a.question_id} (max {a.question.points} pts)\n"
+            f"  prompt: {a.question.prompt}\n"
+            f"  answer: {a.response}"
+            for a in writing
+        ]
+        items = "\n\n".join(item_lines) or "(none)"
+        if len(items) > _MAX_MARKING_CHARS:
+            items = items[:_MAX_MARKING_CHARS] + "\n…(truncated)"
+        body = prompt.user_template.format(items=items)
+        # The lead wrote these answers; tokenize the lead AND their guardians (a writing
+        # answer may name a parent/guardian), mirroring run_assignment_feedback.
+        # Structured PII (phones/emails/ids) is caught by the regexes in redaction.py.
+        names = []
+        if attempt.student.user_id and attempt.student.user is not None:
+            full = attempt.student.user.get_full_name()
+            if full:
+                names.append(full)
+        for first, last in attempt.student.guardians.select_related("parent__user").values_list(
+            "parent__user__first_name", "parent__user__last_name"
+        ):
+            guardian = f"{first or ''} {last or ''}".strip()
+            if guardian:
+                names.append(guardian)
+        return (
+            body,
+            names,
+            lambda restored: apply_writing_marks(attempt_id=attempt_id, output_text=restored),
+        )
+
+    return _run_with_retry(self, ai_request_id, build_prompt=_build)
+
+
 def _prompt_cap(feature: str) -> int:
     """The active prompt's token cost cap = the budget estimate (TD-13)."""
     from apps.ai.services import active_prompt

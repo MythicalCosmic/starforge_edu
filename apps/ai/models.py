@@ -30,6 +30,7 @@ class AIFeature(models.TextChoices):
     CONTENT_SUMMARY = "content_summary", _("Content summary")
     PLACEMENT_GENERATION = "placement_generation", _("Placement test generation")
     FORM_ANALYSIS = "form_analysis", _("Form response analysis")
+    WRITING_MARKING = "writing_marking", _("Placement writing marking")
 
 
 class TenantAIBudget(models.Model):

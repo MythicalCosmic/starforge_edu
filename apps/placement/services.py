@@ -331,21 +331,41 @@ def submit_attempt(*, attempt: PlacementAttempt, answers: list[dict]) -> Placeme
             )
         )
     PlacementAnswer.objects.bulk_create(rows)
-    max_score = sum(
-        q.points for q in questions.values() if q.question_type in PlacementQuestion.AUTO_GRADED_TYPES
-    )
-    score = sum(r.awarded_points for r in rows)
+    attempt.status = PlacementAttempt.Status.GRADED
+    attempt.submitted_at = timezone.now()
+    attempt.save(update_fields=["status", "submitted_at", "updated_at"])
+    _grade_attempt(attempt)  # objective now; writing counts once marked (F8-3)
+    return attempt
+
+
+def _grade_attempt(attempt: PlacementAttempt) -> None:
+    """Recompute score/max_score/level over the attempt's answers and push the level
+    to the lead's profile (F1-6). An objective question always counts toward the
+    denominator; a WRITING question counts only once it has been marked (is_correct
+    set) — so this is identical to objective-only grading at submit time, and folds
+    in the writing marks after F8-3 marking. The single source of truth for the grade."""
+    questions = attempt.test.questions.all()
+    answers = {a.question_id: a for a in attempt.answers.all()}
+    score = 0
+    max_score = 0
+    for q in questions:
+        answer = answers.get(q.id)
+        objective = q.question_type in PlacementQuestion.AUTO_GRADED_TYPES
+        marked_writing = answer is not None and answer.is_correct is not None
+        if objective or marked_writing:
+            max_score += q.points
+            if answer is not None:
+                score += answer.awarded_points
     attempt.score = score
     attempt.max_score = max_score
     attempt.level = _level_for(score, max_score)
-    attempt.status = PlacementAttempt.Status.GRADED
-    attempt.submitted_at = timezone.now()
-    attempt.save(update_fields=["score", "max_score", "level", "status", "submitted_at", "updated_at"])
-    # F1-6: the auto-level lands on the lead's profile immediately.
-    if attempt.level:
+    attempt.save(update_fields=["score", "max_score", "level", "updated_at"])
+    # Push the level to the lead's profile ONLY while they are still prospective — the
+    # marking path can run after the student has been enrolled + their academic_level
+    # hand-curated, and must not clobber it (same invariant the assign-gate enforces).
+    if attempt.level and attempt.student.status in _PROSPECTIVE_STATUSES:
         attempt.student.academic_level = attempt.level
         attempt.student.save(update_fields=["academic_level", "updated_at"])
-    return attempt
 
 
 # ---------------------------------------------------------------------------
@@ -575,3 +595,93 @@ def apply_generated_questions(*, test_id: int, output_text: str) -> int:
     if rows:
         PlacementQuestion.objects.bulk_create(rows)
     return len(rows)
+
+
+# ---------------------------------------------------------------------------
+# AI marking of writing answers (F8-3) — reuses the apps.ai pipeline + _grade_attempt
+# ---------------------------------------------------------------------------
+
+
+def request_writing_marking(*, attempt: PlacementAttempt, requested_by=None):
+    """Ask the AI to score the WRITING answers of a submitted attempt. Budget-reserved
+    and enqueued on commit; the marks are applied + the grade recomputed by the task."""
+    from apps.ai.models import AIFeature
+    from apps.ai.services import active_prompt, check_and_reserve_budget
+    from core.utils import current_schema
+
+    if attempt.status != PlacementAttempt.Status.GRADED:
+        raise UnprocessableEntity(
+            _("Only a submitted attempt can be marked."), code="attempt_not_graded"
+        )
+    writing_qids = set(
+        attempt.test.questions.filter(question_type=_QT.WRITING).values_list("id", flat=True)
+    )
+    if not writing_qids or not attempt.answers.filter(question_id__in=writing_qids).exists():
+        raise UnprocessableEntity(
+            _("This attempt has no writing answers to mark."), code="no_writing_answers"
+        )
+    prompt = active_prompt(AIFeature.WRITING_MARKING)
+    ai_request = check_and_reserve_budget(
+        feature=AIFeature.WRITING_MARKING,
+        estimated_tokens=prompt.token_cost_cap,
+        requested_by=requested_by,
+        source_app="placement",
+        source_id=attempt.id,
+    )
+    if ai_request.status == ai_request.Status.QUEUED:
+        schema = current_schema()
+        transaction.on_commit(lambda: _enqueue_writing_marking(ai_request.pk, attempt.id, schema))
+    return ai_request
+
+
+def _enqueue_writing_marking(ai_request_id: int, attempt_id: int, schema: str) -> None:
+    from celery_tasks.ai_tasks import run_writing_marking
+
+    run_writing_marking.delay(ai_request_id, params={"attempt_id": attempt_id}, _schema_name=schema)
+
+
+@transaction.atomic
+def apply_writing_marks(*, attempt_id: int, output_text: str) -> int:
+    """Parse the AI's per-question scores and apply them to the attempt's WRITING
+    answers, then recompute the grade (F8-3). Tolerant: malformed / unmatched / out-of-
+    range items are skipped, never raised; idempotent — re-running OVERWRITES the same
+    answers' marks (a retry can't double-count). Returns the count of answers marked."""
+    try:
+        attempt = (
+            PlacementAttempt.objects.select_for_update()
+            .select_related("test", "student")
+            .get(pk=attempt_id)
+        )
+    except PlacementAttempt.DoesNotExist:
+        return 0
+    if attempt.status != PlacementAttempt.Status.GRADED:
+        return 0
+    writing_answers = {
+        a.question_id: a
+        for a in attempt.answers.select_related("question").filter(
+            question__question_type=_QT.WRITING
+        )
+    }
+    if not writing_answers:
+        return 0
+    marked = 0
+    for item in _parse_question_payload(output_text):
+        if not isinstance(item, dict):
+            continue
+        qid = item.get("question_id")
+        score = item.get("score")
+        # bool is an int subclass (True == 1); reject it on BOTH fields so a JSON
+        # `true` can't be coerced to question_id 1 or a score of 1.
+        if not isinstance(qid, int) or isinstance(qid, bool) or qid not in writing_answers:
+            continue
+        if not isinstance(score, int) or isinstance(score, bool):
+            continue
+        answer = writing_answers[qid]
+        awarded = max(0, min(score, answer.question.points))  # clamp to [0, points]
+        answer.awarded_points = awarded
+        answer.is_correct = awarded > 0  # mark it (no longer null) so it counts in the grade
+        answer.save(update_fields=["awarded_points", "is_correct"])
+        marked += 1
+    if marked:
+        _grade_attempt(attempt)
+    return marked
