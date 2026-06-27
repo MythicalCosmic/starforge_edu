@@ -122,6 +122,12 @@ def make_idempotency_key(*, feature: str, source_app: str, source_id: int, versi
     return f"{feature}:{source_app}:{source_id}:v{version}"
 
 
+# Terminal-FAILURE states that a re-request may re-drive (reset to queued + re-reserve):
+# a budget denial is transient (budget rolls over / is re-enabled) and a failed run is
+# retryable. A succeeded/queued/running row is returned unchanged (idempotent).
+_RE_DRIVABLE_STATUSES = (AIRequest.Status.DENIED_BUDGET, AIRequest.Status.FAILED)
+
+
 def check_and_reserve_budget(
     *,
     feature: str,
@@ -168,19 +174,33 @@ def check_and_reserve_budget(
         )
 
     with transaction.atomic():
-        existing = AIRequest.objects.filter(idempotency_key=key).first()
-        if existing is not None:
-            return existing
+        # Lock the budget first so the existing-row read + any reservation are
+        # serialized (a concurrent duplicate / re-drive can't double-spend).
         budget = _get_budget_locked()
+        existing = AIRequest.objects.filter(idempotency_key=key).first()
+        if existing is not None and existing.status not in _RE_DRIVABLE_STATUSES:
+            return existing  # in-flight or already succeeded — idempotent no-op
         disabled = not budget.is_enabled
         over_daily = budget.tokens_used_today + requested > budget.daily_token_limit
         over_monthly = budget.tokens_used_month + requested > budget.monthly_token_limit
         if not (disabled or over_daily or over_monthly):
-            # Within budget: actually RESERVE the estimate against the budget while
-            # still holding the lock, so a burst of in-flight requests can't all
-            # pass the same stale check and collectively over-spend. record_usage
-            # reconciles the delta to real usage; a failure/cache-hit releases it.
-            obj, created = _create(AIRequest.Status.QUEUED, reserved=requested)
+            # Within budget: RESERVE the estimate against the budget while still
+            # holding the lock, so a burst of in-flight requests can't all pass the
+            # same stale check and collectively over-spend. record_usage reconciles
+            # the delta to real usage; a failure/cache-hit releases it.
+            if existing is not None:
+                # Re-drive a previously denied/failed request now that there IS
+                # budget — a transient denial must not strand the source forever.
+                existing.status = AIRequest.Status.QUEUED
+                existing.reserved_tokens = requested
+                existing.error_detail = ""
+                existing.requested_by_id = actor_id
+                existing.save(
+                    update_fields=["status", "reserved_tokens", "error_detail", "requested_by_id"]
+                )
+                obj, created = existing, True
+            else:
+                obj, created = _create(AIRequest.Status.QUEUED, reserved=requested)
             if created and requested:  # never double-reserve a concurrent duplicate
                 TenantAIBudget.objects.filter(pk=budget.pk).update(
                     tokens_used_today=F("tokens_used_today") + requested,
@@ -189,9 +209,9 @@ def check_and_reserve_budget(
                 )
             return obj
 
-    # Over budget / disabled: the lock is released; record the denial in its own
-    # committed transaction so it persists, then raise the 429 envelope. A denial
-    # reserves nothing (reserved_tokens stays 0).
+    # Over budget / disabled: the lock is released; record (or keep) the denial in
+    # its own committed transaction so it persists, then raise the 429 envelope. A
+    # denial reserves nothing (reserved_tokens stays 0).
     with transaction.atomic():
         _create(AIRequest.Status.DENIED_BUDGET)
     if disabled:

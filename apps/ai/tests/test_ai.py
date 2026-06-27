@@ -70,6 +70,60 @@ def test_budget_exhausted_no_request_executed(tenant_a):
         assert budget.tokens_used_today == 0
 
 
+def test_denied_budget_request_is_redriven_after_budget_restored(tenant_a):
+    """A budget denial is transient: once budget is restored, a re-request re-drives
+    the SAME row to queued instead of returning the stale denied row forever."""
+    from apps.ai.models import AIFeature
+    from apps.ai.services import AIBudgetExceeded, check_and_reserve_budget
+
+    _seed_ai(tenant_a, daily=1)  # tiny budget -> denial
+    with schema_context(tenant_a.schema_name):
+        with pytest.raises(AIBudgetExceeded):
+            check_and_reserve_budget(
+                feature=AIFeature.EXAM_GENERATION,
+                estimated_tokens=5000,
+                source_app="academics",
+                source_id=77,
+            )
+        denied = AIRequest.objects.get(source_app="academics", source_id=77)
+        assert denied.status == AIRequest.Status.DENIED_BUDGET
+        make_budget(daily_token_limit=1_000_000, monthly_token_limit=10_000_000, is_enabled=True)
+        req = check_and_reserve_budget(
+            feature=AIFeature.EXAM_GENERATION,
+            estimated_tokens=5000,
+            source_app="academics",
+            source_id=77,
+        )
+        assert req.pk == denied.pk  # same row re-driven, not a duplicate
+        assert req.status == AIRequest.Status.QUEUED
+        assert req.reserved_tokens == 5000
+        assert TenantAIBudget.objects.get(pk=1).tokens_used_today == 5000  # reserved on re-drive
+
+
+def test_succeeded_request_is_not_redriven(tenant_a):
+    """A completed request is returned idempotently, never reset by a re-request."""
+    from apps.ai.models import AIFeature
+    from apps.ai.services import check_and_reserve_budget
+
+    _seed_ai(tenant_a, daily=1_000_000)
+    with schema_context(tenant_a.schema_name):
+        first = check_and_reserve_budget(
+            feature=AIFeature.EXAM_GENERATION,
+            estimated_tokens=5000,
+            source_app="academics",
+            source_id=88,
+        )
+        AIRequest.objects.filter(pk=first.pk).update(status=AIRequest.Status.SUCCEEDED)
+        again = check_and_reserve_budget(
+            feature=AIFeature.EXAM_GENERATION,
+            estimated_tokens=5000,
+            source_app="academics",
+            source_id=88,
+        )
+        assert again.pk == first.pk
+        assert again.status == AIRequest.Status.SUCCEEDED  # idempotent, not reset
+
+
 def test_redaction_applied_before_complete(tenant_a, monkeypatch):
     _seed_ai(tenant_a)
     from celery_tasks import ai_tasks
