@@ -94,3 +94,13 @@ class TaskAssignSerializer(serializers.Serializer):
 
 class TaskTransitionSerializer(serializers.Serializer):
     status = serializers.ChoiceField(choices=Task.Status.choices)
+
+
+class TaskAutoAssignSerializer(serializers.Serializer):
+    """F5-4 — distribute a department's open tasks across its staff."""
+
+    task_ids = serializers.ListField(
+        child=serializers.IntegerField(min_value=1), allow_empty=False, max_length=500
+    )
+    department = serializers.PrimaryKeyRelatedField(queryset=Department.objects.all())
+    mode = serializers.ChoiceField(choices=("fair", "free"), required=False, default="fair")

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from django.db.models import Q
 from django.utils.translation import gettext_lazy as _
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -13,6 +13,7 @@ from apps.tasks.models import RoleGrade, Task
 from apps.tasks.serializers import (
     RoleGradeSerializer,
     TaskAssignSerializer,
+    TaskAutoAssignSerializer,
     TaskCreateSerializer,
     TaskSerializer,
     TaskTransitionSerializer,
@@ -57,6 +58,7 @@ class TaskViewSet(TenantSafeModelViewSet):
     required_perms = {
         **default_perms("tasks"),
         "assign": "tasks:write",
+        "auto_assign": "tasks:write",
         "transition": "tasks:read",
         "mine": "tasks:read",
     }
@@ -139,6 +141,28 @@ class TaskViewSet(TenantSafeModelViewSet):
         ser.is_valid(raise_exception=True)
         task = services.transition_task(task=task, to_status=ser.validated_data["status"], actor=request.user)
         return Response(TaskSerializer(task).data)
+
+    @extend_schema(
+        request=TaskAutoAssignSerializer,
+        responses={200: OpenApiResponse(description="{mode, assigned, freed, assignments}")},
+        tags=["tasks"],
+    )
+    @action(detail=False, methods=["post"], url_path="auto-assign")
+    def auto_assign(self, request):
+        """F5-4: distribute a department's open tasks across its staff — `fair` balances
+        by current load (least-loaded first), `free` leaves them department-claimable."""
+        ser = TaskAutoAssignSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        department = ser.validated_data["department"]
+        self._assert_scope(department=department)  # only your own branch's department
+        result = services.auto_split_tasks(
+            task_ids=ser.validated_data["task_ids"],
+            department=department,
+            actor=request.user,
+            actor_roles=get_user_roles(request),
+            mode=ser.validated_data["mode"],
+        )
+        return Response(result)
 
     @extend_schema(responses={200: TaskSerializer(many=True)}, tags=["tasks"])
     @action(detail=False, methods=["get"])
