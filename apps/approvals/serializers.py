@@ -14,6 +14,7 @@ REQUEST_KINDS = (
     "loan",
     "procurement",
     "discount",
+    "fine",
     "payment_delay",
     "salary_prep",
     "event_split",

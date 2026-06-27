@@ -190,6 +190,7 @@ def issue_invoice(
     lines: list[dict] | None = None,
     period: str = "",
     created_by=None,
+    apply_discounts: bool = True,
 ) -> Invoice:
     """Issue an invoice for `student_id`.
 
@@ -199,6 +200,9 @@ def issue_invoice(
     `CenterSettings.sibling_discount_percent > 0` and the student has an enrolled
     sibling) are appended as negative discount lines. The invoice number,
     `fx_rate_usd`, and `total_usd` are frozen at issue.
+
+    `apply_discounts=False` issues the invoice WITHOUT any standing discount lines —
+    used for a penalty/fine charge, where a scholarship must not shrink a punishment.
     """
     student = StudentProfile.objects.select_related("user").filter(pk=student_id).first()
     if student is None:
@@ -244,7 +248,11 @@ def issue_invoice(
     gross = sum((line["amount_uzs"] for line in charge_lines), _ZERO)
 
     today = timezone.now().date()
-    discount_lines = _build_discount_lines(student=student, base_uzs=gross, on=today, settings=settings)
+    discount_lines = (
+        _build_discount_lines(student=student, base_uzs=gross, on=today, settings=settings)
+        if apply_discounts
+        else []
+    )
     total_uzs = (gross + sum((line["amount_uzs"] for line in discount_lines), _ZERO)).quantize(_CENT)
     if total_uzs < _ZERO:
         total_uzs = _ZERO

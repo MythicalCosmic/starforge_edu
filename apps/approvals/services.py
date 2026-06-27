@@ -30,6 +30,10 @@ KIND_PAYMENT_DELAY = "payment_delay"
 # A money-moving kind (acts at disburse, not approve) that additionally needs a
 # validated borrower in its payload — see _validate_loan_payload (F21-1).
 KIND_LOAN = "loan"
+# A decision-only KIND (acts at approve, like discount): it issues a charge the
+# student OWES (a penalty invoice), never a cash payout — so its amount lives in
+# the payload and the request's amount_uzs stays null (it can't be disbursed).
+KIND_FINE = "fine"
 
 # Money/percent columns are NUMERIC(_, 2); normalize payload values to that scale.
 _TWO_PLACES = Decimal("0.01")
@@ -229,6 +233,62 @@ def _validate_loan_payload(payload: dict) -> dict:
     return {"borrower_id": borrower_id, "party_label": (borrower.get_full_name() or borrower.username)[:200]}
 
 
+def _validate_fine_payload(payload: dict) -> dict:
+    """Validate + normalize a fine-request payload at creation time, so a malformed
+    fine never enters the queue (a clean 400, not a 500 at approve time). Shape:
+
+        {student_id, amount_uzs, reason?}
+
+    The amount the client sends on the request's top-level `amount_uzs` is folded
+    into the payload here (the request row keeps amount_uzs=null so the fine can
+    never be paid OUT through disburse — its effect is a charge the student owes).
+    The amount is stored as a string at the NUMERIC(18,2) scale so the audited
+    payload always equals the penalty line that actually bills the student.
+    """
+    from apps.students.models import StudentProfile
+
+    student_id = payload.get("student_id")
+    # bool is a subclass of int — exclude it so student_id=true can't resolve to pk=1.
+    if (
+        not isinstance(student_id, int)
+        or isinstance(student_id, bool)
+        or not StudentProfile.objects.filter(pk=student_id).exists()
+    ):
+        raise ValidationException(
+            _("A fine request needs a valid student_id in its payload."),
+            code="fine_student_required",
+            fields={"payload": ["student_id"]},
+        )
+
+    raw_amount = payload.get("amount_uzs")
+    if raw_amount is None:
+        raise ValidationException(
+            _("A fine request needs an amount_uzs."), code="fine_amount_required"
+        )
+    try:
+        amount = Decimal(str(raw_amount))
+    except (InvalidOperation, ValueError):
+        raise ValidationException(_("amount_uzs must be a number."), code="fine_amount_invalid") from None
+    # NaN/Infinity construct fine but are unordered: a later `<`/`>` would raise
+    # InvalidOperation (a 500). Exclude them before any comparison.
+    if not amount.is_finite():
+        raise ValidationException(_("amount_uzs must be a finite number."), code="fine_amount_invalid")
+    # Bound the RAW magnitude to (0, 1e16) before quantize, so quantize can't itself
+    # overflow the Decimal context on a huge value; then re-check, since rounding to
+    # NUMERIC(18,2) (16 integer digits) can tip 0.00x -> 0 or 9999999999999999.99x ->
+    # 1e16. Reject the overflow at the gate as a clean 400, never a DB 500 at issue.
+    if not (Decimal("0") < amount < Decimal("1e16")):
+        raise ValidationException(_("amount_uzs is out of range."), code="fine_amount_range")
+    amount = amount.quantize(_TWO_PLACES)
+    if not (Decimal("0") < amount < Decimal("1e16")):
+        raise ValidationException(_("amount_uzs is out of range."), code="fine_amount_range")
+
+    reason = payload.get("reason", "")
+    if not isinstance(reason, str):
+        raise ValidationException(_("reason must be text."), code="fine_reason_invalid")
+    return {"student_id": student_id, "amount_uzs": str(amount), "reason": reason[:255]}
+
+
 @transaction.atomic
 def create_request(
     *,
@@ -255,6 +315,12 @@ def create_request(
         if amount_uzs is None:
             raise ValidationException(_("A loan request must have an amount."), code="loan_amount_required")
         payload = {**(payload or {}), **_validate_loan_payload(payload)}
+    elif kind == KIND_FINE:
+        # Decision-only: the effect is a charge the student owes, not a cash payout.
+        # Fold the top-level amount into the payload and null the request amount so it
+        # can never be disbursed (disburse pays money OUT; a fine collects money IN).
+        payload = _validate_fine_payload({**(payload or {}), "amount_uzs": amount_uzs})
+        amount_uzs = None
     return ApprovalRequest.objects.create(
         kind=kind,
         title=title,
@@ -295,6 +361,41 @@ def _apply_discount_effect(req: ApprovalRequest, actor) -> None:
     req.payload = {**p, "discount_id": discount.pk}
 
 
+def _apply_fine_effect(req: ApprovalRequest, actor) -> None:
+    """On approval, a fine request materializes a one-off PENALTY invoice the student
+    must pay — collected through the normal payments/allocation machinery (it can go
+    overdue, be refunded, etc.). Runs inside approve()'s transaction, so a failed
+    effect rolls the approval back. The issued invoice id/number is stamped into the
+    payload as the audit link. Discounts are deliberately NOT applied: a scholarship
+    must not shrink a punishment."""
+    from apps.finance.models import InvoiceLine
+    from apps.finance.services import issue_invoice
+    from apps.students.models import StudentProfile
+
+    p = dict(req.payload or {})
+    if p.get("invoice_id"):  # defensive: the status gate already prevents re-approval
+        return
+    student_id = p.get("student_id")
+    if not student_id or not StudentProfile.objects.filter(pk=student_id).exists():
+        raise UnprocessableEntity(
+            _("The fine's student no longer exists."), code="fine_student_missing"
+        )
+    invoice = issue_invoice(
+        student_id=student_id,
+        lines=[
+            {
+                "description": (p.get("reason") or _("Fine")),
+                "line_type": InvoiceLine.LineType.PENALTY,
+                "quantity": "1",
+                "unit_price_uzs": p["amount_uzs"],
+            }
+        ],
+        created_by=actor,
+        apply_discounts=False,
+    )
+    req.payload = {**p, "invoice_id": invoice.pk, "invoice_number": invoice.number}
+
+
 def _apply_payment_delay_effect(req: ApprovalRequest, actor) -> None:
     """On approval, a payment-delay request pushes its target invoice's due date
     via the finance service (which re-validates + un-overdues atomically). The
@@ -327,6 +428,8 @@ def _apply_approval_effect(req: ApprovalRequest, actor) -> None:
     decision kinds with an effect (discount, payment_delay) act here."""
     if req.kind == KIND_DISCOUNT:
         _apply_discount_effect(req, actor)
+    elif req.kind == KIND_FINE:
+        _apply_fine_effect(req, actor)
     elif req.kind == KIND_PAYMENT_DELAY:
         _apply_payment_delay_effect(req, actor)
 
@@ -341,6 +444,25 @@ def _reverse_discount_effect(req: ApprovalRequest) -> None:
     if discount_id:
         Discount.objects.filter(pk=discount_id).update(is_active=False)
         req.payload = {**p, "effect_reversed": True}
+
+
+def _reverse_fine_effect(req: ApprovalRequest) -> None:
+    """Void the penalty invoice so an overturned fine stops owing money. If the
+    student already paid (or part-paid) it, void_invoice raises a clean 409 — the
+    whole reject() rolls back, forcing the manager to use the refund flow instead of
+    silently un-billing collected money (anti-fraud: money already moved stays
+    traceable)."""
+    from apps.finance.models import Invoice
+    from apps.finance.services import void_invoice
+
+    p = dict(req.payload or {})
+    invoice_id = p.get("invoice_id")
+    if not invoice_id:
+        return
+    invoice = Invoice.objects.filter(pk=invoice_id).first()
+    if invoice is not None and invoice.status != Invoice.Status.VOID:
+        void_invoice(invoice=invoice)
+    req.payload = {**p, "effect_reversed": True}
 
 
 def _reverse_payment_delay_effect(req: ApprovalRequest, actor) -> None:
@@ -366,6 +488,8 @@ def _reverse_approval_effect(req: ApprovalRequest, actor) -> None:
     at disburse. Runs inside reject()'s transaction so the undo is atomic."""
     if req.kind == KIND_DISCOUNT:
         _reverse_discount_effect(req)
+    elif req.kind == KIND_FINE:
+        _reverse_fine_effect(req)
     elif req.kind == KIND_PAYMENT_DELAY:
         _reverse_payment_delay_effect(req, actor)
 
