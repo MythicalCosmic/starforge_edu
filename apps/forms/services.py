@@ -261,3 +261,40 @@ def form_summary(form: Form) -> dict:
             summary["false"] = sum(1 for v in values if v is False)
         fields_out.append({"field": field.id, "label": field.label, "field_type": ft, "summary": summary})
     return {"response_count": response_count, "fields": fields_out}
+
+
+# ---------------------------------------------------------------------------
+# AI response analysis (F3-4) — reuses the apps.ai budget/redaction pipeline
+# ---------------------------------------------------------------------------
+
+
+def request_form_analysis(*, form: Form, requested_by=None):
+    """Ask the AI to analyze this form's responses (narrative + key takeaways). The
+    output text is stored on the AIRequest; charts come from form_summary. Budget-
+    reserved and enqueued on commit. One analysis per form (per prompt version)."""
+    from apps.ai.models import AIFeature
+    from apps.ai.services import active_prompt, check_and_reserve_budget
+    from core.utils import current_schema
+
+    if not form.responses.exists():
+        raise UnprocessableEntity(
+            _("This form has no responses to analyze yet."), code="no_responses"
+        )
+    prompt = active_prompt(AIFeature.FORM_ANALYSIS)
+    ai_request = check_and_reserve_budget(
+        feature=AIFeature.FORM_ANALYSIS,
+        estimated_tokens=prompt.token_cost_cap,
+        requested_by=requested_by,
+        source_app="forms",
+        source_id=form.id,
+    )
+    if ai_request.status == ai_request.Status.QUEUED:
+        schema = current_schema()
+        transaction.on_commit(lambda: _enqueue_form_analysis(ai_request.pk, form.id, schema))
+    return ai_request
+
+
+def _enqueue_form_analysis(ai_request_id: int, form_id: int, schema: str) -> None:
+    from celery_tasks.ai_tasks import run_form_analysis
+
+    run_form_analysis.delay(ai_request_id, params={"form_id": form_id}, _schema_name=schema)

@@ -44,6 +44,7 @@ class FormViewSet(TenantSafeModelViewSet):
         "close": "forms:write",
         "responses": "forms:write",
         "summary": "forms:write",
+        "analyze": "forms:write",
         "submit": "forms:read",
     }
     search_fields = ("title",)
@@ -171,3 +172,18 @@ class FormViewSet(TenantSafeModelViewSet):
     @action(detail=True, methods=["get"])
     def summary(self, request, pk=None):
         return Response(services.form_summary(self.get_object()))
+
+    @extend_schema(
+        request=None,
+        responses={202: OpenApiResponse(description="{request_id, status} — poll /ai/requests/{id}/")},
+        tags=["forms"],
+    )
+    @action(detail=True, methods=["post"])
+    def analyze(self, request, pk=None):
+        """F3-4: AI-analyze this form's responses (async). The narrative is stored on
+        the AI request; charts come from /summary/. Poll the AI request for status."""
+        ai_request = services.request_form_analysis(form=self.get_object(), requested_by=request.user)
+        return Response(
+            {"request_id": ai_request.pk, "status": ai_request.status},
+            status=status.HTTP_202_ACCEPTED,
+        )

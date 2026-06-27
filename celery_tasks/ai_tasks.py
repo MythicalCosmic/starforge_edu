@@ -318,6 +318,66 @@ def run_placement_generation(self, ai_request_id: int, *, params: dict | None = 
     return _run_with_retry(self, ai_request_id, build_prompt=_build)
 
 
+# ---------------------------------------------------------------------------
+# Form response analysis (F3-4)
+# ---------------------------------------------------------------------------
+
+# Keep the free-text input within the reserved token budget (cap ~4000 tokens ≈
+# 16k chars; leave headroom for the aggregate + system prompt).
+_MAX_ANALYSIS_COMMENT_CHARS = 12_000
+
+
+@app.task(bind=True, max_retries=3, retry_backoff=True, acks_late=True)
+def run_form_analysis(self, ai_request_id: int, *, params: dict | None = None) -> str | None:
+    """Analyze a form's responses (aggregate + free-text comments); the narrative is
+    stored on the AIRequest output. Respondent names are redacted before sending."""
+    params = params or {}
+    form_id = int(params.get("form_id") or 0)
+
+    def _build(prompt, request):
+        from apps.forms.models import Form, FormField
+        from apps.forms.services import form_summary
+
+        form = Form.objects.filter(pk=form_id).first()
+        if form is None:
+            return "Form: (unavailable)\n", [], lambda restored: None
+        summary = form_summary(form)
+        agg_lines = [f"Responses: {summary['response_count']}"]
+        for field in summary["fields"]:
+            agg_lines.append(f"- {field['label']} ({field['field_type']}): {field['summary']}")
+        comment_blocks = []
+        for f in form.fields.filter(
+            field_type__in=(FormField.FieldType.TEXT, FormField.FieldType.TEXTAREA)
+        ):
+            answers = [
+                a for a in f.answers.values_list("value", flat=True) if isinstance(a, str) and a.strip()
+            ]
+            if answers:
+                comment_blocks.append(f.label + ":\n" + "\n".join("  - " + a for a in answers))
+        # Tokenize respondent names that may appear in free text; structured PII
+        # (phones/emails/ids) is caught by the regexes in redaction.py.
+        names = []
+        for r in form.responses.select_related("respondent"):
+            if r.respondent is not None:
+                full = r.respondent.get_full_name()
+                if full:
+                    names.append(full)
+        # Bound the free-text volume so a large form can't push the prompt past the
+        # reserved token budget (or the model context window) — form analysis is the
+        # only feature that aggregates many respondents' text into one call.
+        comments = "\n\n".join(comment_blocks) or "(no free-text answers)"
+        if len(comments) > _MAX_ANALYSIS_COMMENT_CHARS:
+            comments = (
+                comments[:_MAX_ANALYSIS_COMMENT_CHARS] + "\n…(truncated; analyze this representative sample)"
+            )
+        body = prompt.user_template.format(
+            form_title=form.title, aggregate="\n".join(agg_lines), comments=comments
+        )
+        return body, names, lambda restored: None
+
+    return _run_with_retry(self, ai_request_id, build_prompt=_build)
+
+
 def _prompt_cap(feature: str) -> int:
     """The active prompt's token cost cap = the budget estimate (TD-13)."""
     from apps.ai.services import active_prompt
