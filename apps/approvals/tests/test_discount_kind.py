@@ -168,6 +168,36 @@ def test_fixed_amount_overflow_rejected(tenant_a, as_role):
     assert r.json()["error"]["code"] == "discount_fixed_range"
 
 
+def test_discount_nan_amounts_rejected_not_500(tenant_a, as_role):
+    """A non-finite Decimal in the freeform payload is unordered — the range
+    comparison would raise InvalidOperation (a 500). It must be a clean 400."""
+    teacher, _ = as_role(Role.TEACHER)
+    sid = _student_id(tenant_a)
+    for field, code in (("percent", "discount_percent_invalid"), ("fixed_amount_uzs", "discount_fixed_invalid")):
+        r = teacher.post(
+            REQ,
+            {"kind": "discount", "title": "x", "payload": {"student_id": sid, field: "NaN"}},
+            format="json",
+        )
+        assert r.status_code == 400, (field, r.content)
+        assert r.json()["error"]["code"] == code
+
+
+def test_discount_fixed_amount_that_rounds_up_to_overflow_rejected(tenant_a, as_role):
+    """A value < 1e16 that ROUNDS UP to 1e16 at NUMERIC(18,2) would 500 at insert;
+    the post-quantize re-check rejects it as a clean 400."""
+    teacher, _ = as_role(Role.TEACHER)
+    sid = _student_id(tenant_a)
+    r = teacher.post(
+        REQ,
+        {"kind": "discount", "title": "x",
+         "payload": {"student_id": sid, "fixed_amount_uzs": "9999999999999999.999"}},
+        format="json",
+    )
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "discount_fixed_range"
+
+
 def test_percent_quantized_to_two_places(tenant_a, as_role):
     """The audited payload must equal the discount that actually bills the student
     (Postgres NUMERIC(5,2) would otherwise silently round on insert)."""

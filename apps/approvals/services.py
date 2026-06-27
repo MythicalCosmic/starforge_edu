@@ -112,6 +112,12 @@ def _validate_discount_payload(payload: dict) -> dict:
             raise ValidationException(
                 _("percent must be a number."), code="discount_percent_invalid"
             ) from None
+        # NaN/Infinity construct fine but are unordered: the range comparison below
+        # would raise InvalidOperation (a 500). Exclude them first (payload-reachable).
+        if not pv.is_finite():
+            raise ValidationException(
+                _("percent must be a finite number."), code="discount_percent_invalid"
+            )
         if not (Decimal("0") < pv <= Decimal("100")):
             raise ValidationException(_("percent must be between 0 and 100."), code="discount_percent_range")
         # Quantize to the Discount column's scale (NUMERIC(5,2)) at the gate, so the
@@ -125,13 +131,23 @@ def _validate_discount_payload(payload: dict) -> dict:
             raise ValidationException(
                 _("fixed_amount_uzs must be a number."), code="discount_fixed_invalid"
             ) from None
+        # NaN/Infinity are unordered: a comparison would raise InvalidOperation (500).
+        if not fv.is_finite():
+            raise ValidationException(
+                _("fixed_amount_uzs must be a finite number."), code="discount_fixed_invalid"
+            )
         if fv <= 0:
             raise ValidationException(_("fixed_amount_uzs must be positive."), code="discount_fixed_range")
         # NUMERIC(18,2): at most 16 integer digits. Reject the overflow at the gate
         # as a clean 400 rather than letting it surface as a DB 500 at approve time.
+        # The pre-quantize check keeps quantize itself safe (value now < 1e16); the
+        # post-quantize re-check catches a value that ROUNDS UP across the boundary.
         if fv >= Decimal("1e16"):
             raise ValidationException(_("fixed_amount_uzs is too large."), code="discount_fixed_range")
-        clean["fixed_amount_uzs"] = str(fv.quantize(_TWO_PLACES))
+        fv = fv.quantize(_TWO_PLACES)
+        if fv >= Decimal("1e16"):
+            raise ValidationException(_("fixed_amount_uzs is too large."), code="discount_fixed_range")
+        clean["fixed_amount_uzs"] = str(fv)
 
     for key in ("valid_from", "valid_until"):
         raw = payload.get(key)
