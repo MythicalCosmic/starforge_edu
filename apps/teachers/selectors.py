@@ -72,6 +72,9 @@ def teacher_dashboard(*, teacher: TeacherProfile, user, roles) -> dict:
         for cohort in cohorts.filter(end_date__gte=today).order_by("end_date")[:10]
     ]
 
+    from apps.meetings.services import next_meeting_for
+
+    next_meeting = next_meeting_for(user, now=now)
     return {
         "groups_count": len(cohort_ids),
         "students_count": students_count,
@@ -79,5 +82,15 @@ def teacher_dashboard(*, teacher: TeacherProfile, user, roles) -> dict:
         "next_lessons": next_lessons,
         "upcoming_exams": upcoming_exams,
         "expected_graduations": graduations,
+        "next_meeting": (
+            {
+                "id": next_meeting.id,
+                "title": next_meeting.title,
+                "starts_at": next_meeting.starts_at,
+                "location": next_meeting.location,
+            }
+            if next_meeting
+            else None
+        ),
         "pending_rule_acknowledgments": len(compliance_selectors.pending_rules(user, roles)),
     }

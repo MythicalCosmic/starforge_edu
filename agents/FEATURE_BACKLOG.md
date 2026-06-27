@@ -51,7 +51,7 @@ premium AI tiering (Opus/Sonnet/Haiku, metered).
 | D-6 | `Thread` + `Message` + `ThreadParticipant` (attachments as JSON S3 keys on Message) | F4 messaging | DONE (`apps.messaging`) |
 | D-7 | `ContentLibrary`/`LessonFile` approval + `is_downloadable`/`view_only` flags | F4 library | TODO |
 | D-8 | `CenterSettings` booleans for each dynamic on/off knob (group-acceptance, downloads, library-approval, ...) | all | PARTIAL |
-| D-9 | `MeetingSlot`/`StaffMeeting` (teacher meetings, next-meeting) | F3 | TODO |
+| D-9 | `MeetingSlot`/`StaffMeeting` (teacher meetings, next-meeting) | F3 | DONE (`apps.meetings`: `StaffMeeting` + `MeetingAttendee`/RSVP) |
 
 ---
 
@@ -84,7 +84,7 @@ premium AI tiering (Opus/Sonnet/Haiku, metered).
 | F3-2 | Teacher dashboard aggregate | `GET /teachers/dashboard/` → my students, groups, level-groups, next lesson(+type), upcoming exams, expected graduations, warnings, forms-to-fill | new selector | F3-1, F3-3 | DONE (`apps.teachers` `TeacherDashboardView` + `teacher_dashboard` selector) |
 | F3-3 | Forms/surveys engine (anonymous optional) | `apps.forms`: build (`Form`+ordered `FormField`s, 8 field types) → publish → submit (`FormResponse`/`FormAnswer`, per-type+required validation) → `responses/` + aggregate `summary/`. Anonymous (drops respondent), one-per-respondent dedupe (partial unique on dedupe_token; `allow_multiple` opt-out). forms:read/write; responders see only published | new app | — | DONE |
 | F3-4 | Manager views + AI-analyzes form responses with charts | reuse `reports` generators; AI summary + chart data | reuse+new | F3-3 | TODO |
-| F3-5 | Staff meetings / next-meeting for teachers | `StaffMeeting` + surfaced on dashboard | new (D-9) | F3-2 | TODO |
+| F3-5 | Staff meetings / next-meeting for teachers | `StaffMeeting` + surfaced on dashboard | new (D-9) | F3-2 | **DONE** (`apps.meetings`, `/api/v1/meetings/`): a manager (`meeting:write`) schedules a meeting + invites staff; invitees read + RSVP (accept/decline) without a separate read perm (IsAuthenticated + get_queryset row-scoping — managers see their branch, invitees see only their own); cancel (manager, scheduled-only); `upcoming/` lists the caller's upcoming; the teacher's `next_meeting` surfaces on `/teachers/dashboard/`. Branch-scoped; invitees are staff-only. |
 
 ## Feature 4 — Student dashboard, homework, library, messaging
 | # | Feature | Acceptance | Reuse/New | Deps | Status |

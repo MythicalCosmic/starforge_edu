@@ -118,6 +118,8 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "penalty:read",
         "penalty:write",
         "penalty:waive",
+        # F3-5: HOD schedules staff meetings (reading/RSVP is open to invitees).
+        "meeting:write",
     },
     Role.TEACHER: {
         "students:read",
@@ -309,6 +311,8 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         # #8: reception rings up book/material sales (refunds stay with finance).
         "sale:read",
         "sale:write",
+        # F3-5: reception schedules staff meetings.
+        "meeting:write",
     },
     Role.SUPPORT: {"users:read", "audit:read", "tasks:read", "rewards:read"},
 }
