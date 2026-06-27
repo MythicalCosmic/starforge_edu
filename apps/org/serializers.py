@@ -149,6 +149,27 @@ class CenterSettingsSerializer(serializers.ModelSerializer):
     # selection) rely on these shapes — malformed values must 400 at write time.
     allowed_file_types = serializers.ListField(child=serializers.SlugField(), required=False)
     otp_channel_prefs = serializers.DictField(child=serializers.BooleanField(), required=False)
+    # F8-1: the placement question types the center allows (empty = no restriction).
+    placement_allowed_question_types = serializers.ListField(
+        child=serializers.CharField(), required=False
+    )
+
+    def validate_placement_allowed_question_types(self, value):
+        # Lazy import: org is a low-level app and must not import placement at module
+        # load (placement depends on org) — validate against the type values here.
+        from apps.placement.models import PlacementQuestion
+
+        valid = set(PlacementQuestion.QuestionType.values)
+        unknown = [t for t in value if t not in valid]
+        if unknown:
+            raise serializers.ValidationError(
+                "Unknown question type(s): {}.".format(", ".join(map(str, unknown)))
+            )
+        deduped = []
+        for t in value:  # preserve order, drop duplicates
+            if t not in deduped:
+                deduped.append(t)
+        return deduped
 
     class Meta:
         model = CenterSettings
@@ -179,6 +200,7 @@ class CenterSettingsSerializer(serializers.ModelSerializer):
             "student_id_pattern",
             "center_code",
             "ai_exam_generation_enabled",
+            "placement_allowed_question_types",  # F8-1
             "updated_at",
         )
         read_only_fields = ("updated_at",)

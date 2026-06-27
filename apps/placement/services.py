@@ -120,6 +120,20 @@ def _validate_question(question_type: str, options: Any, correct_answer: Any) ->
         raise ValidationException(_("Unknown question type."), code="invalid_question_type")
 
 
+def _allowed_question_types() -> list[str]:
+    """The center's enabled placement question types (F8-1). Empty = no restriction."""
+    return list(get_center_settings().placement_allowed_question_types or [])
+
+
+def _assert_type_allowed(question_type: str) -> None:
+    allowed = _allowed_question_types()
+    if allowed and question_type not in allowed:
+        raise UnprocessableEntity(
+            _("That question type is not enabled for this center."),
+            code="question_type_not_allowed",
+        )
+
+
 @transaction.atomic
 def add_question(
     *,
@@ -139,6 +153,7 @@ def add_question(
         raise UnprocessableEntity(_("Only a draft test can be edited."), code="test_not_draft")
     options = options if options is not None else []
     _validate_question(question_type, options, correct_answer)
+    _assert_type_allowed(question_type)  # F8-1: respect the center's enabled types
     if order is None:
         last = test.questions.order_by("-order").first()
         order = (last.order + 1) if last else 0
@@ -584,6 +599,7 @@ def apply_generated_questions(*, test_id: int, output_text: str) -> int:
     # after a mid-run failure) can't double-apply the same questions, and a model
     # that repeats a question within one batch only adds it once.
     seen_prompts = set(test.questions.values_list("prompt", flat=True))
+    allowed = _allowed_question_types()  # F8-1: skip types the center hasn't enabled
     rows: list[PlacementQuestion] = []
     for item in _parse_question_payload(output_text)[:_MAX_GENERATED_QUESTIONS]:
         if not isinstance(item, dict):
@@ -594,6 +610,8 @@ def apply_generated_questions(*, test_id: int, output_text: str) -> int:
             continue
         if not isinstance(question_type, str) or prompt_text in seen_prompts:
             continue
+        if allowed and question_type not in allowed:
+            continue  # the model proposed a type this center has disabled — drop it
         options = item.get("options") or []
         correct = None if question_type == _QT.WRITING else item.get("correct_answer")
         # Coerce a stringified boolean the model may emit for true/false.

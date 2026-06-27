@@ -150,6 +150,10 @@ class CenterSettings(models.Model):
     center_code = models.CharField(max_length=16, blank=True)
     # D4-LA-7 (TD-13): gates the request-driven AI exam-generation endpoint.
     ai_exam_generation_enabled = models.BooleanField(default=False)
+    # F8-1: which placement question types this center allows when authoring tests.
+    # Empty (default) = no restriction (all types). A non-empty list restricts both
+    # manual and AI authoring to exactly those PlacementQuestion.QuestionType values.
+    placement_allowed_question_types = models.JSONField(default=list, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
