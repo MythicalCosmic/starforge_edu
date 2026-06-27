@@ -154,6 +154,9 @@ class CenterSettings(models.Model):
     # Empty (default) = no restriction (all types). A non-empty list restricts both
     # manual and AI authoring to exactly those PlacementQuestion.QuestionType values.
     placement_allowed_question_types = models.JSONField(default=list, blank=True)
+    # F24-1: when a student's total ACTIVE penalty points cross this threshold, the
+    # crossing penalty is flagged + branch managers are notified. 0 = disabled.
+    penalty_escalation_threshold = models.PositiveSmallIntegerField(default=0)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

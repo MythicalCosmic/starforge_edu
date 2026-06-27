@@ -3,12 +3,18 @@ acknowledge."""
 
 from __future__ import annotations
 
+import logging
+
 from django.db import transaction
+from django.db.models import Sum
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
 from apps.compliance.models import Penalty, Rule, RuleAcknowledgment
+from apps.org.selectors import get_center_settings
 from core.exceptions import NotFoundException, UnprocessableEntity
+
+logger = logging.getLogger("starforge.compliance")
 
 
 @transaction.atomic
@@ -33,18 +39,99 @@ def acknowledge(*, rule: Rule, user) -> RuleAcknowledgment:
     return ack
 
 
+def _active_points(student_id: int) -> int:
+    """Sum of a student's ACTIVE (un-waived) penalty points."""
+    total = Penalty.objects.filter(student_id=student_id, status=Penalty.Status.ACTIVE).aggregate(
+        total=Sum("points")
+    )["total"]
+    return total or 0
+
+
+def _escalation_manager_ids(branch_id: int | None) -> list[int]:
+    """Active users who handle penalties (penalty:waive) in the student's branch — the
+    people who should know a student is accumulating demerits. Scoped to the branch so
+    one branch's pattern doesn't ping another branch's managers."""
+    from apps.users.models import RoleMembership
+    from core.permissions import roles_with_permission
+
+    qs = RoleMembership.objects.filter(
+        role__in=roles_with_permission("penalty:waive"),
+        revoked_at__isnull=True,
+        user__is_active=True,
+    )
+    if branch_id is not None:
+        qs = qs.filter(branch_id=branch_id)
+    return list(qs.values_list("user_id", flat=True).distinct())
+
+
+def _notify_escalation(*, penalty: Penalty, total_points: int, threshold: int) -> None:
+    """Best-effort: tell the branch's managers a student crossed the penalty threshold.
+    The ENTIRE body is guarded — this runs from transaction.on_commit AFTER the penalty
+    has committed, so neither the recipient lookup (DB queries) nor a dispatch failure
+    may propagate out and 500 a request whose penalty is already saved. A per-penalty
+    dedupe_key makes a retry idempotent."""
+    try:
+        from apps.notifications.services import dispatch
+
+        context = {
+            "student_id": penalty.student_id,
+            "penalty_id": penalty.pk,
+            "total_points": total_points,
+            "threshold": threshold,
+        }
+        for uid in _escalation_manager_ids(penalty.branch_id):
+            try:
+                dispatch(
+                    event_type="penalty.escalated",
+                    recipient_id=uid,
+                    context=context,
+                    dedupe_key=f"penalty_escalation:{penalty.pk}:{uid}",
+                )
+            except Exception:
+                # one bad recipient must not skip the others
+                logger.exception("penalty escalation dispatch failed (penalty=%s, user=%s)", penalty.pk, uid)
+    except Exception:
+        # recipient resolution / import failure must never break the committed penalty
+        logger.exception("penalty escalation notify failed (penalty=%s)", penalty.pk)
+
+
 @transaction.atomic
 def issue_penalty(*, student, points: int, reason: str, issued_by, rule=None) -> Penalty:
     """Issue a demerit against a student. The branch is taken from the student, so the
-    penalty is always attributable to where the student belongs (no branch guessing)."""
-    return Penalty.objects.create(
+    penalty is always attributable to where the student belongs (no branch guessing).
+
+    F24-1: if this penalty pushes the student's total ACTIVE points across the center's
+    `penalty_escalation_threshold` (an UPWARD crossing — fires once at the boundary, not
+    on every later penalty), flag it + notify branch managers so a pattern of breaches
+    surfaces to management automatically (accountability DNA)."""
+    threshold = get_center_settings().penalty_escalation_threshold or 0
+    before = 0
+    if threshold:
+        # Lock the student row so concurrent issuance for the SAME student serializes;
+        # otherwise two transactions read the same pre-insert active total (READ
+        # COMMITTED) and can both MISS a combined crossing — permanently, since every
+        # later penalty then sees before >= threshold — or both escalate (double-alert).
+        from apps.students.models import StudentProfile
+
+        StudentProfile.objects.select_for_update().filter(pk=student.id).first()
+        before = _active_points(student.id)
+    after = before + points
+    escalate = bool(threshold) and before < threshold <= after
+    penalty = Penalty.objects.create(
         student=student,
         points=points,
         reason=reason,
         branch=student.branch,
         issued_by=issued_by,
         rule=rule,
+        escalated=escalate,
     )
+    if escalate:
+        # Notify after commit so a rolled-back penalty never sends a phantom alert.
+        transaction.on_commit(
+            lambda: _notify_escalation(penalty=penalty, total_points=after, threshold=threshold)
+        )
+    return penalty
 
 
 @transaction.atomic

@@ -39,6 +39,7 @@ class PenaltySerializer(serializers.ModelSerializer):
             "waived_by",
             "waived_at",
             "waive_reason",
+            "escalated",
         )
         read_only_fields = fields
 

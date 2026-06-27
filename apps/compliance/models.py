@@ -80,6 +80,9 @@ class Penalty(models.Model):
     )
     waived_at = models.DateTimeField(null=True, blank=True)
     waive_reason = models.CharField(max_length=255, blank=True)
+    # F24-1: set when THIS penalty pushed the student's active-point total across the
+    # center's escalation threshold (an audit marker; managers were notified).
+    escalated = models.BooleanField(default=False)
 
     class Meta:
         ordering = ("-issued_at",)

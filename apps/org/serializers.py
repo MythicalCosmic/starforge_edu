@@ -201,6 +201,7 @@ class CenterSettingsSerializer(serializers.ModelSerializer):
             "center_code",
             "ai_exam_generation_enabled",
             "placement_allowed_question_types",  # F8-1
+            "penalty_escalation_threshold",  # F24-1
             "updated_at",
         )
         read_only_fields = ("updated_at",)

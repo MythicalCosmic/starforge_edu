@@ -47,6 +47,8 @@ class EventType(models.TextChoices):
     APPROVAL_REJECTED = "approval.rejected", _("Request rejected")
     APPROVAL_AWAITING_DISBURSEMENT = "approval.awaiting_disbursement", _("Approved — awaiting disbursement")
     APPROVAL_DISBURSED = "approval.disbursed", _("Request disbursed")
+    # F24-1: a student crossed the center's penalty-point escalation threshold.
+    PENALTY_ESCALATED = "penalty.escalated", _("Penalty: escalation threshold crossed")
 
 
 class Channel(models.TextChoices):
