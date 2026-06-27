@@ -28,7 +28,7 @@ from django.db import transaction
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
-from apps.printing.models import BranchAgent, PrintJob
+from apps.printing.models import BranchAgent, Printer, PrintJob
 from apps.printing.signals import print_job_created, print_job_failed
 from core.exceptions import ConflictException, UnprocessableEntity, ValidationException
 from core.utils import current_schema, stable_hash
@@ -223,6 +223,32 @@ def enqueue_print(
     return job
 
 
+def _assign_least_loaded_printer(job: PrintJob) -> None:
+    """Round-robin balance across the branch's ACTIVE printers (F16-1): assign the job
+    to the printer currently carrying the fewest in-flight (picked/printing) jobs, ties
+    broken by id. Leaves the printer unset when the branch registered none — the agent
+    then falls back to its own default device. Keeps no single printer overloaded while
+    the rest sit idle. SELECT-only (sets job.printer in memory); the caller persists it
+    inside claim_job's transaction, so no decorator of its own."""
+    from django.db.models import Count
+
+    printers = list(Printer.objects.filter(branch_id=job.branch_id, is_active=True).order_by("id"))
+    if not printers:
+        return
+    load = {p.id: 0 for p in printers}
+    for row in (
+        PrintJob.objects.filter(
+            branch_id=job.branch_id,
+            printer_id__in=load,
+            status__in=(PrintJob.Status.PICKED, PrintJob.Status.PRINTING),
+        )
+        .values("printer_id")
+        .annotate(n=Count("id"))
+    ):
+        load[row["printer_id"]] = row["n"]
+    job.printer = min(printers, key=lambda p: (load[p.id], p.id))
+
+
 # --------------------------------------------------------------------------- #
 # Agent claim (D4-LD-3) — atomic, branch-scoped
 # --------------------------------------------------------------------------- #
@@ -232,7 +258,8 @@ def claim_job(*, agent: BranchAgent) -> PrintJob | None:
 
     ``select_for_update(skip_locked=True)`` guarantees two concurrent claims
     never return the same row. Only jobs whose ``next_attempt_at`` has arrived
-    (retry backoff) are eligible. Returns None when the queue is empty.
+    (retry backoff) are eligible. Returns None when the queue is empty. On claim the
+    job is round-robin balanced onto the least-loaded active printer (F16-1).
     """
     now = timezone.now()
     job = (
@@ -251,7 +278,9 @@ def claim_job(*, agent: BranchAgent) -> PrintJob | None:
     job.status = PrintJob.Status.PICKED
     job.agent = agent
     job.claimed_at = now
-    job.save(update_fields=["status", "agent", "claimed_at"])
+    if job.printer_id is None:
+        _assign_least_loaded_printer(job)
+    job.save(update_fields=["status", "agent", "claimed_at", "printer"])
 
     BranchAgent.objects.filter(pk=agent.pk).update(last_seen_at=now)
     return job
@@ -318,8 +347,20 @@ def update_job_status(
         backoff = (2**job.attempts) * RETRY_BACKOFF_SECONDS
         job.status = PrintJob.Status.QUEUED
         job.next_attempt_at = now + timedelta(seconds=backoff)
+        # Clear the printer so the retry rebalances onto the least-loaded ACTIVE printer
+        # (F16-1) — print failures are often printer-specific (offline/jam/inactive), so
+        # a retry must not be pinned to the device that just failed it.
+        job.printer = None
         job.save(
-            update_fields=["status", "attempts", "last_error", "agent", "next_attempt_at", "pages_printed"]
+            update_fields=[
+                "status",
+                "attempts",
+                "last_error",
+                "agent",
+                "printer",
+                "next_attempt_at",
+                "pages_printed",
+            ]
         )
         return job
 

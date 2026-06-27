@@ -177,7 +177,7 @@ premium AI tiering (Opus/Sonnet/Haiku, metered).
 | # | Feature | Acceptance | New/Reuse | Status |
 |---|---------|-----------|-----------|--------|
 | F19-1 | Printer job race-safety | already done (`claim_job` skip_locked) | reuse | DONE(exists) |
-| F16-1 | Even job distribution to all available printers (round-robin) in a branch | extend `claim_job`/enqueue to balance across `Printer`s | extend printing | TODO |
+| F16-1 | Even job distribution to all available printers (round-robin) in a branch | extend `claim_job`/enqueue to balance across `Printer`s | extend printing | **DONE** (`printing.claim_job`): on claim, a job is assigned to the LEAST-LOADED active printer in its branch (fewest in-flight picked/printing jobs, ties by id) — even round-robin distribution, no single printer swamped. No active printers → printer left unset (agent's default); inactive printers skipped. |
 | F16-2 | Desktop print-agent app (separate client repo) | out of this backend's scope; backend `BranchAgent` API exists | reuse | N/A(client) |
 
 ## Theme H — Cover system (#17, #18)
