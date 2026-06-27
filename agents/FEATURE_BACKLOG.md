@@ -137,7 +137,7 @@ premium AI tiering (Opus/Sonnet/Haiku, metered).
 | # | Feature | Acceptance | New/Reuse | Status |
 |---|---------|-----------|-----------|--------|
 | F8-1 | Dynamic answer types: multiple-choice, true/false (default), writing, reading, listening, speaking, vocabulary | per-question type; manager enables types | extend D-4 | TODO |
-| F8-2 | Test session lockdown: timer, answer-only, **mobile-app only (web blocked by tenant flag)** | session token; `X-Client: mobile` gate + CenterSettings | new | TODO |
+| F8-2 | Test session lockdown: timer, answer-only, **mobile-app only (web blocked by tenant flag)** | **TIMER DONE**: `PlacementTest.time_limit_minutes` (manager sets while DRAFT, ≤600) → `PlacementAttempt.expires_at` set on assign (timed tests only); `submit_attempt` rejects a late submit (422 `attempt_expired`, server-side check, read-only to clients); lead sees `expires_at`. "answer-only" already holds (attempts only accept answers). **TODO:** mobile-only `X-Client` gate + CenterSettings flag (a soft/spoofable policy gate — deferred). | new | PARTIAL(timer) |
 | F8-3 | Marking by AI / manager / permission-holder (default manager) | per-test grader policy | reuse ai | TODO |
 | *related* | shared question bank, randomized order, anti-cheat (tab-switch/proctor photo), retake policy, pass certificate | — | idea | — |
 

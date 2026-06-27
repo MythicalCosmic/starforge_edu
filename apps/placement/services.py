@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import timedelta
 from typing import Any
 
 from django.db import IntegrityError, transaction
@@ -54,7 +55,7 @@ def update_test(*, test: PlacementTest, **changes) -> PlacementTest:
     """Edit test metadata. Draft-only — a test that is pending or live is frozen."""
     if test.status != PlacementTest.Status.DRAFT:
         raise UnprocessableEntity(_("Only a draft test can be edited."), code="test_not_draft")
-    allowed = {"title", "description", "subject"}
+    allowed = {"title", "description", "subject", "time_limit_minutes"}
     for key, value in changes.items():
         if key in allowed:
             setattr(test, key, value)
@@ -268,11 +269,17 @@ def assign_test(*, test: PlacementTest, student, assigned_by=None) -> PlacementA
         raise ConflictException(
             _("This student already has this placement test."), code="already_assigned"
         )
+    # F8-2 timer: a timed test gives the lead a fixed window from assignment.
+    expires_at = None
+    if test.time_limit_minutes:
+        expires_at = timezone.now() + timedelta(minutes=test.time_limit_minutes)
     try:
         # Savepoint so a racing duplicate hits the unique constraint as a clean 409,
         # not a 500 (mirrors apps/forms submit_response).
         with transaction.atomic():
-            return PlacementAttempt.objects.create(test=test, student=student, assigned_by=assigned_by)
+            return PlacementAttempt.objects.create(
+                test=test, student=student, assigned_by=assigned_by, expires_at=expires_at
+            )
     except IntegrityError:
         raise ConflictException(
             _("This student already has this placement test."), code="already_assigned"
@@ -291,6 +298,10 @@ def submit_attempt(*, attempt: PlacementAttempt, answers: list[dict]) -> Placeme
     if attempt.status != PlacementAttempt.Status.ASSIGNED:
         raise ConflictException(
             _("This placement attempt has already been submitted."), code="already_submitted"
+        )
+    if attempt.expires_at is not None and timezone.now() > attempt.expires_at:
+        raise UnprocessableEntity(
+            _("The time limit for this placement test has passed."), code="attempt_expired"
         )
     questions = {q.id: q for q in attempt.test.questions.all()}
     seen: set[int] = set()

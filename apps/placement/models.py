@@ -40,6 +40,8 @@ class PlacementTest(models.Model):
     )
     approved_at = models.DateTimeField(null=True, blank=True)
     reject_reason = models.CharField(max_length=255, blank=True)
+    # F8-2 timer: minutes a lead has to finish once assigned (null = untimed).
+    time_limit_minutes = models.PositiveSmallIntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -100,6 +102,9 @@ class PlacementAttempt(models.Model):
     score = models.PositiveIntegerField(default=0)
     max_score = models.PositiveIntegerField(default=0)
     level = models.CharField(max_length=64, blank=True)
+    # F8-2 timer: the deadline to submit (set on assign when the test is timed; null
+    # = untimed). A submit after this is rejected (the lead ran out of time).
+    expires_at = models.DateTimeField(null=True, blank=True)
     submitted_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

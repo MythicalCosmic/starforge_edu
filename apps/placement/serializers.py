@@ -43,6 +43,7 @@ class PlacementTestSerializer(serializers.ModelSerializer):
             "approved_by",
             "approved_at",
             "reject_reason",
+            "time_limit_minutes",
             "created_at",
             "questions",
         )
@@ -69,6 +70,9 @@ class PlacementTestCreateSerializer(serializers.Serializer):
     branch = serializers.PrimaryKeyRelatedField(
         queryset=Branch.objects.filter(archived_at__isnull=True), required=False, allow_null=True
     )
+    time_limit_minutes = serializers.IntegerField(
+        min_value=1, max_value=600, required=False, allow_null=True
+    )
 
 
 class PlacementTestUpdateSerializer(serializers.Serializer):
@@ -76,6 +80,9 @@ class PlacementTestUpdateSerializer(serializers.Serializer):
     description = serializers.CharField(required=False, allow_blank=True)
     subject = serializers.PrimaryKeyRelatedField(
         queryset=Subject.objects.all(), required=False, allow_null=True
+    )
+    time_limit_minutes = serializers.IntegerField(
+        min_value=1, max_value=600, required=False, allow_null=True
     )
 
 
@@ -130,6 +137,7 @@ class PlacementAttemptSerializer(serializers.ModelSerializer):
             "score",
             "max_score",
             "level",
+            "expires_at",
             "submitted_at",
             "created_at",
             "questions",
