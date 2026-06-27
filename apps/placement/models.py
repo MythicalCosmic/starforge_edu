@@ -56,18 +56,20 @@ class PlacementTest(models.Model):
 class PlacementQuestion(models.Model):
     class QuestionType(models.TextChoices):
         SINGLE_CHOICE = "single_choice", _("Single choice")
+        MULTIPLE_CHOICE = "multiple_choice", _("Multiple choice (multi-select)")
         TRUE_FALSE = "true_false", _("True / false")
         WRITING = "writing", _("Writing (manually marked)")
 
     # Auto-gradable types carry a correct_answer; WRITING is marked by a human later.
-    AUTO_GRADED_TYPES = (QuestionType.SINGLE_CHOICE, QuestionType.TRUE_FALSE)
+    AUTO_GRADED_TYPES = (QuestionType.SINGLE_CHOICE, QuestionType.MULTIPLE_CHOICE, QuestionType.TRUE_FALSE)
 
     test = models.ForeignKey(PlacementTest, on_delete=models.CASCADE, related_name="questions")
     prompt = models.TextField()
     question_type = models.CharField(max_length=16, choices=QuestionType.choices)
-    options = models.JSONField(default=list, blank=True)  # [str] for single_choice
-    # str (a single_choice option) / bool (true_false) / null (writing). The "answer
-    # key" that F1-6 auto-grading will score against; staff-only (never sent to leads).
+    options = models.JSONField(default=list, blank=True)  # [str] for single/multiple_choice
+    # str (single_choice option) / [str] (the correct subset for multiple_choice) /
+    # bool (true_false) / null (writing). The "answer key" that F1-6 auto-grading scores
+    # against; staff-only (never sent to leads).
     correct_answer = models.JSONField(null=True, blank=True)
     points = models.PositiveSmallIntegerField(default=1)
     order = models.PositiveIntegerField(default=0)

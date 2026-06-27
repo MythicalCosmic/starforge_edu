@@ -36,6 +36,9 @@ from core.exceptions import (
 
 logger = logging.getLogger("starforge.placement")
 _QT = PlacementQuestion.QuestionType
+# Both choice types share the same options shape ([str]); they differ only in the
+# correct_answer (a single option vs. a subset) and in how the response is graded.
+_CHOICE_TYPES = (_QT.SINGLE_CHOICE, _QT.MULTIPLE_CHOICE)
 # Placement is an intake tool: only prospective students get a test, so submit's
 # academic_level write never clobbers an enrolled student's curated level.
 _PROSPECTIVE_STATUSES = (
@@ -69,19 +72,36 @@ def _validate_question(question_type: str, options: Any, correct_answer: Any) ->
         # The serializer JSONField accepts any JSON; a scalar/string/dict here would
         # otherwise 500 on len() or silently "match" correct_answer by substring/key.
         raise ValidationException(_("Options must be a list."), code="invalid_options")
-    if question_type == _QT.SINGLE_CHOICE:
+    if question_type in _CHOICE_TYPES:
         if len(options) < 2:
             raise ValidationException(
-                _("A single-choice question needs at least two options."), code="choice_needs_options"
+                _("A choice question needs at least two options."), code="choice_needs_options"
             )
         if any(not isinstance(o, str) or not o.strip() for o in options):
             raise ValidationException(_("Options must be non-empty text."), code="invalid_options")
         if len(set(options)) != len(options):
             raise ValidationException(_("Options must be unique."), code="duplicate_options")
-        if correct_answer not in options:
-            raise ValidationException(
-                _("The correct answer must be one of the options."), code="answer_not_in_options"
-            )
+        if question_type == _QT.SINGLE_CHOICE:
+            if correct_answer not in options:
+                raise ValidationException(
+                    _("The correct answer must be one of the options."), code="answer_not_in_options"
+                )
+        else:  # MULTIPLE_CHOICE: the key is a non-empty subset of the options
+            if not isinstance(correct_answer, list) or not correct_answer:
+                raise ValidationException(
+                    _("A multiple-choice question needs at least one correct option."),
+                    code="answer_not_list",
+                )
+            # Check membership BEFORE set() so an unhashable junk entry (dict/list the AI
+            # path might emit) raises a clean 422 instead of a TypeError 500.
+            if any(a not in options for a in correct_answer):
+                raise ValidationException(
+                    _("Every correct answer must be one of the options."), code="answer_not_in_options"
+                )
+            if len(set(correct_answer)) != len(correct_answer):
+                raise ValidationException(
+                    _("The correct answers must be unique."), code="duplicate_answers"
+                )
     elif question_type == _QT.TRUE_FALSE:
         if not isinstance(correct_answer, bool):
             raise ValidationException(
@@ -238,6 +258,12 @@ def _validate_response(question: PlacementQuestion, response: Any) -> None:
     if question.question_type == _QT.TRUE_FALSE:
         if not isinstance(response, bool):
             raise bad(_("Answer true or false."), "answer_not_boolean")
+    elif question.question_type == _QT.MULTIPLE_CHOICE:
+        # A list of chosen options (an empty list = "left blank", which scores 0).
+        if not isinstance(response, list) or any(not isinstance(r, str) for r in response):
+            raise bad(_("Answer must be a list of options."), "answer_not_list")
+        if any(r not in question.options for r in response):
+            raise bad(_("Answer must be one of the options."), "answer_not_in_options")
     elif not isinstance(response, str):  # single_choice + writing are text
         raise bad(_("Answer must be text."), "answer_not_text")
     elif question.question_type == _QT.SINGLE_CHOICE and response not in question.options:
@@ -247,10 +273,16 @@ def _validate_response(question: PlacementQuestion, response: Any) -> None:
 
 
 def _grade_answer(question: PlacementQuestion, response: Any) -> tuple[bool | None, int]:
-    """(is_correct, awarded_points). Writing is marked by a person later → (None, 0)."""
+    """(is_correct, awarded_points). Writing is marked by a person later → (None, 0).
+    Multiple-choice is all-or-nothing: the chosen SET must equal the correct set
+    exactly (a transparent rule, no partial credit). `_validate_response` has already
+    guaranteed `response` is a list of option strings, so set() is safe here."""
     if question.question_type not in PlacementQuestion.AUTO_GRADED_TYPES:
         return None, 0
-    is_correct = response == question.correct_answer
+    if question.question_type == _QT.MULTIPLE_CHOICE:
+        is_correct = isinstance(response, list) and set(response) == set(question.correct_answer or [])
+    else:
+        is_correct = response == question.correct_answer
     return is_correct, (question.points if is_correct else 0)
 
 
@@ -585,7 +617,7 @@ def apply_generated_questions(*, test_id: int, output_text: str) -> int:
                 test=test,
                 prompt=prompt_text,
                 question_type=question_type,
-                options=options if question_type == _QT.SINGLE_CHOICE else [],
+                options=options if question_type in _CHOICE_TYPES else [],
                 correct_answer=correct,
                 points=points,
                 order=order,
