@@ -5,18 +5,24 @@ from django.utils.translation import gettext_lazy as _
 from drf_spectacular.utils import extend_schema
 from rest_framework import status
 from rest_framework.decorators import action
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from apps.org.models import Branch
 from apps.placement import services
-from apps.placement.models import PlacementTest
+from apps.placement.models import PlacementAttempt, PlacementTest
 from apps.placement.serializers import (
+    AssignAttemptSerializer,
+    LeadAttemptSerializer,
+    PlacementAttemptSerializer,
     PlacementQuestionSerializer,
     PlacementTestCreateSerializer,
     PlacementTestSerializer,
     PlacementTestUpdateSerializer,
     RejectSerializer,
+    SubmitAttemptSerializer,
 )
+from apps.students.selectors import student_profile_for
 from core.exceptions import NotFoundException, PermissionException, ValidationException
 from core.permissions import (
     Role,
@@ -161,3 +167,93 @@ class PlacementTestViewSet(TenantSafeModelViewSet):
             test=self.get_object(), reviewer=request.user, reason=ser.validated_data["reason"]
         )
         return Response(PlacementTestSerializer(test).data)
+
+
+class PlacementAttemptViewSet(TenantSafeModelViewSet):
+    """Sitting + auto-grading (F1-5 / F1-6). Staff (placement:write) assign an
+    APPROVED test to a lead; the lead (or a proctor) submits answers and the
+    objective questions are graded instantly, setting the lead's academic_level.
+    A lead sees only their own attempts — and never the answer key."""
+
+    serializer_class = PlacementAttemptSerializer
+    resource = "placement"
+    http_method_names = ["get", "post", "head", "options"]  # no DELETE on graded artifacts
+    required_perms = {"create": "placement:write"}  # assigning is a staff action
+    filterset_fields = ("status", "test", "student")
+
+    # Reading + submitting are open to any authenticated user and row-scoped below
+    # (a lead reaches only their own attempts; staff only their branch's).
+    _SELF_ACTIONS = {"list", "retrieve", "submit"}
+
+    def get_permissions(self):
+        if getattr(self, "action", None) in self._SELF_ACTIONS:
+            return [IsAuthenticated()]
+        return super().get_permissions()
+
+    def _branch_ids(self) -> set[int]:
+        return {m.branch_id for m in get_role_memberships(self.request) if m.branch_id}
+
+    def _actor_is_staff(self) -> bool:
+        user = self.request.user
+        roles = get_user_roles(self.request)
+        return user.is_superuser or Role.DIRECTOR in roles or has_permission_code(roles, "placement:write")
+
+    def get_serializer_class(self):
+        # A test-taker (lead) gets an is_correct-free view so the answer key can't
+        # be reconstructed by inference; staff/proctors see the full grading.
+        return PlacementAttemptSerializer if self._actor_is_staff() else LeadAttemptSerializer
+
+    def get_queryset(self):
+        qs = PlacementAttempt.objects.select_related("test", "student", "student__user").prefetch_related(
+            "answers", "test__questions"
+        )
+        user = self.request.user
+        roles = get_user_roles(self.request)
+        if user.is_superuser or Role.DIRECTOR in roles:
+            return qs
+        if has_permission_code(roles, "placement:write"):
+            # Staff: attempts they assigned or on a test in their branch.
+            return qs.filter(Q(assigned_by=user) | Q(test__branch_id__in=self._branch_ids())).distinct()
+        # The lead: only their own attempts (the answer key is still never serialized).
+        profile = student_profile_for(user)
+        if profile is not None:
+            return qs.filter(student=profile)
+        return qs.none()
+
+    def _assert_in_scope(self, test: PlacementTest, student) -> None:
+        if self.request.user.is_superuser or Role.DIRECTOR in get_user_roles(self.request):
+            return
+        my_branches = self._branch_ids()
+        if test.branch_id is not None and test.branch_id not in my_branches:
+            raise PermissionException(
+                _("You can only assign a test from your own branch."), code="cross_branch"
+            )
+        if student.branch_id not in my_branches:
+            raise PermissionException(
+                _("You can only assign to a student in your own branch."), code="cross_branch"
+            )
+
+    @extend_schema(
+        request=AssignAttemptSerializer, responses={201: PlacementAttemptSerializer}, tags=["placement"]
+    )
+    def create(self, request, *args, **kwargs):
+        ser = AssignAttemptSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        test = ser.validated_data["test"]
+        student = ser.validated_data["student"]
+        self._assert_in_scope(test, student)
+        attempt = services.assign_test(test=test, student=student, assigned_by=request.user)
+        return Response(self.get_serializer(attempt).data, status=status.HTTP_201_CREATED)
+
+    @extend_schema(
+        request=SubmitAttemptSerializer, responses={200: PlacementAttemptSerializer}, tags=["placement"]
+    )
+    @action(detail=True, methods=["post"])
+    def submit(self, request, pk=None):
+        # get_object is row-scoped: a lead resolves only their own attempt, a staff
+        # proctor only their branch's — so reaching it here IS the authorization.
+        attempt = self.get_object()
+        ser = SubmitAttemptSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        attempt = services.submit_attempt(attempt=attempt, answers=ser.validated_data["answers"])
+        return Response(self.get_serializer(attempt).data)

@@ -1,8 +1,9 @@
 from rest_framework.routers import DefaultRouter
 
-from apps.placement.views import PlacementTestViewSet
+from apps.placement.views import PlacementAttemptViewSet, PlacementTestViewSet
 
 router = DefaultRouter()
 router.register("tests", PlacementTestViewSet, basename="placement-test")
+router.register("attempts", PlacementAttemptViewSet, basename="placement-attempt")
 
 urlpatterns = router.urls

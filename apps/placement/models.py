@@ -76,3 +76,60 @@ class PlacementQuestion(models.Model):
 
     def __str__(self) -> str:  # pragma: no cover
         return f"{self.test_id}:{self.prompt[:40]}"
+
+
+class PlacementAttempt(models.Model):
+    """A prospective student (lead) sitting an APPROVED placement test (F1-5). On
+    submit it is auto-graded (F1-6) on its objective questions and the resulting
+    level lands on the lead's `academic_level` immediately."""
+
+    class Status(models.TextChoices):
+        ASSIGNED = "assigned", _("Assigned")
+        GRADED = "graded", _("Graded")
+
+    test = models.ForeignKey(PlacementTest, on_delete=models.PROTECT, related_name="attempts")
+    student = models.ForeignKey(
+        "students.StudentProfile", on_delete=models.CASCADE, related_name="placement_attempts"
+    )
+    assigned_by = models.ForeignKey(
+        "users.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.ASSIGNED, db_index=True)
+    # Auto-graded points only (writing questions are marked by a human later, F8-3);
+    # max_score is the objective-question total, so level reflects what was auto-scored.
+    score = models.PositiveIntegerField(default=0)
+    max_score = models.PositiveIntegerField(default=0)
+    level = models.CharField(max_length=64, blank=True)
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+        constraints = [
+            models.UniqueConstraint(fields=("test", "student"), name="one_attempt_per_test_per_student"),
+        ]
+        indexes = [models.Index(fields=("status", "created_at"))]
+
+    def __str__(self) -> str:  # pragma: no cover
+        return f"attempt#{self.pk}:test#{self.test_id}:student#{self.student_id}"
+
+
+class PlacementAnswer(models.Model):
+    attempt = models.ForeignKey(PlacementAttempt, on_delete=models.CASCADE, related_name="answers")
+    question = models.ForeignKey(PlacementQuestion, on_delete=models.PROTECT, related_name="+")
+    # The lead's answer: an option str / bool / free text. Never the answer key.
+    response = models.JSONField()
+    # null for writing (marked by a person later); True/False for objective questions.
+    is_correct = models.BooleanField(null=True)
+    awarded_points = models.PositiveSmallIntegerField(default=0)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("attempt", "question"), name="one_answer_per_question_per_attempt"
+            ),
+        ]
+
+    def __str__(self) -> str:  # pragma: no cover
+        return f"answer#{self.pk}:attempt#{self.attempt_id}:q#{self.question_id}"

@@ -10,14 +10,27 @@ from __future__ import annotations
 
 from typing import Any
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
-from apps.placement.models import PlacementQuestion, PlacementTest
-from core.exceptions import PermissionException, UnprocessableEntity, ValidationException
+from apps.placement.models import PlacementAnswer, PlacementAttempt, PlacementQuestion, PlacementTest
+from apps.students.models import StudentProfile
+from core.exceptions import (
+    ConflictException,
+    PermissionException,
+    UnprocessableEntity,
+    ValidationException,
+)
 
 _QT = PlacementQuestion.QuestionType
+# Placement is an intake tool: only prospective students get a test, so submit's
+# academic_level write never clobbers an enrolled student's curated level.
+_PROSPECTIVE_STATUSES = (
+    StudentProfile.Status.LEAD,
+    StudentProfile.Status.APPLICATION,
+    StudentProfile.Status.ACCEPTED,
+)
 
 
 @transaction.atomic
@@ -178,3 +191,131 @@ def delete_test(*, test: PlacementTest) -> None:
             _("Only a draft test can be deleted; submit a rejection instead."), code="test_not_draft"
         )
     test.delete()
+
+
+# ---------------------------------------------------------------------------
+# Sitting + auto-grading (F1-5 / F1-6)
+# ---------------------------------------------------------------------------
+
+
+def _level_for(score: int, max_score: int) -> str:
+    """Transparent rubric: band by share of the OBJECTIVE points. No objective
+    questions (max_score == 0) → no auto-level (a human marks the writing, F8-3)."""
+    if max_score <= 0:
+        return ""
+    pct = score / max_score
+    if pct >= 0.7:
+        return "advanced"
+    if pct >= 0.4:
+        return "intermediate"
+    return "beginner"
+
+
+def _validate_response(question: PlacementQuestion, response: Any) -> None:
+    """A wrong answer is fine (it scores 0); a wrong-TYPED answer is a clean 400 so
+    we never store junk."""
+
+    def bad(msg, code: str):
+        return ValidationException(msg, code=code, fields={"question": [str(question.id)]})
+
+    if question.question_type == _QT.TRUE_FALSE:
+        if not isinstance(response, bool):
+            raise bad(_("Answer true or false."), "answer_not_boolean")
+    elif not isinstance(response, str):  # single_choice + writing are text
+        raise bad(_("Answer must be text."), "answer_not_text")
+    elif question.question_type == _QT.SINGLE_CHOICE and response not in question.options:
+        # A wrong answer is fine (it scores 0); an answer that was never an offered
+        # option is junk — reject it cleanly, matching the forms engine.
+        raise bad(_("Answer must be one of the options."), "answer_not_in_options")
+
+
+def _grade_answer(question: PlacementQuestion, response: Any) -> tuple[bool | None, int]:
+    """(is_correct, awarded_points). Writing is marked by a person later → (None, 0)."""
+    if question.question_type not in PlacementQuestion.AUTO_GRADED_TYPES:
+        return None, 0
+    is_correct = response == question.correct_answer
+    return is_correct, (question.points if is_correct else 0)
+
+
+@transaction.atomic
+def assign_test(*, test: PlacementTest, student, assigned_by=None) -> PlacementAttempt:
+    """Give an approved test to a prospective student. One attempt per (test, student)."""
+    if test.status != PlacementTest.Status.APPROVED:
+        raise UnprocessableEntity(
+            _("Only an approved test can be assigned."), code="test_not_approved"
+        )
+    if student.status not in _PROSPECTIVE_STATUSES:
+        raise UnprocessableEntity(
+            _("Placement tests are only for prospective students."), code="student_not_prospective"
+        )
+    if PlacementAttempt.objects.filter(test=test, student=student).exists():
+        raise ConflictException(
+            _("This student already has this placement test."), code="already_assigned"
+        )
+    try:
+        # Savepoint so a racing duplicate hits the unique constraint as a clean 409,
+        # not a 500 (mirrors apps/forms submit_response).
+        with transaction.atomic():
+            return PlacementAttempt.objects.create(test=test, student=student, assigned_by=assigned_by)
+    except IntegrityError:
+        raise ConflictException(
+            _("This student already has this placement test."), code="already_assigned"
+        ) from None
+
+
+@transaction.atomic
+def submit_attempt(*, attempt: PlacementAttempt, answers: list[dict]) -> PlacementAttempt:
+    """Record + auto-grade a lead's answers, set the level on their profile, and
+    freeze the attempt. The row is locked so it can't be double-submitted."""
+    attempt = (
+        PlacementAttempt.objects.select_for_update()
+        .select_related("test", "student")
+        .get(pk=attempt.pk)
+    )
+    if attempt.status != PlacementAttempt.Status.ASSIGNED:
+        raise ConflictException(
+            _("This placement attempt has already been submitted."), code="already_submitted"
+        )
+    questions = {q.id: q for q in attempt.test.questions.all()}
+    seen: set[int] = set()
+    rows: list[PlacementAnswer] = []
+    for item in answers:
+        qid = item.get("question")
+        if not isinstance(qid, int) or qid not in questions:
+            raise ValidationException(
+                _("Unknown question for this test."),
+                code="unknown_question",
+                fields={"question": [str(qid)]},
+            )
+        if qid in seen:
+            raise ValidationException(_("Duplicate answer for a question."), code="duplicate_answer")
+        seen.add(qid)
+        question = questions[qid]
+        response = item.get("response")
+        _validate_response(question, response)
+        is_correct, awarded = _grade_answer(question, response)
+        rows.append(
+            PlacementAnswer(
+                attempt=attempt,
+                question=question,
+                response=response,
+                is_correct=is_correct,
+                awarded_points=awarded,
+            )
+        )
+    PlacementAnswer.objects.bulk_create(rows)
+    max_score = sum(
+        q.points for q in questions.values() if q.question_type in PlacementQuestion.AUTO_GRADED_TYPES
+    )
+    score = sum(r.awarded_points for r in rows)
+    attempt.score = score
+    attempt.max_score = max_score
+    attempt.level = _level_for(score, max_score)
+    attempt.status = PlacementAttempt.Status.GRADED
+    attempt.submitted_at = timezone.now()
+    attempt.save(update_fields=["score", "max_score", "level", "status", "submitted_at", "updated_at"])
+    # F1-6: the auto-level lands on the lead's profile immediately.
+    if attempt.level:
+        attempt.student.academic_level = attempt.level
+        attempt.student.save(update_fields=["academic_level", "updated_at"])
+    return attempt
