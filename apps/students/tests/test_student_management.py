@@ -54,9 +54,7 @@ def test_block_then_unblock_student(tenant_a, user_in, as_user):
     with schema_context(tenant_a.schema_name):
         student = create_student(branch=branch, phone="+998905557010")
 
-    resp = client.post(
-        f"/api/v1/students/{student.id}/block/", {"reason": "unpaid balance"}, format="json"
-    )
+    resp = client.post(f"/api/v1/students/{student.id}/block/", {"reason": "unpaid balance"}, format="json")
     assert resp.status_code == 200, resp.content
     body = resp.json()
     assert body["is_blocked"] is True
@@ -84,9 +82,7 @@ def test_block_requires_write_role(tenant_a, user_in, as_user):
 def test_student_filters(tenant_a, user_in, as_user):
     branch, client = _branch_and_client(tenant_a, user_in, as_user)
     with schema_context(tenant_a.schema_name):
-        a = create_student(
-            branch=branch, phone="+998905557020", location="Tashkent", academic_level="A1"
-        )
+        a = create_student(branch=branch, phone="+998905557020", location="Tashkent", academic_level="A1")
         create_student(branch=branch, phone="+998905557021", location="Samarkand", academic_level="B2")
 
     def ids(query):

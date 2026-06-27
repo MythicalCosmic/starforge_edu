@@ -46,6 +46,25 @@ class StudentDashboardView(TenantSafeAPIView):
         )
 
 
+class StudentReportView(TenantSafeAPIView):
+    """GET /api/v1/students/me/report/ — the signed-in student's report (F15-1): their
+    per-lesson attendance sheet, the paid-status of their bills, and their own classroom
+    rank (their position only — never a leaderboard). 404 not_a_student if not one."""
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="The signed-in student's attendance / payment / rank report",
+        responses={200: OpenApiResponse(description="{attendance, payment, rank}"), 404: OpenApiResponse()},
+        tags=["students"],
+    )
+    def get(self, request):
+        student = selectors.student_profile_for(request.user)
+        if student is None:
+            raise NotFoundException(_("You do not have a student profile."), code="not_a_student")
+        return Response(selectors.student_report(student=student))
+
+
 class StudentViewSet(TenantSafeModelViewSet):
     resource = "students"
     object_scope = "branch"

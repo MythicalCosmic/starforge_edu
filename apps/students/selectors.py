@@ -62,6 +62,89 @@ def student_profile_for(user) -> StudentProfile | None:
     return StudentProfile.objects.select_related("current_cohort").filter(user=user).first()
 
 
+def _classroom_rank(student: StudentProfile) -> dict | None:
+    """The student's OWN standing in their cohort by average published-exam score —
+    just their position + the cohort size, never classmates' names or scores (dignity
+    DNA: a private report card, not a public leaderboard). None if they have no grades
+    or no cohort to rank within."""
+    from django.db.models import Avg, ExpressionWrapper, F, FloatField
+
+    from apps.academics.models import ExamResult
+
+    cohort = student.current_cohort
+    if cohort is None:
+        return None
+    averages = {
+        row["student_id"]: row["avg_pct"]
+        for row in ExamResult.objects.filter(
+            student__current_cohort=cohort,
+            # Only currently-enrolled peers count — a withdrawn/graduated classmate
+            # must not inflate the denominator or push a peer's rank down.
+            student__status__in=(StudentProfile.Status.ENROLLED, StudentProfile.Status.ACTIVE),
+            exam__is_published=True,
+        )
+        .values("student_id")
+        .annotate(
+            avg_pct=Avg(
+                ExpressionWrapper(F("score") * 100.0 / F("exam__max_score"), output_field=FloatField())
+            )
+        )
+    }
+    mine = averages.get(student.id)
+    if mine is None:
+        return None  # ungraded students aren't ranked
+    rank = 1 + sum(1 for other in averages.values() if other > mine)
+    return {"rank": rank, "of": len(averages), "average_pct": round(mine, 1)}
+
+
+def student_report(*, student: StudentProfile) -> dict:
+    """The student-app report (F15-1): a per-lesson attendance sheet, the paid-status of
+    their bills, and their own classroom rank — the three things a student checks daily,
+    student-scoped, in one read."""
+    from apps.attendance.models import AttendanceRecord
+    from apps.finance.models import Invoice
+    from apps.finance.selectors import outstanding_balance
+
+    now = timezone.now()
+    window = now - timedelta(days=90)  # a term-ish window
+    St = AttendanceRecord.Status
+    window_qs = AttendanceRecord.objects.filter(student=student, lesson__starts_at__gte=window)
+    # The rate is over the WHOLE window (uncapped aggregate); only the per-lesson sheet
+    # is capped, so a busy student's rate isn't silently computed over the last 100 rows.
+    agg = window_qs.aggregate(
+        counted=Count("id", filter=~Q(status=St.EXCUSED)),
+        attended=Count("id", filter=Q(status__in=(St.PRESENT, St.LATE))),
+    )
+    counted, attended = agg["counted"], agg["attended"]
+    attendance = {
+        "rate": round(attended / counted, 3) if counted else None,
+        "present": attended,
+        "of": counted,
+        "sheet": [
+            {"date": r.lesson.starts_at, "lesson": r.lesson.title, "status": r.status}
+            for r in window_qs.select_related("lesson").order_by("-lesson__starts_at")[:100]
+        ],
+    }
+
+    latest = Invoice.objects.filter(student=student).order_by("-created_at").first()
+    payment = {
+        "outstanding_uzs": str(outstanding_balance(student.pk)),
+        "has_overdue": Invoice.objects.filter(student=student, status=Invoice.Status.OVERDUE).exists(),
+        "latest_invoice": (
+            {
+                "number": latest.number,
+                "amount_uzs": str(latest.total_uzs),
+                "status": latest.status,
+                "due_date": latest.due_date,
+            }
+            if latest
+            else None
+        ),
+    }
+
+    return {"attendance": attendance, "payment": payment, "rank": _classroom_rank(student)}
+
+
 def student_dashboard(*, student: StudentProfile, user, roles) -> dict:
     """The signed-in student's cockpit (F4-1): their group, next lessons, open
     homework, recent published grades, outstanding balance, and outstanding rule
