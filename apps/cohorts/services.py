@@ -61,7 +61,10 @@ def enroll_student_in_cohort(*, cohort: Cohort, student, start_date=None) -> Coh
 def move_student(*, student, to_cohort: Cohort, reason: str = "", actor=None) -> dict[str, Any]:
     """End-date the student's active memberships and open a new one in
     `to_cohort`. History is retained; over-capacity is a soft warning, never a
-    block (Lane F contract)."""
+    block (Lane F contract). The student row is locked (F2-6) so two concurrent
+    moves can't each end-date the original and open a new one, leaving the student
+    in two active cohorts."""
+    student = type(student).objects.select_for_update().get(pk=student.pk)
     if to_cohort.is_archived:
         raise ValidationException(_("Target cohort is archived."), code="cohort_archived")
     if student.branch_id != to_cohort.branch_id:

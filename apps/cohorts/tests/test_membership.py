@@ -131,3 +131,22 @@ def test_student_patch_cannot_rewrite_cohort_or_branch(director, tenant_a):
         assert student.branch_id == branch.id  # unchanged
         assert student.academic_level == "B2"  # writable field applied
         assert CohortMembership.objects.filter(student=student).count() == 1
+
+
+def test_move_student_leaves_exactly_one_active_membership(tenant_a):
+    """move_student locks the student row (select_for_update inside its existing
+    @transaction.atomic) and must end-date the old membership, leaving the student
+    in exactly one active cohort (F2-6)."""
+    from apps.cohorts.services import move_student
+    from apps.cohorts.tests.factories import CohortMembershipFactory
+
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory.create()
+        cohort_a = CohortFactory.create(branch=branch, name="A")
+        cohort_b = CohortFactory.create(branch=branch, name="B")
+        student = StudentProfileFactory.create(branch=branch)
+        CohortMembershipFactory.create(cohort=cohort_a, student=student)
+        move_student(student=student, to_cohort=cohort_b)
+        active = CohortMembership.objects.filter(student=student, end_date__isnull=True)
+        assert active.count() == 1
+        assert active.get().cohort_id == cohort_b.id

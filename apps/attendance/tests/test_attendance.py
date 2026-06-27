@@ -605,3 +605,67 @@ def test_records_list_query_budget(tenant_a, user_in, as_user, django_assert_max
         body = client.get("/api/v1/attendance/records/").json()
     assert set(body) == {"count", "next", "previous", "results"}
     assert body["count"] == 5
+
+
+# --------------------------------------------------------------------------- #
+# F2-6 — attendance tolerates a mid-session membership change
+# --------------------------------------------------------------------------- #
+
+
+def test_attendance_tolerates_a_student_moved_after_the_lesson(tenant_a, user_in):
+    """A student moved out of the cohort AFTER attending the lesson must still be
+    markable — membership is checked as of the lesson date, not 'right now'."""
+    from apps.cohorts.services import move_student
+
+    teacher_user = user_in(tenant_a, roles=["teacher"])
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        profile = TeacherProfileFactory(user=teacher_user, branch=branch)
+        lesson = _make_lesson(branch=branch, teacher=profile)  # cohort A, started ~1h ago
+        (student,) = _enroll(lesson.cohort, branch=branch)
+        other = CohortFactory(branch=branch)
+        move_student(student=student, to_cohort=other)  # end-dates the cohort-A membership today
+        result = mark_attendance(
+            lesson=lesson, entries=[{"student": student, "status": Status.PRESENT}], actor=teacher_user
+        )
+        assert result["created"] == 1
+
+
+def test_attendance_rejects_a_student_who_left_before_the_lesson(tenant_a, user_in):
+    """The as-of-date check still rejects a student whose membership ended BEFORE the
+    lesson (they genuinely weren't in the cohort when it happened)."""
+    teacher_user = user_in(tenant_a, roles=["teacher"])
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        profile = TeacherProfileFactory(user=teacher_user, branch=branch)
+        lesson = _make_lesson(branch=branch, teacher=profile)
+        student: Any = StudentProfileFactory(branch=branch)
+        CohortMembershipFactory(
+            cohort=lesson.cohort,
+            student=student,
+            end_date=lesson.starts_at.date() - timedelta(days=1),  # left the day before
+        )
+        with pytest.raises(UnprocessableEntity) as exc:
+            mark_attendance(
+                lesson=lesson, entries=[{"student": student, "status": Status.PRESENT}], actor=teacher_user
+            )
+        assert exc.value.code == "student_not_in_cohort"
+
+
+def test_auto_mark_absent_includes_a_student_moved_after_the_lesson(tenant_a):
+    """The absent-sweep is symmetric with mark_attendance: a no-show moved out after
+    the lesson still gets their absent record for the lesson they missed."""
+    from apps.cohorts.services import move_student
+
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        teacher = TeacherProfileFactory(branch=branch)
+        lesson = _make_lesson(
+            branch=branch, teacher=teacher, starts_at=timezone.now() - timedelta(hours=2)
+        )
+        (student,) = _enroll(lesson.cohort, branch=branch)  # never marked -> a no-show
+        move_student(student=student, to_cohort=CohortFactory(branch=branch))
+        assert auto_mark_absent() == 1
+        record = AttendanceRecord.objects.get(lesson=lesson, student=student)
+        assert record.status == Status.ABSENT
+        assert record.auto_marked is True

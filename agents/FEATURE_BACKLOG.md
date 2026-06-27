@@ -76,7 +76,7 @@ premium AI tiering (Opus/Sonnet/Haiku, metered).
 | F2-3 | Rich filters: status, branch, cohort(with/without), level, gender, age range, location, school, teacher, join-date range | `GET /students/?...`; type-checked → 400 not 500 | extend (django-filter) | F2-1 | DONE |
 | F2-4 | Stats snapshot endpoint | `GET /students/stats/` → totals, with/without group, blocked, by status/branch/level, joined/left in window | new selector | F2-2 | DONE |
 | F2-5 | Comparison/delta endpoint | `GET /students/comparison/?metric=joined\|left&unit=hour\|day\|week\|month\|year` → current vs previous + delta | new selector (uses `EnrollmentEvent.created_at`, a datetime → hourly works) | F2-4 | DONE |
-| F2-6 | Race-safety: remove-from-group while attendance is being taken | `move_student`/unenroll under `select_for_update`; attendance write tolerates a mid-session membership change | harden existing | cohorts/attendance | TODO |
+| F2-6 | Race-safety: remove-from-group while attendance is being taken | `mark_attendance` + `auto_mark_absent` now validate membership **as of the lesson date** (not "right now"), so a student moved out after a lesson is still markable / gets their absent record (the mid-session move no longer blocks the register); `move_student` locks the student row (`select_for_update`) so concurrent moves can't leave two active memberships. Symmetric-path + boundary (moved-after vs left-before) tests. | harden existing | cohorts/attendance | DONE |
 
 ## Feature 3 — Teacher dashboard
 | # | Feature | Acceptance | Reuse/New | Deps | Status |

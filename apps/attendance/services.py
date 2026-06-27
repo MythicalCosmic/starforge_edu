@@ -11,6 +11,7 @@ from __future__ import annotations
 import datetime as dt
 
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
@@ -99,15 +100,22 @@ def mark_attendance(*, lesson: Lesson, entries: list[dict], actor) -> dict:
     _assert_within_correction_window(lesson, actor, roles, settings)
 
     student_ids = [e["student"].pk for e in entries]
-    active_ids = set(
+    # F2-6: membership is checked AS OF THE LESSON DATE, not "right now". A student
+    # who was in the cohort when the lesson happened but has since been moved out
+    # (move_student end-dates their membership) must still be markable — otherwise a
+    # mid-session removal would block the teacher from recording the whole register.
+    lesson_date = lesson.starts_at.date()
+    member_ids = set(
         CohortMembership.objects.filter(
-            cohort_id=lesson.cohort_id, student_id__in=student_ids, end_date__isnull=True
-        ).values_list("student_id", flat=True)
+            cohort_id=lesson.cohort_id, student_id__in=student_ids, start_date__lte=lesson_date
+        )
+        .filter(Q(end_date__isnull=True) | Q(end_date__gte=lesson_date))
+        .values_list("student_id", flat=True)
     )
-    not_members = [sid for sid in student_ids if sid not in active_ids]
+    not_members = [sid for sid in student_ids if sid not in member_ids]
     if not_members:
         raise UnprocessableEntity(
-            _("One or more students are not active members of this lesson's cohort."),
+            _("One or more students were not members of this lesson's cohort on the lesson date."),
             code="student_not_in_cohort",
             fields={"students": not_members},
         )
@@ -149,9 +157,14 @@ def auto_mark_absent() -> int:
     created = 0
     lessons = Lesson.objects.filter(status=Lesson.Status.SCHEDULED, starts_at__lte=cutoff)
     for lesson in lessons:
-        member_ids = CohortMembership.objects.filter(
-            cohort_id=lesson.cohort_id, end_date__isnull=True
-        ).values_list("student_id", flat=True)
+        # F2-6 (symmetric with mark_attendance): roster as of the lesson date, so a
+        # no-show who was moved out after the lesson still gets their absent record.
+        lesson_date = lesson.starts_at.date()
+        member_ids = (
+            CohortMembership.objects.filter(cohort_id=lesson.cohort_id, start_date__lte=lesson_date)
+            .filter(Q(end_date__isnull=True) | Q(end_date__gte=lesson_date))
+            .values_list("student_id", flat=True)
+        )
         already = set(AttendanceRecord.objects.filter(lesson=lesson).values_list("student_id", flat=True))
         for student_id in member_ids:
             if student_id in already:
