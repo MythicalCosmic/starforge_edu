@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from django.db.models import Q
 from django.utils.translation import gettext_lazy as _
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from apps.org.models import Branch
-from apps.placement import services
+from apps.placement import selectors, services
 from apps.placement.models import PlacementAttempt, PlacementTest
 from apps.placement.serializers import (
     AssignAttemptSerializer,
@@ -178,7 +178,9 @@ class PlacementAttemptViewSet(TenantSafeModelViewSet):
     serializer_class = PlacementAttemptSerializer
     resource = "placement"
     http_method_names = ["get", "post", "head", "options"]  # no DELETE on graded artifacts
-    required_perms = {"create": "placement:write"}  # assigning is a staff action
+    # assigning + reading group suggestions are staff actions; reading/submitting an
+    # attempt are self-actions (IsAuthenticated, row-scoped) — see get_permissions.
+    required_perms = {"create": "placement:write", "suggestions": "placement:write"}
     filterset_fields = ("status", "test", "student")
 
     # Reading + submitting are open to any authenticated user and row-scoped below
@@ -257,3 +259,18 @@ class PlacementAttemptViewSet(TenantSafeModelViewSet):
         ser.is_valid(raise_exception=True)
         attempt = services.submit_attempt(attempt=attempt, answers=ser.validated_data["answers"])
         return Response(self.get_serializer(attempt).data)
+
+    @extend_schema(
+        responses={
+            200: OpenApiResponse(
+                description="[{cohort_id, name, level, level_match, seats_available, start_date}]"
+            )
+        },
+        tags=["placement"],
+    )
+    @action(detail=True, methods=["get"])
+    def suggestions(self, request, pk=None):
+        """F1-7: cohorts in the lead's branch they could join, ranked by level fit
+        and seats. Staff-only — it's reception's placing tool, not the lead's."""
+        attempt = self.get_object()
+        return Response(selectors.suggest_cohorts(student=attempt.student))
