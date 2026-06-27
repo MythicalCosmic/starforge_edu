@@ -154,6 +154,7 @@ class CenterSettingsSerializer(serializers.ModelSerializer):
         model = CenterSettings
         fields = (
             "open_registration",
+            "require_group_acceptance",  # F1-8: group-placement maker-checker toggle
             "grading_scheme",
             "honor_roll_min",
             "academic_warning_max",

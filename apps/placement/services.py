@@ -14,7 +14,15 @@ from django.db import IntegrityError, transaction
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
-from apps.placement.models import PlacementAnswer, PlacementAttempt, PlacementQuestion, PlacementTest
+from apps.cohorts.services import enroll_student_in_cohort
+from apps.org.selectors import get_center_settings
+from apps.placement.models import (
+    GroupProposal,
+    PlacementAnswer,
+    PlacementAttempt,
+    PlacementQuestion,
+    PlacementTest,
+)
 from apps.students.models import StudentProfile
 from core.exceptions import (
     ConflictException,
@@ -319,3 +327,98 @@ def submit_attempt(*, attempt: PlacementAttempt, answers: list[dict]) -> Placeme
         attempt.student.academic_level = attempt.level
         attempt.student.save(update_fields=["academic_level", "updated_at"])
     return attempt
+
+
+# ---------------------------------------------------------------------------
+# Group placement: propose → accept / reject (F1-8)
+# ---------------------------------------------------------------------------
+
+
+def _assert_proposable(student, cohort) -> None:
+    if student.status not in _PROSPECTIVE_STATUSES:
+        raise UnprocessableEntity(
+            _("Only a prospective student can be placed into a group."), code="student_not_prospective"
+        )
+    if cohort.is_archived:
+        raise ValidationException(_("That group is archived."), code="cohort_archived")
+    if student.branch_id != cohort.branch_id:
+        raise ValidationException(
+            _("The student and the group are in different branches."), code="student_branch_mismatch"
+        )
+
+
+def _finalize_accept(proposal: GroupProposal, *, decided_by) -> None:
+    """Enroll the lead into the proposed cohort and mark the proposal accepted."""
+    membership = enroll_student_in_cohort(cohort=proposal.cohort, student=proposal.student)
+    proposal.status = GroupProposal.Status.ACCEPTED
+    proposal.decided_by = decided_by
+    proposal.decided_at = timezone.now()
+    proposal.membership = membership
+    proposal.save(update_fields=["status", "decided_by", "decided_at", "membership", "updated_at"])
+
+
+@transaction.atomic
+def propose_group(*, student, cohort, proposed_by) -> GroupProposal:
+    """Reception proposes a cohort for a placed lead. If the centre does not require
+    a manager's acceptance, the proposal auto-accepts and enrolls immediately."""
+    _assert_proposable(student, cohort)
+    if GroupProposal.objects.filter(
+        student=student, cohort=cohort, status=GroupProposal.Status.PENDING
+    ).exists():
+        raise ConflictException(
+            _("This student already has a pending proposal for this group."), code="already_proposed"
+        )
+    try:
+        # Savepoint so a racing duplicate hits the partial unique constraint as a
+        # clean 409, not a 500 (mirrors assign_test / enroll_student_in_cohort).
+        with transaction.atomic():
+            proposal = GroupProposal.objects.create(
+                student=student, cohort=cohort, proposed_by=proposed_by
+            )
+    except IntegrityError:
+        raise ConflictException(
+            _("This student already has a pending proposal for this group."), code="already_proposed"
+        ) from None
+    if not get_center_settings().require_group_acceptance:
+        # Toggle off: reception assigns directly — accept + enroll now (no second sign-off).
+        _finalize_accept(proposal, decided_by=proposed_by)
+    return proposal
+
+
+@transaction.atomic
+def accept_proposal(*, proposal: GroupProposal, manager) -> GroupProposal:
+    """A manager accepts a pending proposal → the lead is enrolled. Maker-checker:
+    the manager must differ from the proposer (the centre turned acceptance on
+    precisely to get a second pair of eyes). The row is locked against a race."""
+    proposal = (
+        GroupProposal.objects.select_for_update().select_related("student", "cohort").get(pk=proposal.pk)
+    )
+    if proposal.status != GroupProposal.Status.PENDING:
+        raise UnprocessableEntity(
+            _("Only a pending proposal can be accepted."), code="proposal_not_pending"
+        )
+    if proposal.proposed_by_id is not None and proposal.proposed_by_id == manager.id:
+        raise PermissionException(
+            _("You cannot accept a group proposal you made yourself."), code="self_acceptance"
+        )
+    # Re-assert the propose-time invariants at decision time: a proposal can sit
+    # PENDING while the lead's status/branch or the cohort drifts (symmetric paths).
+    _assert_proposable(proposal.student, proposal.cohort)
+    _finalize_accept(proposal, decided_by=manager)
+    return proposal
+
+
+@transaction.atomic
+def reject_proposal(*, proposal: GroupProposal, manager, reason: str) -> GroupProposal:
+    """A manager rejects a pending proposal with a reason. No enrollment happens."""
+    proposal = GroupProposal.objects.select_for_update().get(pk=proposal.pk)
+    if proposal.status != GroupProposal.Status.PENDING:
+        raise UnprocessableEntity(
+            _("Only a pending proposal can be rejected."), code="proposal_not_pending"
+        )
+    proposal.status = GroupProposal.Status.REJECTED
+    proposal.decided_by = manager
+    proposal.decided_at = timezone.now()
+    proposal.reject_reason = reason
+    proposal.save(update_fields=["status", "decided_by", "decided_at", "reject_reason", "updated_at"])
+    return proposal

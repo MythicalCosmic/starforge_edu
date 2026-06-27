@@ -115,6 +115,53 @@ class PlacementAttempt(models.Model):
         return f"attempt#{self.pk}:test#{self.test_id}:student#{self.student_id}"
 
 
+class GroupProposal(models.Model):
+    """F1-8 — reception proposes a cohort for a placed lead; a manager accepts (→ the
+    lead is enrolled) or rejects. When CenterSettings.require_group_acceptance is off,
+    the proposal auto-accepts and enrolls on creation (reception assigns directly)."""
+
+    class Status(models.TextChoices):
+        PENDING = "pending", _("Pending")
+        ACCEPTED = "accepted", _("Accepted")
+        REJECTED = "rejected", _("Rejected")
+
+    student = models.ForeignKey(
+        "students.StudentProfile", on_delete=models.CASCADE, related_name="group_proposals"
+    )
+    cohort = models.ForeignKey("cohorts.Cohort", on_delete=models.PROTECT, related_name="group_proposals")
+    proposed_by = models.ForeignKey(
+        "users.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING, db_index=True)
+    # The manager who accepted/rejected (or the proposer, when acceptance isn't required).
+    decided_by = models.ForeignKey(
+        "users.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    decided_at = models.DateTimeField(null=True, blank=True)
+    reject_reason = models.CharField(max_length=255, blank=True)
+    # The enrollment created when the proposal was accepted (audit trail).
+    membership = models.ForeignKey(
+        "cohorts.CohortMembership", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+        indexes = [models.Index(fields=("status", "created_at"))]
+        constraints = [
+            # Race-safe backstop for the one-pending-proposal-per-group guard.
+            models.UniqueConstraint(
+                fields=("student", "cohort"),
+                condition=models.Q(status="pending"),
+                name="one_pending_proposal_per_student_cohort",
+            ),
+        ]
+
+    def __str__(self) -> str:  # pragma: no cover
+        return f"proposal#{self.pk}:student#{self.student_id}->cohort#{self.cohort_id} ({self.status})"
+
+
 class PlacementAnswer(models.Model):
     attempt = models.ForeignKey(PlacementAttempt, on_delete=models.CASCADE, related_name="answers")
     question = models.ForeignKey(PlacementQuestion, on_delete=models.PROTECT, related_name="+")

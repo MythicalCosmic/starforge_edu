@@ -4,8 +4,10 @@ from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
 
 from apps.academics.models import Subject
+from apps.cohorts.models import Cohort
 from apps.org.models import Branch
 from apps.placement.models import (
+    GroupProposal,
     PlacementAnswer,
     PlacementAttempt,
     PlacementQuestion,
@@ -143,6 +145,29 @@ class LeadAnswerSerializer(serializers.ModelSerializer):
 class LeadAttemptSerializer(PlacementAttemptSerializer):
     # Narrower nested serializer (drops is_correct/awarded_points) for test-takers.
     answers = LeadAnswerSerializer(many=True, read_only=True)  # type: ignore[assignment]
+
+
+class GroupProposalSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = GroupProposal
+        fields = (
+            "id",
+            "student",
+            "cohort",
+            "status",
+            "proposed_by",
+            "decided_by",
+            "decided_at",
+            "reject_reason",
+            "membership",
+            "created_at",
+        )
+        read_only_fields = fields
+
+
+class ProposeGroupSerializer(serializers.Serializer):
+    student = serializers.PrimaryKeyRelatedField(queryset=StudentProfile.objects.all())
+    cohort = serializers.PrimaryKeyRelatedField(queryset=Cohort.objects.all())
 
 
 class AssignAttemptSerializer(serializers.Serializer):

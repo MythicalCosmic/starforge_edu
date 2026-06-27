@@ -10,15 +10,17 @@ from rest_framework.response import Response
 
 from apps.org.models import Branch
 from apps.placement import selectors, services
-from apps.placement.models import PlacementAttempt, PlacementTest
+from apps.placement.models import GroupProposal, PlacementAttempt, PlacementTest
 from apps.placement.serializers import (
     AssignAttemptSerializer,
+    GroupProposalSerializer,
     LeadAttemptSerializer,
     PlacementAttemptSerializer,
     PlacementQuestionSerializer,
     PlacementTestCreateSerializer,
     PlacementTestSerializer,
     PlacementTestUpdateSerializer,
+    ProposeGroupSerializer,
     RejectSerializer,
     SubmitAttemptSerializer,
 )
@@ -274,3 +276,74 @@ class PlacementAttemptViewSet(TenantSafeModelViewSet):
         and seats. Staff-only — it's reception's placing tool, not the lead's."""
         attempt = self.get_object()
         return Response(selectors.suggest_cohorts(student=attempt.student))
+
+
+class GroupProposalViewSet(TenantSafeModelViewSet):
+    """Group placement (F1-8). Reception (placement:write) proposes a cohort for a
+    placed lead; a manager (placement:approve) accepts (→ the lead is enrolled) or
+    rejects. When the centre's require_group_acceptance toggle is off, the proposal
+    auto-accepts and enrolls on creation (reception assigns directly)."""
+
+    serializer_class = GroupProposalSerializer
+    resource = "placement"
+    http_method_names = ["get", "post", "head", "options"]  # no DELETE on a decided record
+    required_perms = {
+        **default_perms("placement"),
+        "accept": "placement:approve",
+        "reject": "placement:approve",
+    }
+    filterset_fields = ("status", "student", "cohort")
+
+    def _branch_ids(self) -> set[int]:
+        return {m.branch_id for m in get_role_memberships(self.request) if m.branch_id}
+
+    def _is_director(self) -> bool:
+        return self.request.user.is_superuser or Role.DIRECTOR in get_user_roles(self.request)
+
+    def get_queryset(self):
+        qs = GroupProposal.objects.select_related(
+            "student", "cohort", "proposed_by", "decided_by"
+        )
+        if self._is_director():
+            return qs
+        # Staff see proposals they made or for a cohort in their branch.
+        return qs.filter(
+            Q(proposed_by=self.request.user) | Q(cohort__branch_id__in=self._branch_ids())
+        ).distinct()
+
+    def _assert_in_scope(self, cohort) -> None:
+        if self._is_director():
+            return
+        if cohort.branch_id not in self._branch_ids():
+            raise PermissionException(
+                _("You can only place students into your own branch's groups."), code="cross_branch"
+            )
+
+    @extend_schema(
+        request=ProposeGroupSerializer, responses={201: GroupProposalSerializer}, tags=["placement"]
+    )
+    def create(self, request, *args, **kwargs):
+        ser = ProposeGroupSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        cohort = ser.validated_data["cohort"]
+        self._assert_in_scope(cohort)
+        proposal = services.propose_group(
+            student=ser.validated_data["student"], cohort=cohort, proposed_by=request.user
+        )
+        return Response(GroupProposalSerializer(proposal).data, status=status.HTTP_201_CREATED)
+
+    @extend_schema(request=None, responses={200: GroupProposalSerializer}, tags=["placement"])
+    @action(detail=True, methods=["post"])
+    def accept(self, request, pk=None):
+        proposal = services.accept_proposal(proposal=self.get_object(), manager=request.user)
+        return Response(GroupProposalSerializer(proposal).data)
+
+    @extend_schema(request=RejectSerializer, responses={200: GroupProposalSerializer}, tags=["placement"])
+    @action(detail=True, methods=["post"])
+    def reject(self, request, pk=None):
+        ser = RejectSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        proposal = services.reject_proposal(
+            proposal=self.get_object(), manager=request.user, reason=ser.validated_data["reason"]
+        )
+        return Response(GroupProposalSerializer(proposal).data)

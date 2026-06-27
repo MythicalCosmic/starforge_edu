@@ -103,6 +103,9 @@ class CenterSettings(models.Model):
         ENGLISH = "en", _("English")
 
     open_registration = models.BooleanField(default=False)  # TD-17
+    # F1-8 / D-8: when True, a reception group proposal needs a manager's acceptance
+    # before the lead is enrolled; when False, reception's proposal enrolls directly.
+    require_group_acceptance = models.BooleanField(default=False)
     # D4-LF-3 (TD-13): the center's default notification language. Blank means
     # "no preference" — the locale fallback chain then uses the en→uz lingua
     # franca order. A center serving Uzbek can set "uz" to prefer it over en.
