@@ -13,6 +13,7 @@ from apps.placement import selectors, services
 from apps.placement.models import GroupProposal, PlacementAttempt, PlacementTest
 from apps.placement.serializers import (
     AssignAttemptSerializer,
+    GeneratePlacementSerializer,
     GroupProposalSerializer,
     LeadAttemptSerializer,
     PlacementAttemptSerializer,
@@ -49,6 +50,7 @@ class PlacementTestViewSet(TenantSafeModelViewSet):
         **default_perms("placement"),
         "add_question": "placement:write",
         "remove_question": "placement:write",
+        "generate": "placement:write",
         "submit": "placement:write",
         "approve": "placement:approve",
         "reject": "placement:approve",
@@ -137,6 +139,25 @@ class PlacementTestViewSet(TenantSafeModelViewSet):
         ser.is_valid(raise_exception=True)
         question = services.add_question(test=test, **ser.validated_data)
         return Response(PlacementQuestionSerializer(question).data, status=status.HTTP_201_CREATED)
+
+    @extend_schema(
+        request=GeneratePlacementSerializer,
+        responses={202: OpenApiResponse(description="{request_id, status} — poll /ai/requests/{id}/")},
+        tags=["placement"],
+    )
+    @action(detail=True, methods=["post"])
+    def generate(self, request, pk=None):
+        """F1-3: ask the AI to draft questions onto this DRAFT test (async). The
+        generated questions are validated + appended; poll the AI request for status."""
+        ser = GeneratePlacementSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        ai_request = services.request_placement_generation(
+            test=self.get_object(), requested_by=request.user, **ser.validated_data
+        )
+        return Response(
+            {"request_id": ai_request.pk, "status": ai_request.status},
+            status=status.HTTP_202_ACCEPTED,
+        )
 
     @extend_schema(request=None, responses={204: None}, tags=["placement"])
     @action(detail=True, methods=["post"], url_path=r"questions/(?P<question_id>\d+)/remove")

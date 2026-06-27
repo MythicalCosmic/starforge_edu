@@ -8,6 +8,8 @@ the state check + maker-checker self-check are race-free.
 
 from __future__ import annotations
 
+import json
+import logging
 from typing import Any
 
 from django.db import IntegrityError, transaction
@@ -31,6 +33,7 @@ from core.exceptions import (
     ValidationException,
 )
 
+logger = logging.getLogger("starforge.placement")
 _QT = PlacementQuestion.QuestionType
 # Placement is an intake tool: only prospective students get a test, so submit's
 # academic_level write never clobbers an enrolled student's curated level.
@@ -89,6 +92,11 @@ def _validate_question(question_type: str, options: Any, correct_answer: Any) ->
                 _("A writing question is marked by a person and has no answer key."),
                 code="writing_has_no_answer",
             )
+    else:
+        # Belt-and-suspenders for the AI path (the serializer enforces choices on the
+        # manual path): an unknown type would otherwise be stored as junk or overflow
+        # the varchar(16) column on bulk_create.
+        raise ValidationException(_("Unknown question type."), code="invalid_question_type")
 
 
 @transaction.atomic
@@ -422,3 +430,137 @@ def reject_proposal(*, proposal: GroupProposal, manager, reason: str) -> GroupPr
     proposal.reject_reason = reason
     proposal.save(update_fields=["status", "decided_by", "decided_at", "reject_reason", "updated_at"])
     return proposal
+
+
+# ---------------------------------------------------------------------------
+# AI question generation (F1-3) — reuses the apps.ai budget/redaction pipeline
+# ---------------------------------------------------------------------------
+
+_MAX_GENERATED_QUESTIONS = 100
+_MAX_QUESTION_POINTS = 100  # sane domain cap, well under the smallint column limit
+
+
+def request_placement_generation(
+    *, test: PlacementTest, count: int, difficulty: str = "medium", topic: str = "", requested_by=None
+):
+    """Ask the AI to draft questions for a DRAFT test. Gated by the centre's AI-
+    generation toggle, budget-reserved, and enqueued on commit; the generated
+    questions are applied to the draft by the task (apply_generated_questions)."""
+    from apps.ai.models import AIFeature
+    from apps.ai.services import AIFeatureDisabled, active_prompt, check_and_reserve_budget
+    from core.utils import current_schema
+
+    if test.status != PlacementTest.Status.DRAFT:
+        raise UnprocessableEntity(
+            _("Questions can only be generated for a draft test."), code="test_not_draft"
+        )
+    if not get_center_settings().ai_exam_generation_enabled:
+        raise AIFeatureDisabled(code="feature_disabled")
+
+    prompt = active_prompt(AIFeature.PLACEMENT_GENERATION)
+    ai_request = check_and_reserve_budget(
+        feature=AIFeature.PLACEMENT_GENERATION,
+        estimated_tokens=prompt.token_cost_cap,
+        requested_by=requested_by,
+        source_app="placement",
+        source_id=test.id,
+    )
+    if ai_request.status == ai_request.Status.QUEUED:
+        schema = current_schema()
+        params = {
+            "test_id": test.id,
+            "count": count,
+            "difficulty": difficulty,
+            "topic": topic,
+        }
+        transaction.on_commit(lambda: _enqueue_placement_generation(ai_request.pk, params, schema))
+    return ai_request
+
+
+def _enqueue_placement_generation(ai_request_id: int, params: dict, schema: str) -> None:
+    from celery_tasks.ai_tasks import run_placement_generation
+
+    run_placement_generation.delay(ai_request_id, params=params, _schema_name=schema)
+
+
+def _parse_question_payload(output_text: str) -> list:
+    """Best-effort: extract the JSON array of questions, tolerating ``` fences."""
+    text = (output_text or "").strip()
+    if text.startswith("```"):
+        inner = text[3:]
+        if inner[:4].lower() == "json":
+            inner = inner[4:]
+        text = inner.rsplit("```", 1)[0].strip()
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError, RecursionError):
+        # Untrusted model output: a malformed or pathologically-nested payload must
+        # never escape this parser (the apply hook is tolerant-by-design).
+        logger.warning("placement gen: AI output was not valid JSON")
+        return []
+    return data if isinstance(data, list) else []
+
+
+@transaction.atomic
+def apply_generated_questions(*, test_id: int, output_text: str) -> int:
+    """Parse the AI's JSON question array and append the VALID ones to the DRAFT
+    test. Tolerant by design: a malformed payload or an individual bad question is
+    skipped, never raised — so a partial result still applies and the AIRequest still
+    succeeds (the manager reviews + submits the draft as usual). Returns count added."""
+    try:
+        test = PlacementTest.objects.select_for_update().get(pk=test_id)
+    except PlacementTest.DoesNotExist:
+        return 0  # the draft was deleted between the request and the task finishing
+    if test.status != PlacementTest.Status.DRAFT:
+        # The test left DRAFT between the request and the task finishing — never
+        # mutate a pending/approved test (it may already be in review or live).
+        return 0
+    last = test.questions.order_by("-order").first()
+    order = (last.order + 1) if last else 0
+    # Dedup against existing prompts so a task RETRY (which re-runs the persist hook
+    # after a mid-run failure) can't double-apply the same questions, and a model
+    # that repeats a question within one batch only adds it once.
+    seen_prompts = set(test.questions.values_list("prompt", flat=True))
+    rows: list[PlacementQuestion] = []
+    for item in _parse_question_payload(output_text)[:_MAX_GENERATED_QUESTIONS]:
+        if not isinstance(item, dict):
+            continue
+        prompt_text = item.get("prompt")
+        question_type = item.get("question_type")
+        if not isinstance(prompt_text, str) or not prompt_text.strip():
+            continue
+        if not isinstance(question_type, str) or prompt_text in seen_prompts:
+            continue
+        options = item.get("options") or []
+        correct = None if question_type == _QT.WRITING else item.get("correct_answer")
+        # Coerce a stringified boolean the model may emit for true/false.
+        if (
+            question_type == _QT.TRUE_FALSE
+            and isinstance(correct, str)
+            and correct.strip().lower() in ("true", "false")
+        ):
+            correct = correct.strip().lower() == "true"
+        points = item.get("points", 1)
+        if not isinstance(points, int) or isinstance(points, bool) or points < 1:
+            points = 1
+        points = min(points, _MAX_QUESTION_POINTS)  # bound it (smallint column)
+        try:
+            _validate_question(question_type, options, correct)
+        except (ValidationException, UnprocessableEntity):
+            continue  # skip a question the model got wrong; keep the good ones
+        seen_prompts.add(prompt_text)
+        rows.append(
+            PlacementQuestion(
+                test=test,
+                prompt=prompt_text,
+                question_type=question_type,
+                options=options if question_type == _QT.SINGLE_CHOICE else [],
+                correct_answer=correct,
+                points=points,
+                order=order,
+            )
+        )
+        order += 1
+    if rows:
+        PlacementQuestion.objects.bulk_create(rows)
+    return len(rows)

@@ -283,6 +283,41 @@ def run_content_summary(self, lesson_file_id: int, *, requested_by: int | None =
     return _run_with_retry(self, ai_request.pk, build_prompt=_build)
 
 
+# ---------------------------------------------------------------------------
+# Placement test generation (F1-3)
+# ---------------------------------------------------------------------------
+
+
+@app.task(bind=True, max_retries=3, retry_backoff=True, acks_late=True)
+def run_placement_generation(self, ai_request_id: int, *, params: dict | None = None) -> str | None:
+    """Generate placement questions for a draft test; the persist hook parses the
+    JSON output and appends the valid questions to the DRAFT test."""
+    params = params or {}
+
+    test_id = int(params.get("test_id") or 0)
+
+    def _build(prompt, request):
+        from apps.placement.models import PlacementTest
+        from apps.placement.services import apply_generated_questions
+
+        test = PlacementTest.objects.filter(pk=test_id).select_related("subject").first()
+        subject_name = test.subject.name if test is not None and test.subject is not None else "general"
+        body = prompt.user_template.format(
+            subject=subject_name,
+            count=params.get("count", 10),
+            difficulty=params.get("difficulty", "medium"),
+            topic=params.get("topic") or "general placement",
+        )
+        # No student PII in a placement-gen prompt; persist applies the questions.
+        return (
+            body,
+            [],
+            lambda restored: apply_generated_questions(test_id=test_id, output_text=restored),
+        )
+
+    return _run_with_retry(self, ai_request_id, build_prompt=_build)
+
+
 def _prompt_cap(feature: str) -> int:
     """The active prompt's token cost cap = the budget estimate (TD-13)."""
     from apps.ai.services import active_prompt

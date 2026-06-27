@@ -79,6 +79,14 @@ class PlacementTestUpdateSerializer(serializers.Serializer):
     )
 
 
+class GeneratePlacementSerializer(serializers.Serializer):
+    count = serializers.IntegerField(min_value=1, max_value=50)
+    difficulty = serializers.ChoiceField(
+        choices=("easy", "medium", "hard"), required=False, default="medium"
+    )
+    topic = serializers.CharField(max_length=200, required=False, allow_blank=True, default="")
+
+
 class RejectSerializer(serializers.Serializer):
     reason = serializers.CharField(max_length=255)
 
