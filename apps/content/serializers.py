@@ -105,6 +105,15 @@ class LessonFileSerializer(serializers.ModelSerializer):
             "view_count",
             "download_count",
             "created_at",
+            # F4-5 dual-approval / publication state. The *_by signer identities
+            # make the maker-checker trail (two named, different people) visible.
+            "is_approved_teacher",
+            "approved_teacher_by",
+            "approved_teacher_at",
+            "is_approved_manager",
+            "approved_manager_by",
+            "approved_manager_at",
+            "is_downloadable",
         )
         read_only_fields = fields
 
@@ -114,6 +123,13 @@ class LessonFileSerializer(serializers.ModelSerializer):
         from infrastructure.storage.s3_client import presign_download
 
         return presign_download(obj.thumbnail_key, expires_in=300)
+
+
+class ApproveManagerSerializer(serializers.Serializer):
+    """Manager (second) approval body — optionally sets the view-only toggle.
+    Omitting ``is_downloadable`` leaves the file's current setting untouched."""
+
+    is_downloadable = serializers.BooleanField(required=False)
 
 
 class ContentUploadUrlSerializer(serializers.Serializer):

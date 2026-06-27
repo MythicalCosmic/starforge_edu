@@ -67,6 +67,11 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "schedule:*",
         "reports:read",
         "reports:write",  # D4-LB-5
+        # F4-5: HOD is the manager-leg approver for content publication (reads
+        # the library, gives the second sign-off, can also sign the teacher leg).
+        "content:read",
+        "content:approve",
+        "content:publish",
         "audit:read",
         # D4-LA-8: AI request log + budget snapshot + exam generation (read+write).
         # ai:manage (budget edits) stays director-only via *:*.

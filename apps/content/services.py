@@ -15,12 +15,14 @@ from pathlib import PurePosixPath
 
 from django.db import transaction
 from django.db.models import F
+from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
 from apps.content.models import FileView, LessonFile
 from apps.content.signals import file_upload_confirmed
 from apps.org.selectors import get_center_settings
-from core.exceptions import ConflictException, UnprocessableEntity
+from core.exceptions import ConflictException, PermissionException, UnprocessableEntity
+from core.permissions import Role
 from core.utils import current_schema
 from infrastructure.storage.s3_client import (
     copy_object,
@@ -290,11 +292,15 @@ def generate_thumbnail(file_id: int) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def download_url(*, file: LessonFile, user) -> dict:
+def download_url(*, file: LessonFile, user, actor_is_staff: bool = False) -> dict:
     """Signed GET (TTL 300) for a CLEAN file; F()-increments download_count and
-    records a FileView. Visibility is already enforced by the scoped queryset."""
+    records a FileView. Visibility is already enforced by the scoped queryset.
+    F4-5: a view-only file (``is_downloadable=False``) yields no download URL to
+    learners — only content staff may still pull the raw bytes to manage it."""
     if file.status != LessonFile.Status.CLEAN:
         raise ConflictException(_("This file is not available for download."), code="file_not_clean")
+    if not file.is_downloadable and not actor_is_staff:
+        raise ConflictException(_("This file is view-only and cannot be downloaded."), code="file_view_only")
     LessonFile.objects.filter(pk=file.pk).update(download_count=F("download_count") + 1)
     FileView.objects.create(file=file, user=user, action=FileView.Action.DOWNLOAD)
     return {"url": presign_download(file.s3_key, expires_in=300), "expires_in": 300}
@@ -303,6 +309,82 @@ def download_url(*, file: LessonFile, user) -> dict:
 def track_view(*, file: LessonFile, user) -> None:
     LessonFile.objects.filter(pk=file.pk).update(view_count=F("view_count") + 1)
     FileView.objects.create(file=file, user=user, action=FileView.Action.VIEW)
+
+
+# ---------------------------------------------------------------------------
+# Dual publication approval (F4-5)
+# ---------------------------------------------------------------------------
+
+# Roles allowed to give the elevated manager (second) approval. The teacher's
+# ``content:*`` wildcard would otherwise also satisfy ``content:publish``, so the
+# manager leg is gated on a manager ROLE in addition to the permission code.
+_MANAGER_APPROVAL_ROLES = (Role.DIRECTOR, Role.HEAD_OF_DEPT)
+
+
+@transaction.atomic
+def approve_teacher_leg(*, file: LessonFile, actor) -> LessonFile:
+    """First of two sign-offs. Records the teacher who vouches for the file. The
+    row is locked so the already-approved guard and the recorded signer are
+    race-free (matches the maker-checker discipline of apps/approvals)."""
+    file = LessonFile.objects.select_for_update().get(pk=file.pk)
+    if file.status != LessonFile.Status.CLEAN:
+        raise ConflictException(_("Only a clean file can be approved."), code="file_not_clean")
+    if file.is_approved_teacher:
+        raise ConflictException(
+            _("This file already has teacher approval."), code="teacher_already_approved"
+        )
+    file.is_approved_teacher = True
+    file.approved_teacher_by = actor
+    file.approved_teacher_at = timezone.now()
+    file.save(
+        update_fields=[
+            "is_approved_teacher",
+            "approved_teacher_by",
+            "approved_teacher_at",
+            "updated_at",
+        ]
+    )
+    return file
+
+
+@transaction.atomic
+def approve_manager_leg(
+    *, file: LessonFile, actor, actor_roles, is_downloadable: bool | None = None
+) -> LessonFile:
+    """Second sign-off — publishes the file to learners. Maker-checker: requires
+    the teacher leg first AND a different person who holds a manager role. The
+    manager may also set the view-only / downloadable toggle at publish time.
+    The row is locked so concurrent approvals can't clobber the recorded signer
+    or the view-only toggle (last-writer-wins) and the 409 guard stays authoritative."""
+    file = LessonFile.objects.select_for_update().get(pk=file.pk)
+    if file.status != LessonFile.Status.CLEAN:
+        raise ConflictException(_("Only a clean file can be approved."), code="file_not_clean")
+    if not file.is_approved_teacher:
+        raise UnprocessableEntity(
+            _("A teacher must approve this file first."), code="teacher_approval_required"
+        )
+    if file.is_approved_manager:
+        raise ConflictException(
+            _("This file already has manager approval."), code="manager_already_approved"
+        )
+    if not actor.is_superuser and not (set(actor_roles) & set(_MANAGER_APPROVAL_ROLES)):
+        raise PermissionException(
+            _("Only a manager can give the second approval."), code="not_a_manager"
+        )
+    if file.approved_teacher_by_id == actor.id:
+        raise PermissionException(
+            _("The manager approval must come from a different person than the teacher approval."),
+            code="dual_control_self",
+        )
+    file.is_approved_manager = True
+    file.approved_manager_by = actor
+    file.approved_manager_at = timezone.now()
+    fields = ["is_approved_manager", "approved_manager_by", "approved_manager_at", "updated_at"]
+    if is_downloadable is not None:
+        file.is_downloadable = is_downloadable
+        fields.append("is_downloadable")
+    file.save(update_fields=fields)
+    return file
 
 
 # ---------------------------------------------------------------------------

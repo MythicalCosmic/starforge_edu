@@ -67,3 +67,7 @@ class LessonFileFactory(factory.django.DjangoModelFactory[LessonFile]):
     content_type = "application/pdf"
     size_bytes = 1000
     status = LessonFile.Status.CLEAN
+    # A factory file represents a real, published file — dual-approved by default
+    # so visibility fixtures stay green (F4-5). Real uploads default to unapproved.
+    is_approved_teacher = True
+    is_approved_manager = True

@@ -10,6 +10,17 @@ from core.permissions import Role
 
 STAFF_ROLES = {Role.DIRECTOR}
 
+# F4-5 content review/publication. REVIEWER_ROLES are the content staff (vs
+# learners): they may see files still pending dual approval and may download a
+# view-only file. Reach differs by role: a DIRECTOR sees every file tenant-wide;
+# a HEAD_OF_DEPT (manager) stays department-scoped like everywhere else but
+# additionally reaches any file still pending the manager sign-off so they can
+# counter-sign content anywhere — they get NO blanket read of already-published
+# content in libraries outside their scope. A TEACHER/LIBRARIAN sees drafts only
+# within their own library visibility. Everyone else (students, parents,
+# non-academic staff) sees only dual-approved, published files.
+REVIEWER_ROLES = {Role.DIRECTOR, Role.HEAD_OF_DEPT, Role.TEACHER, Role.LIBRARIAN}
+
 
 def _related_cohort_ids(user) -> set[int]:
     """Cohorts the user belongs to: student member, parent of a member, or a
@@ -62,10 +73,20 @@ def scoped_files(*, user, roles: set[str] | None = None, memberships=None) -> Qu
         memberships = list(user.role_memberships.filter(revoked_at__isnull=True))
     if roles is None:
         roles = {m.role for m in memberships}
-    if roles & STAFF_ROLES:
-        return qs
+    if Role.DIRECTOR in roles:
+        return qs  # director: every file tenant-wide
     libs = scoped_libraries(user=user, roles=roles, memberships=memberships)
-    return qs.filter(Q(lesson__module__course__library__in=libs) | Q(folder__library__in=libs)).distinct()
+    visible = Q(lesson__module__course__library__in=libs) | Q(folder__library__in=libs)
+    if Role.HEAD_OF_DEPT in roles:
+        # Manager: own visibility scope PLUS any file still pending the manager
+        # sign-off (so they can counter-sign content anywhere) — least privilege,
+        # no blanket read of published content outside their scope (F4-5 review).
+        return qs.filter(visible | Q(is_approved_manager=False)).distinct()
+    if roles & REVIEWER_ROLES:
+        # Teacher/librarian: drafts within their library scope (they review/sign).
+        return qs.filter(visible).distinct()
+    # Learners (and any non-reviewer): only dual-approved, published files.
+    return qs.filter(visible, is_approved_teacher=True, is_approved_manager=True).distinct()
 
 
 def storage_used_bytes() -> int:

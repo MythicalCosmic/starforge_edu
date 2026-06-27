@@ -130,6 +130,25 @@ class LessonFile(models.Model):
         "users.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
     )
 
+    # F4-5 dual publication approval. A CLEAN file is published to learners only
+    # after BOTH a teacher and a manager sign off (maker-checker: the two legs
+    # must be different people; the manager leg requires a manager role + the
+    # teacher leg already done). A new version is a fresh row, so it resets to
+    # unapproved and must be re-signed before it reaches learners again.
+    is_approved_teacher = models.BooleanField(default=False)
+    approved_teacher_by = models.ForeignKey(
+        "users.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    approved_teacher_at = models.DateTimeField(null=True, blank=True)
+    is_approved_manager = models.BooleanField(default=False)
+    approved_manager_by = models.ForeignKey(
+        "users.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    approved_manager_at = models.DateTimeField(null=True, blank=True)
+    # F4-5 view-only toggle: when False the file streams in-app (track-view) but
+    # no download URL is issued to learners (copy-control for exam/licensed work).
+    is_downloadable = models.BooleanField(default=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
