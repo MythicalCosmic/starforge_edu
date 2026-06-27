@@ -89,6 +89,11 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         # F3-3: managers build + analyze forms/surveys.
         "forms:read",
         "forms:write",
+        # F1-2/F1-4: HOD builds placement tests AND is the approver (maker-checker
+        # blocks approving one's own; placement:approve stays manager-level).
+        "placement:read",
+        "placement:write",
+        "placement:approve",
         # F5: HOD manages tasks + outranks within the dept (assign_any bypass).
         "tasks:read",
         "tasks:write",
@@ -151,6 +156,10 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         # F3-3: teachers build surveys for their groups + fill manager forms.
         "forms:read",
         "forms:write",
+        # F1-2: teachers (academic staff) author placement tests; a manager
+        # approves them (no placement:approve here = enforced maker-checker).
+        "placement:read",
+        "placement:write",
         # F5: teachers task their assistants/lower grades + see their own tasks.
         "tasks:read",
         "tasks:write",
@@ -283,6 +292,10 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         # F3-3: reception builds + fills forms.
         "forms:read",
         "forms:write",
+        # F1-2/F1-5: reception builds placement tests + (later) assigns them to
+        # leads; approval is a manager's job (no placement:approve here).
+        "placement:read",
+        "placement:write",
         # F5: reception creates + tracks tasks.
         "tasks:read",
         "tasks:write",

@@ -59,9 +59,10 @@ premium AI tiering (Opus/Sonnet/Haiku, metered).
 | # | Feature | Acceptance | Reuse/New | Deps | Status |
 |---|---------|-----------|-----------|------|--------|
 | F1-1 | Department CRUD with job description + head | already exists (`org.Department` + `DepartmentViewSet`) | reuse | — | DONE(exists) |
-| F1-2 | Placement test bank: create/edit tests + questions | `POST/PATCH /placement/tests/`; manager-owned | new (D-4) | — | TODO |
+| F1-2 | Placement test bank: create/edit tests + questions | `apps.placement` (`PlacementTest`+`PlacementQuestion`); `POST/PATCH /placement/tests/` + `questions/` (single_choice/true_false/writing, answer-key staff-only); DRAFT-only edits; branch-scoped create + `get_queryset` isolation; builder=teacher/reception/HOD/director (`placement:write`); DRAFT-only delete (pending/approved frozen) | new (D-4) | — | DONE |
 | F1-3 | AI-generate / AI-recreate a placement test (draft) | reuse `ai.ExamGeneration` plumbing; output is a DRAFT | reuse+new | F1-2 | TODO |
-| F1-4 | Manager approval of an (AI-)changed test before it goes live | approval state machine: `draft→pending→approved`; only manager approves | new (D-4) | F1-2 | TODO |
+| F1-4 | Manager approval of an (AI-)changed test before it goes live | lifecycle `draft→(submit)→pending→(approve/reject)→approved/draft`; `placement:approve` (HOD/director) only; **maker-checker SoD** (builder≠approver, `self_approval` 403); approve/reject under `select_for_update`+`@transaction.atomic`; reject kicks back to DRAFT + reason | new (D-4) | F1-2 | DONE |
+| FX-forms-delete | **Follow-up (review-found):** `apps.forms` FormViewSet exposes raw DELETE (inherited template gap) → a builder can hard-delete a PUBLISHED/CLOSED form + CASCADE its responses. Mirror placement: DRAFT-only destroy. Lower stakes than placement (not the anti-fraud surface) so deferred. | harden existing | forms | TODO |
 | F1-5 | Assign/show a placement test to a prospective student (lead) | reception assigns; student solves; result stored | new (D-4) | F1-2 | TODO |
 | F1-6 | Auto-grade + instant level | AI or rubric grades on submit → sets `academic_level` immediately | new | F1-5 | TODO |
 | F1-7 | AI group suggestion from result | suggest cohort(s) by level/branch; student may stay groupless or leave | new | F1-6, cohorts | TODO |
