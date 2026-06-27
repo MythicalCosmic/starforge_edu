@@ -19,6 +19,7 @@ from apps.academics.models import ExamResult
 from apps.attendance.models import AttendanceRecord
 from apps.finance.models import Invoice
 from apps.parents.models import Guardian
+from apps.schedule.models import Lesson
 from apps.students.models import StudentProfile
 
 # --- transparent, documented thresholds (will move to CenterSettings later) ----- #
@@ -446,3 +447,73 @@ def student_risk_detail(student: StudentProfile, *, now=None, include_finance: b
         "level": "none",
         "flags": [],
     }
+
+
+# --- A-3 teacher engagement facet ---------------------------------------------- #
+# HONEST FRAMING: this measures ENGAGEMENT (do students show up to this teacher's
+# lessons) + REACH, NOT causal "value-add" (which needs controlled pre/post data we
+# don't have). It is a transparent rule over attendance the centre already records,
+# attributed cleanly by Lesson.teacher. Grades are deliberately NOT attributed to a
+# teacher (a cohort's outcome has many inputs). Per-teacher named, so the VIEW gates
+# it to managers + a teacher's own row (dignity: no public teacher leaderboard).
+
+TEACHER_METRICS: dict[str, str] = {
+    "attendance_rate": "Share of recent non-excused marks in this teacher's lessons that were present or late.",
+    "lessons_delivered": "Count of the teacher's non-cancelled lessons in the window.",
+    "students_reached": "Distinct students who had a mark in the teacher's lessons.",
+}
+
+
+def teacher_engagement(teachers: QuerySet, *, now=None) -> list[dict]:
+    """Per-teacher engagement over the attendance window for an already-scoped
+    TeacherProfile queryset. A couple of grouped aggregates keep it cheap. A teacher
+    with no marks gets a null rate (not a spurious 0) and sorts last."""
+    now = now or timezone.now()
+    teacher_rows = {t.id: t for t in teachers.select_related("user")}
+    if not teacher_rows:
+        return []
+    teacher_ids = list(teacher_rows)
+    window = now - timedelta(days=ATTENDANCE_WINDOW_DAYS)
+    st = AttendanceRecord.Status
+    attendance = {
+        row["lesson__teacher_id"]: row
+        for row in AttendanceRecord.objects.filter(
+            lesson__teacher_id__in=teacher_ids, lesson__starts_at__gte=window
+        )
+        .values("lesson__teacher_id")
+        .annotate(
+            total=Count("id", filter=~Q(status=st.EXCUSED)),
+            attended=Count("id", filter=Q(status__in=(st.PRESENT, st.LATE))),
+            students=Count("student", distinct=True),
+        )
+    }
+    lessons = {
+        row["teacher_id"]: row["n"]
+        # Upper-bounded at `now`: future SCHEDULED lessons (materialized from
+        # recurrence rules) are not yet delivered, so they must not inflate the count.
+        for row in Lesson.objects.filter(
+            teacher_id__in=teacher_ids, starts_at__gte=window, starts_at__lte=now
+        )
+        .exclude(status__in=(Lesson.Status.CANCELLED, Lesson.Status.ARCHIVED))
+        .values("teacher_id")
+        .annotate(n=Count("id"))
+    }
+    out: list[dict] = []
+    for tid, teacher in teacher_rows.items():
+        att = attendance.get(tid, {})
+        total = att.get("total", 0)
+        rate = round(100 * att["attended"] / total, 1) if total else None
+        out.append(
+            {
+                "teacher": tid,
+                "name": teacher.user.get_full_name() if teacher.user_id else "",
+                "lessons_delivered": lessons.get(tid, 0),
+                "students_reached": att.get("students", 0),
+                "marks_sampled": total,
+                "attendance_rate": rate,  # present+late / non-excused, percent
+                "engagement_score": rate,  # transparent: equals the attendance rate
+            }
+        )
+    # Best engagement first; teachers with no marks (None) sort last, then by id.
+    out.sort(key=lambda r: (r["engagement_score"] is None, -(r["engagement_score"] or 0), r["teacher"]))
+    return out

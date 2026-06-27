@@ -44,6 +44,25 @@ def _scoped_branches(request):
     return qs.filter(id__in=my)
 
 
+def _scoped_teachers(request):
+    """Teachers whose engagement the caller may see: director/superuser → all; a
+    manager (HOD) → their branch(es)' teachers; a teacher → only their own row
+    (dignity: a private development signal, not a public leaderboard); anyone else
+    → none (fail closed, even with an A-2 intelligence:read grant)."""
+    from apps.teachers.models import TeacherProfile
+    from apps.teachers.selectors import teacher_profile_for
+
+    base = TeacherProfile.objects.select_related("user")
+    roles = get_user_roles(request)
+    if request.user.is_superuser or Role.DIRECTOR in roles:
+        return base
+    if Role.HEAD_OF_DEPT in roles:
+        my = {m.branch_id for m in get_role_memberships(request) if m.branch_id and m.role in _STAFF_ROLES}
+        return base.filter(branch_id__in=my)
+    me = teacher_profile_for(request.user)
+    return base.filter(pk=me.pk) if me is not None else base.none()
+
+
 class RiskListView(TenantSafeAPIView):
     """GET /api/v1/intelligence/risk/ — at-risk students in the caller's scope
     (optionally ?cohort=<id>), highest risk first. Transparent rules only (A-3)."""
@@ -226,4 +245,30 @@ class RulesView(TenantSafeAPIView):
                 },
                 "levels": {"low": "1-2", "medium": "3-4", "high": "5+"},
             }
+        )
+
+
+class TeacherEngagementView(TenantSafeAPIView):
+    """GET /api/v1/intelligence/teachers/ — per-teacher ENGAGEMENT (attendance in
+    their lessons + reach) over the attendance window, best first. Transparent rule,
+    NOT causal value-add. Per-teacher named, so it is gated for dignity: a manager
+    sees their branch's teachers, a teacher sees only their own row, others none."""
+
+    resource = "intelligence"
+    required_perms = {"get": "intelligence:read"}
+
+    @extend_schema(
+        summary="Teacher engagement (attendance in their lessons + reach)",
+        responses={
+            200: OpenApiResponse(
+                description="{count, results:[{teacher, name, lessons_delivered, "
+                "students_reached, marks_sampled, attendance_rate, engagement_score}], metrics}"
+            )
+        },
+        tags=["intelligence"],
+    )
+    def get(self, request):
+        results = selectors.teacher_engagement(_scoped_teachers(request))
+        return Response(
+            {"count": len(results), "results": results, "metrics": selectors.TEACHER_METRICS}
         )
