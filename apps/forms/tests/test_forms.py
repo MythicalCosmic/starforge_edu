@@ -355,3 +355,23 @@ def test_cross_branch_builder_isolation(tenant_a, user_in, as_user):
     cross = teacher_a.post(FORMS, {"title": "x", "branch": branch_b.id}, format="json")
     assert cross.status_code == 403
     assert cross.json()["error"]["code"] == "cross_branch"
+
+
+def test_draft_form_can_be_deleted(tenant_a, as_role):
+    director, _ = as_role(Role.DIRECTOR)
+    fid = director.post(FORMS, {"title": "Draft"}, format="json").json()["id"]
+    assert director.delete(f"{FORMS}{fid}/").status_code == 204
+    assert director.get(f"{FORMS}{fid}/").status_code == 404
+
+
+def test_published_and_closed_forms_cannot_be_deleted(tenant_a, as_role):
+    """A published/closed form holds collected responses — a builder must not be
+    able to hard-delete it (would CASCADE the responses away with no audit)."""
+    director, _ = as_role(Role.DIRECTOR)
+    fid, _fields = _build_published_form(director)
+    published_delete = director.delete(f"{FORMS}{fid}/")
+    assert published_delete.status_code == 422
+    assert published_delete.json()["error"]["code"] == "form_not_draft"
+    # closing it doesn't make it deletable either
+    director.post(f"{FORMS}{fid}/close/", {}, format="json")
+    assert director.delete(f"{FORMS}{fid}/").status_code == 422

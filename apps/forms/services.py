@@ -102,6 +102,16 @@ def close_form(*, form: Form) -> Form:
     return form
 
 
+@transaction.atomic
+def delete_form(*, form: Form) -> None:
+    """Hard-delete a form. Only a DRAFT may be deleted — a published or closed form
+    carries collected responses (CASCADE) and is never erased unilaterally."""
+    form = Form.objects.select_for_update().get(pk=form.pk)
+    if form.status != Form.Status.DRAFT:
+        raise UnprocessableEntity(_("Only a draft form can be deleted."), code="form_not_draft")
+    form.delete()
+
+
 def _is_empty(val: Any) -> bool:
     # None / "" / [] are "not answered"; False and 0 are real answers.
     return val is None or val == "" or val == []

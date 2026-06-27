@@ -112,6 +112,12 @@ class FormViewSet(TenantSafeModelViewSet):
         kwargs["partial"] = True
         return self.update(request, *args, **kwargs)
 
+    def destroy(self, request, *args, **kwargs):
+        # DRAFT-only: a published/closed form holds collected responses and must
+        # not be hard-deleted unilaterally (would CASCADE the responses away).
+        services.delete_form(form=self.get_object())
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
     @extend_schema(request=FormFieldSerializer, responses={201: FormFieldSerializer}, tags=["forms"])
     @action(detail=True, methods=["post"], url_path="fields")
     def add_field(self, request, pk=None):
