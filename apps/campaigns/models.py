@@ -100,3 +100,28 @@ class DoNotContact(models.Model):
 
     def __str__(self) -> str:  # pragma: no cover
         return f"do_not_contact:{self.phone}"
+
+
+class MessageTemplate(models.Model):
+    """A reusable message template (F10-2). A staff member names a template + a short
+    `purpose` brief, optionally has the AI draft its `body` (low-cost), edits it, and then
+    reuses it when composing a campaign — so common messages (reminders, announcements,
+    payment nudges) aren't retyped each time. `is_active` toggles it in/out of the picker
+    without deleting the history."""
+
+    name = models.CharField(max_length=120)
+    category = models.CharField(max_length=40, blank=True)  # free label: reminder / payment / ...
+    purpose = models.CharField(max_length=500, blank=True)  # the author's brief for AI drafting
+    body = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_by = models.ForeignKey(
+        "users.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+
+    def __str__(self) -> str:  # pragma: no cover
+        return self.name

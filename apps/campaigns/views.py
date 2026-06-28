@@ -2,18 +2,21 @@ from __future__ import annotations
 
 from django.db import IntegrityError
 from django.utils.translation import gettext_lazy as _
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from apps.campaigns import services
-from apps.campaigns.models import Campaign, CampaignRecipient, DoNotContact
+from apps.campaigns.models import Campaign, CampaignRecipient, DoNotContact, MessageTemplate
 from apps.campaigns.serializers import (
     CampaignRecipientSerializer,
     CampaignSerializer,
     CreateCampaignSerializer,
+    CreateTemplateSerializer,
     DoNotContactSerializer,
+    MessageTemplateSerializer,
+    UpdateTemplateSerializer,
 )
 from core.exceptions import ConflictException, PermissionException
 from core.permissions import Role, get_role_memberships, get_user_roles
@@ -126,3 +129,61 @@ class DoNotContactViewSet(TenantSafeModelViewSet):
                 _("That phone is already on the do-not-contact list."), code="already_opted_out"
             ) from None
         return Response(DoNotContactSerializer(entry).data, status=status.HTTP_201_CREATED)
+
+
+class MessageTemplateViewSet(TenantSafeModelViewSet):
+    """Reusable, AI-draftable message templates (F10-2). Staff (campaign:write) create a
+    template + purpose, optionally have the AI draft the body (generate), edit it, and
+    reuse it when composing a campaign. campaign:read to list/read."""
+
+    serializer_class = MessageTemplateSerializer
+    resource = "campaign"
+    http_method_names = ["get", "post", "patch", "head", "options"]
+    required_perms = {
+        "list": "campaign:read",
+        "retrieve": "campaign:read",
+        "create": "campaign:write",
+        "partial_update": "campaign:write",
+        "generate": "campaign:write",
+    }
+    queryset = MessageTemplate.objects.select_related("created_by").all()
+    filterset_fields = ("category", "is_active")
+    search_fields = ("name", "category")
+    ordering_fields = ("created_at", "name")
+
+    @extend_schema(request=CreateTemplateSerializer, responses={201: MessageTemplateSerializer}, tags=["campaign"])
+    def create(self, request, *args, **kwargs):
+        ser = CreateTemplateSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        tpl = services.create_template(
+            name=ser.validated_data["name"],
+            category=ser.validated_data.get("category", ""),
+            purpose=ser.validated_data.get("purpose", ""),
+            created_by=request.user,
+        )
+        return Response(MessageTemplateSerializer(tpl).data, status=status.HTTP_201_CREATED)
+
+    @extend_schema(request=UpdateTemplateSerializer, responses={200: MessageTemplateSerializer}, tags=["campaign"])
+    def partial_update(self, request, *args, **kwargs):
+        tpl = self.get_object()
+        ser = UpdateTemplateSerializer(data=request.data, partial=True)
+        ser.is_valid(raise_exception=True)
+        tpl = services.update_template(template_id=tpl.pk, fields=ser.validated_data)
+        return Response(MessageTemplateSerializer(tpl).data)
+
+    @extend_schema(
+        request=None,
+        responses={202: OpenApiResponse(description="{request_id, status} — poll /ai/requests/{id}/")},
+        tags=["campaign"],
+    )
+    @action(detail=True, methods=["post"])
+    def generate(self, request, pk=None):
+        """F10-2: have the AI draft this template's body from its purpose (async). The
+        AI drafts it once (the request is idempotent on the template); the staff edits
+        the result before using it."""
+        ai_request = services.request_template_generation(
+            template=self.get_object(), requested_by=request.user
+        )
+        return Response(
+            {"request_id": ai_request.pk, "status": ai_request.status}, status=status.HTTP_202_ACCEPTED
+        )

@@ -32,6 +32,7 @@ class AIFeature(models.TextChoices):
     FORM_ANALYSIS = "form_analysis", _("Form response analysis")
     WRITING_MARKING = "writing_marking", _("Placement writing marking")
     MATERIAL_GENERATION = "material_generation", _("Library material generation")
+    TEMPLATE_GENERATION = "template_generation", _("Message template generation")
 
 
 class TenantAIBudget(models.Model):

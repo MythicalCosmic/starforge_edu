@@ -469,3 +469,32 @@ def run_material_generation(self, ai_request_id: int, *, params: dict | None = N
         )
 
     return _run_with_retry(self, ai_request_id, build_prompt=_build)
+
+
+# ---------------------------------------------------------------------------
+# Message template generation (F10-2)
+# ---------------------------------------------------------------------------
+
+
+@app.task(bind=True, max_retries=3, retry_backoff=True, acks_late=True)
+def run_template_generation(self, ai_request_id: int, *, params: dict | None = None) -> str | None:
+    """Draft a reusable message template's body from its name + purpose; the persist hook
+    writes the AI text onto the template (the staff edits it afterwards)."""
+    params = params or {}
+    template_id = int(params.get("template_id") or 0)
+
+    def _build(prompt, request):
+        from apps.campaigns.services import apply_generated_template
+
+        body = prompt.user_template.format(
+            name=params.get("name") or "Untitled",
+            purpose=params.get("purpose") or "a general message",
+        )
+        # No student PII in a template-gen prompt; persist writes the drafted body.
+        return (
+            body,
+            [],
+            lambda restored: apply_generated_template(template_id=template_id, output_text=restored),
+        )
+
+    return _run_with_retry(self, ai_request_id, build_prompt=_build)

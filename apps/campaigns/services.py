@@ -8,7 +8,7 @@ from django.db.models import Count
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
-from apps.campaigns.models import Campaign, CampaignRecipient, DoNotContact
+from apps.campaigns.models import Campaign, CampaignRecipient, DoNotContact, MessageTemplate
 from apps.students.models import StudentProfile
 from core.exceptions import NotFoundException, UnprocessableEntity, ValidationException
 from infrastructure.sms.eskiz_client import get_sms_client
@@ -164,3 +164,74 @@ def send_campaign(*, campaign_id: int, actor=None) -> Campaign:
         update_fields=["sent_count", "failed_count", "skipped_count", "sent_at", "status", "updated_at"]
     )
     return campaign
+
+
+# ---------------------------------------------------------------------------
+# Message templates (F10-2) — reusable, AI-draftable campaign message texts
+# ---------------------------------------------------------------------------
+
+_MAX_TEMPLATE_CHARS = 2000  # an SMS-ish template stays short
+
+
+@transaction.atomic
+def create_template(*, name, category="", purpose="", created_by=None) -> MessageTemplate:
+    return MessageTemplate.objects.create(
+        name=name, category=category or "", purpose=purpose or "", created_by=created_by
+    )
+
+
+@transaction.atomic
+def update_template(*, template_id: int, fields: dict) -> MessageTemplate:
+    """Edit a template under a row lock + explicit update_fields (no stale full-row save)."""
+    tpl = MessageTemplate.objects.select_for_update().filter(pk=template_id).first()
+    if tpl is None:
+        raise NotFoundException(_("Template not found."), code="template_not_found")
+    editable = {k: v for k, v in fields.items() if k in ("name", "category", "purpose", "body", "is_active")}
+    if editable:
+        for key, value in editable.items():
+            setattr(tpl, key, value)
+        tpl.save(update_fields=[*editable.keys(), "updated_at"])
+    return tpl
+
+
+def request_template_generation(*, template: MessageTemplate, requested_by=None):
+    """Ask the AI to draft the template's body from its purpose (low-cost). Budget-
+    reserved + enqueued on commit; the task fills the body, which the staff then edits +
+    reuses. Like every AI-gen feature the request is idempotent on its source — the AI
+    drafts the body ONCE; to revise it, edit the body (PATCH) directly."""
+    from apps.ai.models import AIFeature
+    from apps.ai.services import active_prompt, check_and_reserve_budget
+    from core.utils import current_schema
+
+    prompt = active_prompt(AIFeature.TEMPLATE_GENERATION)
+    ai_request = check_and_reserve_budget(
+        feature=AIFeature.TEMPLATE_GENERATION,
+        estimated_tokens=prompt.token_cost_cap,
+        requested_by=requested_by,
+        source_app="campaigns",
+        source_id=template.id,
+    )
+    if ai_request.status == ai_request.Status.QUEUED:
+        schema = current_schema()
+        params = {"template_id": template.id, "name": template.name, "purpose": template.purpose}
+        transaction.on_commit(lambda: _enqueue_template_generation(ai_request.pk, params, schema))
+    return ai_request
+
+
+def _enqueue_template_generation(ai_request_id: int, params: dict, schema: str) -> None:
+    from celery_tasks.ai_tasks import run_template_generation
+
+    run_template_generation.delay(ai_request_id, params=params, _schema_name=schema)
+
+
+@transaction.atomic
+def apply_generated_template(*, template_id: int, output_text: str) -> bool:
+    """Write the AI's drafted text onto the template's body (F10-2). Locked + bounded;
+    a vanished template is a no-op (returns False). Idempotent — a retry re-writes the
+    same body."""
+    tpl = MessageTemplate.objects.select_for_update().filter(pk=template_id).first()
+    if tpl is None:
+        return False
+    tpl.body = (output_text or "").strip()[:_MAX_TEMPLATE_CHARS]
+    tpl.save(update_fields=["body", "updated_at"])
+    return True
