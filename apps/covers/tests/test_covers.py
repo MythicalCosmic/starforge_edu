@@ -245,6 +245,43 @@ def test_reject_frees_the_constraint(tenant_a, user_in, as_user):
     assert again.status_code == 201
 
 
+def _ids(response):
+    body = response.json()
+    items = body["results"] if isinstance(body, dict) and "results" in body else body
+    return [row["id"] for row in items]
+
+
+def test_opening_to_pool_notifies_the_claimable_teacher_pool(tenant_a, user_in, as_user):
+    """F18-2: opening a cover to the pool pushes a realtime notification to the branch's
+    claimable teachers (cover:write + a teacher profile), so they learn a lesson is up for
+    grabs without polling — but NOT the requester being covered nor the manager who opened
+    it, and the payload carries the cover id so a client can deep-link straight to claim."""
+    from apps.notifications.models import Notification
+
+    s = _setup(tenant_a, user_in, as_user)
+    cid = s["a_client"].post(COVER, {"lesson": s["lesson"].id}, format="json").json()["id"]
+    s["manager"].post(f"{COVER}{cid}/open-pool/", {}, format="json")
+
+    with schema_context(tenant_a.schema_name):
+        rows = Notification.objects.filter(event_type="cover.pool_opened")
+        recipients = set(rows.values_list("user_id", flat=True))
+        assert s["b_prof"].user_id in recipients  # teacher B can claim -> notified
+        assert s["a_prof"].user_id not in recipients  # the requester is being covered
+        assert rows.get(user_id=s["b_prof"].user_id).data["cover_id"] == cid
+
+
+def test_pool_board_lists_only_pooled_open_covers(tenant_a, user_in, as_user):
+    """F18-2: the /cover/pool/ board shows a teacher the requests opened to the pool in
+    their branch — empty until a manager opens one, then listing it for the taking."""
+    s = _setup(tenant_a, user_in, as_user)
+    cid = s["a_client"].post(COVER, {"lesson": s["lesson"].id}, format="json").json()["id"]
+    before = s["b_client"].get(f"{COVER}pool/")
+    assert before.status_code == 200, before.content
+    assert _ids(before) == []  # not on the board until a manager opens it
+    s["manager"].post(f"{COVER}{cid}/open-pool/", {}, format="json")
+    assert cid in _ids(s["b_client"].get(f"{COVER}pool/"))
+
+
 def test_role_without_cover_is_denied(tenant_a, as_role):
     cashier_client, _ = as_role(Role.CASHIER)  # cashier holds no cover permission
     assert cashier_client.get(COVER).status_code == 403

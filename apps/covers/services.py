@@ -52,12 +52,14 @@ def create_cover_request(*, lesson, requester, reason: str = "") -> CoverRequest
             _("This lesson already has an open cover request."), code="cover_already_requested"
         ) from None
     # Tell the branch's managers a cover is needed.
-    for uid in _manager_ids(cover, "cover:approve"):
+    for uid in _recipients_with_perm(cover, "cover:approve"):
         _notify("cover.requested", uid, cover)
     return cover
 
 
-def _manager_ids(cover: CoverRequest, perm: str) -> list[int]:
+def _recipients_with_perm(cover: CoverRequest, perm: str) -> list[int]:
+    """Active users in the cover's branch whose role grants `perm` (the notification
+    audience for that permission)."""
     from apps.users.models import RoleMembership
     from core.permissions import roles_with_permission
 
@@ -65,6 +67,22 @@ def _manager_ids(cover: CoverRequest, perm: str) -> list[int]:
     if cover.branch_id:
         qs = qs.filter(branch_id=cover.branch_id)
     return list(qs.values_list("user_id", flat=True).distinct())
+
+
+def _pool_teacher_ids(cover: CoverRequest, *, exclude: set[int]) -> list[int]:
+    """The claimable-teacher pool for `cover` (F18-2): users who hold cover:write AND have
+    a teacher profile in the cover's branch — only they can actually claim (the claim flow
+    requires a teacher profile, and `_approve` rejects an out-of-branch cover teacher).
+    `exclude` drops the requester being covered and the manager who opened the pool."""
+    from apps.teachers.models import TeacherProfile
+
+    candidates = set(_recipients_with_perm(cover, "cover:write")) - exclude
+    if not candidates:
+        return []
+    teachers = TeacherProfile.objects.filter(user_id__in=candidates)
+    if cover.branch_id:
+        teachers = teachers.filter(branch_id=cover.branch_id)
+    return list(teachers.values_list("user_id", flat=True).distinct())
 
 
 def _locked(cover_id: int) -> CoverRequest:
@@ -131,7 +149,10 @@ def assign_cover(*, cover_id: int, cover_teacher, actor=None) -> CoverRequest:
 
 @transaction.atomic
 def open_to_pool(*, cover_id: int, actor=None) -> CoverRequest:
-    """A manager opens the request to the branch's teacher pool to claim."""
+    """A manager opens the request to the branch's teacher pool to claim, and the pool is
+    notified in realtime (F18-2) — so a teacher learns a lesson is up for grabs and can
+    claim it, rather than having to poll the board. Reuses the notification fan-out (and
+    its WebSocket push); no bespoke chat channel."""
     cover = _locked(cover_id)
     if cover.status != CoverRequest.Status.OPEN:
         raise UnprocessableEntity(
@@ -139,6 +160,9 @@ def open_to_pool(*, cover_id: int, actor=None) -> CoverRequest:
         )
     cover.pool = True
     cover.save(update_fields=["pool", "updated_at"])
+    exclude = {i for i in (cover.requester_id, getattr(actor, "id", None)) if i is not None}
+    for uid in _pool_teacher_ids(cover, exclude=exclude):
+        _notify("cover.pool_opened", uid, cover)
     return cover
 
 

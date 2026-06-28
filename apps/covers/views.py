@@ -33,6 +33,7 @@ class CoverRequestViewSet(TenantSafeModelViewSet):
         "create": "cover:write",
         "claim": "cover:write",
         "cancel": "cover:write",
+        "pool": "cover:read",
         "assign": "cover:approve",
         "open_pool": "cover:approve",
         "reject": "cover:approve",
@@ -100,6 +101,19 @@ class CoverRequestViewSet(TenantSafeModelViewSet):
             cover_id=self.get_object().pk, claimer_teacher=teacher, actor=request.user
         )
         return Response(CoverRequestSerializer(cover).data)
+
+    @extend_schema(responses={200: CoverRequestSerializer(many=True)}, tags=["cover"])
+    @action(detail=False, methods=["get"])
+    def pool(self, request):
+        """The claimable cover board (F18-2): open requests a manager has opened to the
+        pool, scoped to the caller's branch(es) — what a teacher can claim right now."""
+        qs = self.filter_queryset(self.get_queryset()).filter(
+            pool=True, status=CoverRequest.Status.OPEN
+        )
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            return self.get_paginated_response(CoverRequestSerializer(page, many=True).data)
+        return Response(CoverRequestSerializer(qs, many=True).data)
 
     @extend_schema(request=None, responses={200: CoverRequestSerializer}, tags=["cover"])
     @action(detail=True, methods=["post"])
