@@ -45,11 +45,11 @@ premium AI tiering (Opus/Sonnet/Haiku, metered).
 |---|--------|--------------|--------|
 | D-1 | `StudentProfile.location`, `.previous_school` (free text) | F2 filters | DONE |
 | D-2 | `StudentProfile.blocked_at` + `.block_reason` (soft block ≠ withdrawn) | F2 block | DONE |
-| D-3 | `LessonType` model (dynamic, manager-created) + `Lesson.lesson_type` FK | F3 dashboard | TODO |
-| D-4 | `PlacementTest` + `PlacementQuestion` + `PlacementAttempt` (+ AI gen + approval state) | F1 | TODO |
-| D-5 | `Form` + `FormQuestion` + `FormResponse` + `FormAnswer` (anonymity flag) | F3/F4 forms | TODO |
+| D-3 | `LessonType` model (dynamic, manager-created) + `Lesson.lesson_type` FK | F3 dashboard | DONE (`apps.schedule`): `LessonType` (name/slug/color/is_active) + `Lesson.lesson_type` FK + manager CRUD (`LessonTypeViewSet`, `lesson-types/`). |
+| D-4 | `PlacementTest` + `PlacementQuestion` + `PlacementAttempt` (+ AI gen + approval state) | F1 | DONE (`apps.placement`): full model+service+serializer+view+url stack with AI question generation (F1-3) + approval/timed-attempt state (F8-2/8-3); 11 test files. |
+| D-5 | `Form` + `FormQuestion` + `FormResponse` + `FormAnswer` (anonymity flag) | F3/F4 forms | DONE (`apps.forms`): full form/question/response/answer stack incl. anonymity + AI response analysis (F3-4). |
 | D-6 | `Thread` + `Message` + `ThreadParticipant` (attachments as JSON S3 keys on Message) | F4 messaging | DONE (`apps.messaging`) |
-| D-7 | `ContentLibrary`/`LessonFile` approval + `is_downloadable`/`view_only` flags | F4 library | TODO |
+| D-7 | `ContentLibrary`/`LessonFile` approval + `is_downloadable`/`view_only` flags | F4 library | DONE (`apps.content`): `LessonFile` has dual teacher/manager approval (`is_approved_teacher`/`is_approved_manager`), the `is_downloadable` view-only copy-control toggle (F4-5), and `FileView` view/download tracking. |
 | D-8 | `CenterSettings` booleans for each dynamic on/off knob (group-acceptance, downloads, library-approval, ...) | all | PARTIAL |
 | D-9 | `MeetingSlot`/`StaffMeeting` (teacher meetings, next-meeting) | F3 | DONE (`apps.meetings`: `StaffMeeting` + `MeetingAttendee`/RSVP) |
 
