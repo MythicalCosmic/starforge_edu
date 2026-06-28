@@ -77,3 +77,26 @@ class CampaignRecipient(models.Model):
 
     def __str__(self) -> str:  # pragma: no cover
         return f"recipient#{self.pk}:c{self.campaign_id}:s{self.student_id}:{self.status}"
+
+
+class DoNotContact(models.Model):
+    """A phone number that has opted OUT of SMS campaigns (a do-not-contact list).
+
+    Consent is keyed by PHONE — the unit SMS is actually sent to — so a guardian who
+    asks to stop being texted is suppressed across ALL their children and every branch,
+    not just one student. A campaign build SKIPS any recipient whose resolved phone is
+    here, and send() re-checks it so an opt-out recorded between build and send is still
+    honoured (dignity / anti-spam DNA: never text someone who said stop)."""
+
+    phone = models.CharField(max_length=32, unique=True, db_index=True)
+    reason = models.CharField(max_length=255, blank=True)
+    created_by = models.ForeignKey(
+        "users.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+
+    def __str__(self) -> str:  # pragma: no cover
+        return f"do_not_contact:{self.phone}"

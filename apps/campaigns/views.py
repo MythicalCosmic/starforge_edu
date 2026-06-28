@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from django.db import IntegrityError
 from django.utils.translation import gettext_lazy as _
 from drf_spectacular.utils import extend_schema
 from rest_framework import status
@@ -7,13 +8,14 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from apps.campaigns import services
-from apps.campaigns.models import Campaign, CampaignRecipient
+from apps.campaigns.models import Campaign, CampaignRecipient, DoNotContact
 from apps.campaigns.serializers import (
     CampaignRecipientSerializer,
     CampaignSerializer,
     CreateCampaignSerializer,
+    DoNotContactSerializer,
 )
-from core.exceptions import PermissionException
+from core.exceptions import ConflictException, PermissionException
 from core.permissions import Role, get_role_memberships, get_user_roles
 from core.viewsets import TenantSafeModelViewSet
 
@@ -86,3 +88,41 @@ class CampaignViewSet(TenantSafeModelViewSet):
     def recipients(self, request, pk=None):
         rows = CampaignRecipient.objects.filter(campaign=self.get_object()).select_related("student")
         return Response(CampaignRecipientSerializer(rows, many=True).data)
+
+
+class DoNotContactViewSet(TenantSafeModelViewSet):
+    """The SMS do-not-contact list (campaign consent). A phone here is suppressed from
+    every campaign — added when a family asks to stop being texted. Reading + managing
+    it is a campaign action (campaign:read / campaign:write); deletion is how a family
+    is re-subscribed if they opt back in."""
+
+    serializer_class = DoNotContactSerializer
+    resource = "campaign"
+    required_perms = {
+        "list": "campaign:read",
+        "retrieve": "campaign:read",
+        "create": "campaign:write",
+        "destroy": "campaign:write",
+    }
+    http_method_names = ["get", "post", "delete", "head", "options"]
+    queryset = DoNotContact.objects.select_related("created_by").all()
+    filterset_fields = ("phone",)
+    ordering_fields = ("created_at",)
+    search_fields = ("phone",)
+
+    @extend_schema(request=DoNotContactSerializer, responses={201: DoNotContactSerializer}, tags=["campaign"])
+    def create(self, request, *args, **kwargs):
+        ser = DoNotContactSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        try:
+            entry = DoNotContact.objects.create(
+                phone=ser.validated_data["phone"],
+                reason=ser.validated_data.get("reason", ""),
+                created_by=request.user,
+            )
+        except IntegrityError:
+            # the unique(phone) constraint — already opted out is a clean 409, not a 500
+            raise ConflictException(
+                _("That phone is already on the do-not-contact list."), code="already_opted_out"
+            ) from None
+        return Response(DoNotContactSerializer(entry).data, status=status.HTTP_201_CREATED)

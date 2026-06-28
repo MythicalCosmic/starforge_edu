@@ -8,7 +8,7 @@ from django.db.models import Count
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
-from apps.campaigns.models import Campaign, CampaignRecipient
+from apps.campaigns.models import Campaign, CampaignRecipient, DoNotContact
 from apps.students.models import StudentProfile
 from core.exceptions import NotFoundException, UnprocessableEntity, ValidationException
 from infrastructure.sms.eskiz_client import get_sms_client
@@ -68,18 +68,25 @@ def create_campaign(*, name: str, message: str, segment: dict | None, created_by
         created_by=created_by,
         total=len(students),
     )
+    # Consent: a phone on the do-not-contact list is suppressed up front (a recipient is
+    # never even queued for it), so an opted-out family is excluded by construction.
+    suppressed = set(DoNotContact.objects.values_list("phone", flat=True))
     rows = []
     skipped = 0
     for student in students:
         phone = _resolve_phone(student)
-        if not phone:
+        opted_out = bool(phone) and phone in suppressed
+        skip = not phone or opted_out
+        if skip:
             skipped += 1
         rows.append(
             CampaignRecipient(
                 campaign=campaign,
                 student=student,
                 phone=phone,
-                status=(CampaignRecipient.Status.SKIPPED if not phone else CampaignRecipient.Status.PENDING),
+                status=(CampaignRecipient.Status.SKIPPED if skip else CampaignRecipient.Status.PENDING),
+                # distinguish a consent skip from a no-phone skip in the audit trail
+                error=("do_not_contact" if opted_out else ""),
             )
         )
     CampaignRecipient.objects.bulk_create(rows)
@@ -118,7 +125,15 @@ def send_campaign(*, campaign_id: int, actor=None) -> Campaign:
     client = get_sms_client()
     # Phones already delivered (this run or a prior partial run) — never text twice.
     texted = set(campaign.recipients.filter(status=R.SENT).values_list("phone", flat=True))
+    # Honour an opt-out recorded AFTER the build: a now-suppressed phone is skipped, not
+    # sent (consent wins over a frozen recipient list).
+    suppressed = set(DoNotContact.objects.values_list("phone", flat=True))
     for recipient in campaign.recipients.filter(status=R.PENDING):
+        if recipient.phone in suppressed:
+            recipient.status = R.SKIPPED
+            recipient.error = "do_not_contact"
+            recipient.save(update_fields=["status", "error", "sent_at"])
+            continue
         try:
             if recipient.phone not in texted:
                 client.send(phone=recipient.phone, text=campaign.message)
