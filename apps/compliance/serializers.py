@@ -3,7 +3,9 @@ from __future__ import annotations
 from rest_framework import serializers
 
 from apps.compliance.models import Penalty, Rule
+from apps.org.models import Branch
 from apps.students.models import StudentProfile
+from apps.users.models import User
 
 
 class RuleSerializer(serializers.ModelSerializer):
@@ -30,6 +32,7 @@ class PenaltySerializer(serializers.ModelSerializer):
             "id",
             "rule",
             "student",
+            "staff",
             "points",
             "reason",
             "branch",
@@ -46,6 +49,16 @@ class PenaltySerializer(serializers.ModelSerializer):
 
 class IssuePenaltySerializer(serializers.Serializer):
     student = serializers.PrimaryKeyRelatedField(queryset=StudentProfile.objects.all())
+    points = serializers.IntegerField(min_value=1)
+    reason = serializers.CharField(max_length=255)
+    rule = serializers.PrimaryKeyRelatedField(
+        queryset=Rule.objects.filter(is_active=True), required=False, allow_null=True
+    )
+
+
+class IssueStaffPenaltySerializer(serializers.Serializer):
+    staff = serializers.PrimaryKeyRelatedField(queryset=User.objects.filter(is_active=True))
+    branch = serializers.PrimaryKeyRelatedField(queryset=Branch.objects.filter(archived_at__isnull=True))
     points = serializers.IntegerField(min_value=1)
     reason = serializers.CharField(max_length=255)
     rule = serializers.PrimaryKeyRelatedField(

@@ -135,6 +135,37 @@ def issue_penalty(*, student, points: int, reason: str, issued_by, rule=None) ->
 
 
 @transaction.atomic
+def issue_staff_penalty(*, staff, points: int, reason: str, issued_by, branch, rule=None) -> Penalty:
+    """Issue a disciplinary penalty against a STAFF member (F24-1). Manager-gated by
+    penalty:staff at the view. Guards: a person may NOT penalise themselves (segregation
+    of duties), and the subject must be an active staff member — never a student/parent
+    (mirrors the loan/reward recipient guard). The branch is the issuing manager's branch
+    context (validated at the view), which scopes who may later see/waive it. Staff
+    penalties carry no point-threshold escalation (that is a student-intake signal)."""
+    from apps.users.models import RoleMembership
+    from core.permissions import Role
+
+    if getattr(staff, "id", None) is not None and staff.id == getattr(issued_by, "id", None):
+        raise UnprocessableEntity(_("You cannot penalise yourself."), code="self_penalty")
+    staff_roles = tuple(r for r in Role.ALL if r not in (Role.STUDENT, Role.PARENT))
+    # The subject must be an active staff member OF THE PENALTY'S BRANCH — symmetric with
+    # the student path (which forces student.branch into the manager's scope). Without the
+    # branch filter a manager could file discipline against staff from another branch,
+    # hidden from that staff member's real branch managers.
+    is_staff = RoleMembership.objects.filter(
+        user=staff, branch=branch, revoked_at__isnull=True, role__in=staff_roles
+    ).exists()
+    if not is_staff:
+        raise UnprocessableEntity(
+            _("A staff penalty's subject must be an active staff member of that branch."),
+            code="not_staff",
+        )
+    return Penalty.objects.create(
+        staff=staff, points=points, reason=reason, branch=branch, issued_by=issued_by, rule=rule
+    )
+
+
+@transaction.atomic
 def waive_penalty(*, penalty_id: int, actor, reason: str = "") -> Penalty:
     """Reverse an active penalty (a manager corrects a mistake / accepts an appeal).
     Locked + active-only, so a penalty can't be double-waived. Issuing (penalty:write)

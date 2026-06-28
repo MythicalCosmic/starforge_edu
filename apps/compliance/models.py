@@ -51,11 +51,11 @@ class RuleAcknowledgment(models.Model):
 
 
 class Penalty(models.Model):
-    """A demerit issued to a student for breaching a rule (F24-1). Accountable (every
-    penalty records who issued it and why), correctable (a manager can WAIVE it, with a
-    reason), and transparent (the student sees their own record) — discipline without
-    untracked or unaccountable punishment. `points` accrue; waived penalties stop
-    counting. Staff penalties are a later extension; v1 is the student demerit ledger.
+    """A demerit issued for breaching a rule (F24-1). The subject is EITHER a student OR
+    a staff member (exactly one — CheckConstraint), so the same accountable / correctable
+    / transparent ledger covers student demerits and staff discipline. Accountable (records
+    who issued it and why), correctable (a manager WAIVES it, with a reason), transparent
+    (the subject sees their OWN record). `points` accrue; waived penalties stop counting.
     """
 
     class Status(models.TextChoices):
@@ -65,7 +65,14 @@ class Penalty(models.Model):
     # The breached rule (optional — a penalty may be ad hoc). SET_NULL: deleting a rule
     # must not erase its disciplinary history.
     rule = models.ForeignKey(Rule, on_delete=models.SET_NULL, null=True, blank=True, related_name="penalties")
-    student = models.ForeignKey("students.StudentProfile", on_delete=models.PROTECT, related_name="penalties")
+    # Exactly one subject (student XOR staff). Both PROTECT so the disciplinary record
+    # keeps naming its subject.
+    student = models.ForeignKey(
+        "students.StudentProfile", on_delete=models.PROTECT, null=True, blank=True, related_name="penalties"
+    )
+    staff = models.ForeignKey(
+        "users.User", on_delete=models.PROTECT, null=True, blank=True, related_name="staff_penalties"
+    )
     points = models.PositiveIntegerField()
     reason = models.CharField(max_length=255)
     # Denormalized from the student at issue time, for branch-scoped visibility.
@@ -88,10 +95,19 @@ class Penalty(models.Model):
         ordering = ("-issued_at",)
         indexes = [
             models.Index(fields=("student", "status")),
+            models.Index(fields=("staff", "status")),
             models.Index(fields=("branch", "status")),
         ]
         constraints = [
             models.CheckConstraint(condition=models.Q(points__gt=0), name="penalty_points_positive"),
+            # Exactly one subject: a student demerit XOR a staff-discipline penalty.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(student__isnull=False, staff__isnull=True)
+                    | models.Q(student__isnull=True, staff__isnull=False)
+                ),
+                name="penalty_exactly_one_subject",
+            ),
         ]
 
     def __str__(self) -> str:  # pragma: no cover

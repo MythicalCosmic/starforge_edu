@@ -144,10 +144,14 @@ def test_student_cannot_issue_a_penalty(tenant_a, user_in, as_user):
     assert r.status_code == 403
 
 
-def test_role_without_penalty_is_denied(tenant_a, as_role, user_in, as_user):
+def test_a_read_only_role_cannot_issue_a_penalty(tenant_a, as_role, user_in, as_user):
+    """F24-1: every staff role now holds penalty:read so they can see their OWN
+    disciplinary record — a cashier may LIST (scoped to their own, empty here) — but
+    issuing a penalty still needs penalty:write, which they do NOT hold (SoD)."""
     s = _setup(tenant_a, user_in, as_user)
-    cashier, _ = as_role(Role.CASHIER)  # holds no penalty permission
-    assert cashier.get(PEN).status_code == 403
+    cashier, _ = as_role(Role.CASHIER)  # penalty:read (own record) but no penalty:write
+    assert cashier.get(PEN).status_code == 200  # reads their own (none) — not a leak
+    assert cashier.get(PEN).json()["results"] == []
     assert (
         cashier.post(PEN, {"student": s["student"].id, "points": 1, "reason": "x"}, format="json").status_code
         == 403

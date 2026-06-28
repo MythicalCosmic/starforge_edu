@@ -13,6 +13,7 @@ from apps.compliance import selectors, services
 from apps.compliance.models import Penalty, Rule
 from apps.compliance.serializers import (
     IssuePenaltySerializer,
+    IssueStaffPenaltySerializer,
     PenaltySerializer,
     RuleSerializer,
     WaivePenaltySerializer,
@@ -109,36 +110,55 @@ class PenaltyViewSet(TenantSafeModelViewSet):
         "list": "penalty:read",
         "retrieve": "penalty:read",
         "create": "penalty:write",
+        "staff": "penalty:staff",
         "waive": "penalty:waive",
     }
     http_method_names = ["get", "post", "head", "options"]
-    filterset_fields = ("status", "student", "branch")
+    filterset_fields = ("status", "student", "staff", "branch")
     ordering_fields = ("issued_at", "points")
 
     def _branch_ids(self) -> set[int]:
         return {m.branch_id for m in get_role_memberships(self.request) if m.branch_id}
 
+    def _is_director(self) -> bool:
+        return self.request.user.is_superuser or Role.DIRECTOR in get_user_roles(self.request)
+
     def get_queryset(self):
         qs = Penalty.objects.select_related(
-            "rule", "student", "student__user", "branch", "issued_by", "waived_by"
+            "rule", "student", "student__user", "staff", "branch", "issued_by", "waived_by"
         )
         user = self.request.user
         roles = get_user_roles(self.request)
-        if user.is_superuser or Role.DIRECTOR in roles:
+        if self._is_director():
             return qs
-        # Staff who issue or waive see their branch's penalties.
-        if has_permission_code(roles, "penalty:write") or has_permission_code(roles, "penalty:waive"):
-            return qs.filter(branch_id__in=self._branch_ids())
-        # Everyone else sees only their own record (student) / their children's (parent).
-        return qs.filter(Q(student__user=user) | Q(student__guardians__parent__user=user)).distinct()
+        my = self._branch_ids()
+        # The SUBJECT always sees their own record: a student their demerits (+ a parent
+        # their children's), a staff member their own discipline.
+        scope = Q(student__user=user) | Q(student__guardians__parent__user=user) | Q(staff=user)
+        if has_permission_code(roles, "penalty:waive"):
+            # A manager (waive-capable) handles ALL their branch's penalties — student
+            # demerits AND staff discipline.
+            scope |= Q(branch_id__in=my)
+        elif has_permission_code(roles, "penalty:write"):
+            # A non-manager issuer (teacher) sees their branch's STUDENT demerits only —
+            # staff disciplinary records are NOT visible to peers (HR privacy).
+            scope |= Q(branch_id__in=my, staff__isnull=True)
+        return qs.filter(scope).distinct()
 
     def _assert_student_in_scope(self, student) -> None:
-        user = self.request.user
-        if user.is_superuser or Role.DIRECTOR in get_user_roles(self.request):
+        if self._is_director():
             return
         if student.branch_id not in self._branch_ids():
             raise PermissionException(
                 _("You can only penalise a student in your own branch."), code="branch_out_of_scope"
+            )
+
+    def _assert_branch_in_scope(self, branch) -> None:
+        if self._is_director():
+            return
+        if branch is None or branch.id not in self._branch_ids():
+            raise PermissionException(
+                _("You can only discipline staff in your own branch."), code="branch_out_of_scope"
             )
 
     @extend_schema(request=IssuePenaltySerializer, responses={201: PenaltySerializer}, tags=["compliance"])
@@ -149,6 +169,27 @@ class PenaltyViewSet(TenantSafeModelViewSet):
         self._assert_student_in_scope(student)
         penalty = services.issue_penalty(
             student=student,
+            points=ser.validated_data["points"],
+            reason=ser.validated_data["reason"],
+            issued_by=request.user,
+            rule=ser.validated_data.get("rule"),
+        )
+        return Response(PenaltySerializer(penalty).data, status=status.HTTP_201_CREATED)
+
+    @extend_schema(
+        request=IssueStaffPenaltySerializer, responses={201: PenaltySerializer}, tags=["compliance"]
+    )
+    @action(detail=False, methods=["post"])
+    def staff(self, request):
+        """F24-1: discipline a STAFF member (penalty:staff — managers only, not a peer
+        teacher). Branch-scoped to the issuing manager's branch; you can't penalise
+        yourself; the subject must be an active staff member."""
+        ser = IssueStaffPenaltySerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        self._assert_branch_in_scope(ser.validated_data["branch"])
+        penalty = services.issue_staff_penalty(
+            staff=ser.validated_data["staff"],
+            branch=ser.validated_data["branch"],
             points=ser.validated_data["points"],
             reason=ser.validated_data["reason"],
             issued_by=request.user,

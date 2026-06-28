@@ -124,10 +124,12 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "campaign:read",
         "campaign:write",
         "campaign:send",
-        # F24-1: HOD issues + reverses student demerits.
+        # F24-1: HOD issues + reverses student demerits, and disciplines STAFF
+        # (penalty:staff — a management action a peer teacher does not hold).
         "penalty:read",
         "penalty:write",
         "penalty:waive",
+        "penalty:staff",
         # F3-5: HOD schedules staff meetings (reading/RSVP is open to invitees).
         "meeting:write",
     },
@@ -246,6 +248,7 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "sale:read",
         "sale:write",
         "sale:refund",
+        "penalty:read",  # F24-1: see own discipline
     },
     # A-1: the cashier disburses approved requests + reads the ledger (the till).
     Role.CASHIER: {
@@ -265,9 +268,12 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "sale:read",
         "sale:write",
         "sale:refund",
+        "penalty:read",  # F24-1: see own discipline
     },
-    Role.LIBRARIAN: {"content:*", "students:read", "cohorts:read", "tasks:read", "rewards:read"},
-    Role.SECURITY: {"attendance:write", "users:read", "tasks:read", "rewards:read"},
+    # F24-1: every staff member holds penalty:read so they can see their OWN disciplinary
+    # record (get_queryset still scopes a non-manager to their own rows only).
+    Role.LIBRARIAN: {"content:*", "students:read", "cohorts:read", "tasks:read", "rewards:read", "penalty:read"},
+    Role.SECURITY: {"attendance:write", "users:read", "tasks:read", "rewards:read", "penalty:read"},
     Role.IT: {
         "users:read",
         "audit:read",
@@ -276,6 +282,7 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "compliance:write",
         "tasks:read",
         "rewards:read",
+        "penalty:read",  # F24-1: see own discipline
     },
     Role.REGISTRAR: {
         "students:*",
@@ -332,7 +339,7 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         # F3-5: reception schedules staff meetings.
         "meeting:write",
     },
-    Role.SUPPORT: {"users:read", "audit:read", "tasks:read", "rewards:read"},
+    Role.SUPPORT: {"users:read", "audit:read", "tasks:read", "rewards:read", "penalty:read"},
 }
 
 
