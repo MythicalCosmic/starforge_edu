@@ -302,7 +302,29 @@ def _validate_fine_payload(payload: dict) -> dict:
     reason = payload.get("reason", "")
     if not isinstance(reason, str):
         raise ValidationException(_("reason must be text."), code="fine_reason_invalid")
-    return {"student_id": student_id, "amount_uzs": str(amount), "reason": reason[:255]}
+    clean: dict = {"student_id": student_id, "amount_uzs": str(amount), "reason": reason[:255]}
+
+    # F24-1: a fine MAY cite the student demerit (compliance.Penalty) it escalates from —
+    # an audit link from the rule breach to the money. It must be a demerit on THIS student
+    # (you can't pin another student's, or a staff member's, penalty to this fine). A single
+    # filter covers exists + same-student + is-a-student-penalty (staff penalties have a
+    # null student_id, so they never match a concrete student_id).
+    penalty_id = payload.get("penalty_id")
+    if penalty_id is not None:
+        from apps.compliance.models import Penalty
+
+        if (
+            not isinstance(penalty_id, int)
+            or isinstance(penalty_id, bool)
+            or not Penalty.objects.filter(pk=penalty_id, student_id=student_id).exists()
+        ):
+            raise ValidationException(
+                _("penalty_id must be a demerit on the same student."),
+                code="fine_penalty_invalid",
+                fields={"payload": ["penalty_id"]},
+            )
+        clean["penalty_id"] = penalty_id
+    return clean
 
 
 @transaction.atomic

@@ -263,3 +263,57 @@ def test_fine_student_deleted_before_approve(tenant_a, as_role):
         from apps.approvals.models import ApprovalRequest
 
         assert ApprovalRequest.objects.get(pk=rid).status == ApprovalRequest.Status.PENDING
+
+
+def _penalty(tenant, student_id, *, points=3):
+    from apps.compliance.models import Penalty
+    from apps.students.models import StudentProfile
+
+    with schema_context(tenant.schema_name):
+        student = StudentProfile.objects.get(pk=student_id)
+        return Penalty.objects.create(
+            student=student, points=points, reason="late", branch=student.branch
+        ).id
+
+
+def test_fine_can_cite_a_penalty_on_the_same_student(tenant_a, as_role):
+    """F24-1: a fine may link the rule breach (a student demerit) it escalates from — the
+    audit trail from discipline to money."""
+    teacher, _ = as_role(Role.TEACHER)
+    sid = _student_id(tenant_a)
+    pid = _penalty(tenant_a, sid)
+    r = teacher.post(
+        REQ,
+        {"kind": "fine", "title": "x", "amount_uzs": "10000",
+         "payload": {"student_id": sid, "penalty_id": pid}},
+        format="json",
+    )
+    assert r.status_code == 201, r.content
+    assert r.json()["payload"]["penalty_id"] == pid  # the audit link is stored
+
+
+def test_fine_cannot_cite_another_students_penalty(tenant_a, as_role):
+    teacher, _ = as_role(Role.TEACHER)
+    sid = _student_id(tenant_a)
+    other_pid = _penalty(tenant_a, _student_id(tenant_a))  # a penalty on a DIFFERENT student
+    r = teacher.post(
+        REQ,
+        {"kind": "fine", "title": "x", "amount_uzs": "10000",
+         "payload": {"student_id": sid, "penalty_id": other_pid}},
+        format="json",
+    )
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "fine_penalty_invalid"
+
+
+def test_fine_with_a_nonexistent_penalty_is_rejected(tenant_a, as_role):
+    teacher, _ = as_role(Role.TEACHER)
+    sid = _student_id(tenant_a)
+    r = teacher.post(
+        REQ,
+        {"kind": "fine", "title": "x", "amount_uzs": "10000",
+         "payload": {"student_id": sid, "penalty_id": 999999}},
+        format="json",
+    )
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "fine_penalty_invalid"
