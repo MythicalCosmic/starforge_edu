@@ -142,7 +142,12 @@ def student_report(*, student: StudentProfile) -> dict:
         ),
     }
 
-    return {"attendance": attendance, "payment": payment, "rank": _classroom_rank(student)}
+    # F15-1: a center can switch ranking off entirely (dignity) — then no rank is
+    # computed or returned, on the student's own report and the parent view alike.
+    from apps.org.selectors import get_center_settings
+
+    rank = _classroom_rank(student) if get_center_settings().show_classroom_rank else None
+    return {"attendance": attendance, "payment": payment, "rank": rank}
 
 
 def student_dashboard(*, student: StudentProfile, user, roles) -> dict:

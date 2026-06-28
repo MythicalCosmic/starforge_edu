@@ -157,6 +157,9 @@ class CenterSettings(models.Model):
     # F24-1: when a student's total ACTIVE penalty points cross this threshold, the
     # crossing penalty is flagged + branch managers are notified. 0 = disabled.
     penalty_escalation_threshold = models.PositiveSmallIntegerField(default=0)
+    # F15-1: when False, the student/parent report omits classroom rank entirely — some
+    # centers reject ranking on principle (dignity DNA). Default True (rank shown).
+    show_classroom_rank = models.BooleanField(default=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
