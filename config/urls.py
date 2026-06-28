@@ -42,6 +42,7 @@ api_v1_patterns = [
     path("sales/", include("apps.sales.urls")),
     path("meetings/", include("apps.meetings.urls")),
     path("placement/", include("apps.placement.urls")),
+    path("cards/", include("apps.cards.urls")),
 ]
 
 urlpatterns = [

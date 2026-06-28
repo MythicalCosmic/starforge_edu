@@ -132,6 +132,9 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "penalty:staff",
         # F3-5: HOD schedules staff meetings (reading/RSVP is open to invitees).
         "meeting:write",
+        # F12-1: HOD manages card types + issues/revokes cards in their branch.
+        "card:read",
+        "card:write",
     },
     Role.TEACHER: {
         "students:read",
@@ -202,6 +205,8 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "achievements:read",
         # F24-1: a student sees their own demerit record (row-scoped to self).
         "penalty:read",
+        # F12-1: a student sees their own card(s) (row-scoped to self in get_queryset).
+        "card:read",
     },
     Role.PARENT: {
         # Row-scoped by selectors: students -> guardian-linked children only,
@@ -273,7 +278,11 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
     # F24-1: every staff member holds penalty:read so they can see their OWN disciplinary
     # record (get_queryset still scopes a non-manager to their own rows only).
     Role.LIBRARIAN: {"content:*", "students:read", "cohorts:read", "tasks:read", "rewards:read", "penalty:read"},
-    Role.SECURITY: {"attendance:write", "users:read", "tasks:read", "rewards:read", "penalty:read"},
+    # F12-1: security scans cards at the door + reads them; reception (REGISTRAR) issues.
+    Role.SECURITY: {
+        "attendance:write", "users:read", "tasks:read", "rewards:read", "penalty:read",
+        "card:read", "card:scan",
+    },
     Role.IT: {
         "users:read",
         "audit:read",
@@ -290,6 +299,10 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "cohorts:*",
         "parents:*",
         "teachers:read",
+        # F12-1: reception issues cards + scans them at the front desk.
+        "card:read",
+        "card:write",
+        "card:scan",
         "schedule:*",
         "printing:read",  # D4-LD-7: manage printers/agents
         "printing:write",
