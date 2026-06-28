@@ -440,3 +440,32 @@ def _prompt_cap(feature: str) -> int:
     from apps.ai.services import active_prompt
 
     return active_prompt(feature).token_cost_cap
+
+
+# ---------------------------------------------------------------------------
+# Library material generation (F9-1)
+# ---------------------------------------------------------------------------
+
+
+@app.task(bind=True, max_retries=3, retry_backoff=True, acks_late=True)
+def run_material_generation(self, ai_request_id: int, *, params: dict | None = None) -> str | None:
+    """Draft a library material's body from its title + topic; the persist hook writes
+    the AI text onto the DRAFT material (the manager then reviews + publishes)."""
+    params = params or {}
+    material_id = int(params.get("material_id") or 0)
+
+    def _build(prompt, request):
+        from apps.content.services import apply_generated_material
+
+        body = prompt.user_template.format(
+            title=params.get("title") or "Untitled",
+            topic=params.get("topic") or "the topic",
+        )
+        # No student PII in a material-gen prompt; persist writes the drafted body.
+        return (
+            body,
+            [],
+            lambda restored: apply_generated_material(material_id=material_id, output_text=restored),
+        )
+
+    return _run_with_retry(self, ai_request_id, build_prompt=_build)

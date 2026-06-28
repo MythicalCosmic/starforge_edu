@@ -18,10 +18,15 @@ from django.db.models import F
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
-from apps.content.models import FileView, LessonFile
+from apps.content.models import FileView, LessonFile, LibraryMaterial
 from apps.content.signals import file_upload_confirmed
 from apps.org.selectors import get_center_settings
-from core.exceptions import ConflictException, PermissionException, UnprocessableEntity
+from core.exceptions import (
+    ConflictException,
+    NotFoundException,
+    PermissionException,
+    UnprocessableEntity,
+)
 from core.permissions import Role
 from core.utils import current_schema
 from infrastructure.storage.s3_client import (
@@ -400,3 +405,101 @@ def create_new_version(*, previous: LessonFile, filename, content_type, size_byt
         user=user,
         previous=previous,
     )
+
+
+# ---------------------------------------------------------------------------
+# Library materials (F9-1) — AI-drafted teaching text, human-published
+# ---------------------------------------------------------------------------
+
+_MAX_MATERIAL_CHARS = 20000  # bound the AI body to the model's output + a sane cap
+
+
+@transaction.atomic
+def create_material(*, library, title, topic="", created_by=None) -> LibraryMaterial:
+    """Create a DRAFT material in a library; the body starts empty (hand-written or
+    AI-drafted via request_material_generation)."""
+    return LibraryMaterial.objects.create(
+        library=library, title=title, topic=topic or "", created_by=created_by
+    )
+
+
+def request_material_generation(*, material: LibraryMaterial, requested_by=None):
+    """Ask the AI to draft the material's body from its topic. Budget-reserved and
+    enqueued on commit; the task fills the body, which the manager then reviews +
+    publishes. Only a DRAFT can be (re)drafted — a published material is frozen."""
+    from apps.ai.models import AIFeature
+    from apps.ai.services import active_prompt, check_and_reserve_budget
+    from core.utils import current_schema
+
+    if material.status != LibraryMaterial.Status.DRAFT:
+        raise UnprocessableEntity(
+            _("Only a draft material can be AI-drafted."), code="material_not_draft"
+        )
+    prompt = active_prompt(AIFeature.MATERIAL_GENERATION)
+    ai_request = check_and_reserve_budget(
+        feature=AIFeature.MATERIAL_GENERATION,
+        estimated_tokens=prompt.token_cost_cap,
+        requested_by=requested_by,
+        source_app="content",
+        source_id=material.id,
+    )
+    if ai_request.status == ai_request.Status.QUEUED:
+        schema = current_schema()
+        params = {"material_id": material.id, "title": material.title, "topic": material.topic}
+        transaction.on_commit(lambda: _enqueue_material_generation(ai_request.pk, params, schema))
+    return ai_request
+
+
+def _enqueue_material_generation(ai_request_id: int, params: dict, schema: str) -> None:
+    from celery_tasks.ai_tasks import run_material_generation
+
+    run_material_generation.delay(ai_request_id, params=params, _schema_name=schema)
+
+
+@transaction.atomic
+def apply_generated_material(*, material_id: int, output_text: str) -> bool:
+    """Write the AI's drafted text onto the material's body (F9-1). Idempotent +
+    non-destructive: only a still-DRAFT material is updated (a published or vanished
+    one is left untouched), and the body is bounded. Returns whether it was applied."""
+    material = LibraryMaterial.objects.select_for_update().filter(pk=material_id).first()
+    if material is None or material.status != LibraryMaterial.Status.DRAFT:
+        return False
+    material.body = (output_text or "").strip()[:_MAX_MATERIAL_CHARS]
+    material.save(update_fields=["body", "updated_at"])
+    return True
+
+
+@transaction.atomic
+def update_material(*, material_id: int, fields: dict) -> LibraryMaterial:
+    """Hand-edit a DRAFT material's title / topic / body. Re-fetched + status-checked
+    UNDER a row lock and saved with explicit update_fields, so a concurrent publish can't
+    be clobbered by a stale full-row save (a lost update that would silently un-publish)."""
+    material = LibraryMaterial.objects.select_for_update().filter(pk=material_id).first()
+    if material is None:
+        raise NotFoundException(_("Material not found."), code="material_not_found")
+    if material.status != LibraryMaterial.Status.DRAFT:
+        raise UnprocessableEntity(_("Only a draft material can be edited."), code="material_not_draft")
+    editable = {k: v for k, v in fields.items() if k in ("title", "topic", "body")}
+    if editable:
+        for key, value in editable.items():
+            setattr(material, key, value)
+        material.save(update_fields=[*editable.keys(), "updated_at"])
+    return material
+
+
+@transaction.atomic
+def publish_material(*, material: LibraryMaterial) -> LibraryMaterial:
+    """Publish a drafted material so learners with access to the library can read it.
+    A human sign-off step (the AI drafts; a person still decides to publish). Requires a
+    non-empty body and locks the row so it can't be double-published."""
+    material = LibraryMaterial.objects.select_for_update().get(pk=material.pk)
+    if material.status == LibraryMaterial.Status.PUBLISHED:
+        raise UnprocessableEntity(_("This material is already published."), code="already_published")
+    if not material.body.strip():
+        raise UnprocessableEntity(
+            _("A material needs a body before it can be published."), code="material_empty"
+        )
+    material.status = LibraryMaterial.Status.PUBLISHED
+    material.published_at = timezone.now()
+    material.save(update_fields=["status", "published_at", "updated_at"])
+    return material

@@ -42,6 +42,37 @@ class ContentLibrary(models.Model):
         return self.name
 
 
+class LibraryMaterial(models.Model):
+    """A text teaching material in a library (F9-1). A manager creates a DRAFT (title +
+    topic), optionally has the AI draft its `body` (reusing the apps.ai pipeline), reviews
+    / edits it, then PUBLISHES it so learners with access to the library can read it. The
+    draft → published gate (paper-elimination DNA: AI drafts, a human still signs off)."""
+
+    class Status(models.TextChoices):
+        DRAFT = "draft", _("Draft")
+        PUBLISHED = "published", _("Published")
+
+    library = models.ForeignKey(ContentLibrary, on_delete=models.CASCADE, related_name="materials")
+    title = models.CharField(max_length=200)
+    # The author's brief for AI generation (what the material should cover).
+    topic = models.CharField(max_length=500, blank=True)
+    body = models.TextField(blank=True)  # the material text (AI-drafted and/or hand-edited)
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.DRAFT, db_index=True)
+    created_by = models.ForeignKey(
+        "users.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    published_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+        indexes = [models.Index(fields=("library", "status"))]
+
+    def __str__(self) -> str:  # pragma: no cover
+        return f"{self.title} ({self.status})"
+
+
 class Course(models.Model):
     library = models.ForeignKey(ContentLibrary, on_delete=models.CASCADE, related_name="courses")
     subject = models.ForeignKey("academics.Subject", on_delete=models.PROTECT, related_name="courses")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from django.utils.translation import gettext_lazy as _
 from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import status
 from rest_framework.decorators import action
@@ -7,7 +8,15 @@ from rest_framework.exceptions import MethodNotAllowed
 from rest_framework.response import Response
 
 from apps.content import selectors, services
-from apps.content.models import ContentLesson, ContentLibrary, Course, Folder, LessonFile, Module
+from apps.content.models import (
+    ContentLesson,
+    ContentLibrary,
+    Course,
+    Folder,
+    LessonFile,
+    LibraryMaterial,
+    Module,
+)
 from apps.content.selectors import REVIEWER_ROLES
 from apps.content.serializers import (
     ApproveManagerSerializer,
@@ -15,12 +24,16 @@ from apps.content.serializers import (
     ContentLibrarySerializer,
     ContentUploadUrlSerializer,
     CourseSerializer,
+    CreateMaterialSerializer,
     FolderSerializer,
     LessonFileSerializer,
+    LibraryMaterialSerializer,
     ModuleSerializer,
     NewVersionSerializer,
+    UpdateMaterialSerializer,
 )
-from core.permissions import RolePermission, get_user_roles
+from core.exceptions import PermissionException
+from core.permissions import RolePermission, get_user_roles, has_permission_code
 from core.viewsets import TenantSafeAPIView, TenantSafeModelViewSet
 
 
@@ -215,3 +228,91 @@ def _upload_payload(result: dict) -> dict:
         "key": result["key"],
         "expires_in": result["expires_in"],
     }
+
+
+class LibraryMaterialViewSet(TenantSafeModelViewSet):
+    """AI-drafted teaching materials (F9-1). A manager (content:write) creates a DRAFT,
+    optionally has the AI draft its body (generate), hand-edits it, then publishes it
+    (content:publish — a human still signs off). Learners (content:read) see only
+    PUBLISHED materials in libraries they can access; a half-written draft never leaks."""
+
+    queryset = LibraryMaterial.objects.none()
+    serializer_class = LibraryMaterialSerializer
+    resource = "content"
+    http_method_names = ["get", "post", "patch", "head", "options"]
+    required_perms = {
+        "list": "content:read",
+        "retrieve": "content:read",
+        "create": "content:write",
+        "partial_update": "content:write",
+        "generate": "content:write",
+        "publish": "content:publish",
+    }
+    filterset_fields = ("library", "status")
+    search_fields = ("title",)
+
+    def get_queryset(self):
+        qs = LibraryMaterial.objects.filter(library__in=_libs(self.request)).select_related(
+            "library", "created_by"
+        )
+        roles = get_user_roles(self.request)
+        # Content STAFF — anyone who writes, approves, or PUBLISHES — see DRAFTs too. This
+        # must include the publisher who holds content:publish WITHOUT content:write (the
+        # HOD), or the designated publisher could never reach a draft to publish it.
+        # Learners (content:read only) see PUBLISHED materials only — no half-written draft.
+        manages_content = self.request.user.is_superuser or any(
+            has_permission_code(roles, c) for c in ("content:write", "content:approve", "content:publish")
+        )
+        if not manages_content:
+            qs = qs.filter(status=LibraryMaterial.Status.PUBLISHED)
+        return qs
+
+    def _assert_library_writable(self, library):
+        if library not in _libs(self.request):
+            raise PermissionException(
+                _("You can only add materials to a library you can access."),
+                code="library_out_of_scope",
+            )
+
+    @extend_schema(request=CreateMaterialSerializer, responses={201: LibraryMaterialSerializer}, tags=["content"])
+    def create(self, request, *args, **kwargs):
+        ser = CreateMaterialSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        self._assert_library_writable(ser.validated_data["library"])
+        material = services.create_material(
+            library=ser.validated_data["library"],
+            title=ser.validated_data["title"],
+            topic=ser.validated_data.get("topic", ""),
+            created_by=request.user,
+        )
+        return Response(LibraryMaterialSerializer(material).data, status=status.HTTP_201_CREATED)
+
+    @extend_schema(request=UpdateMaterialSerializer, responses={200: LibraryMaterialSerializer}, tags=["content"])
+    def partial_update(self, request, *args, **kwargs):
+        material = self.get_object()  # scoped via get_queryset; the service locks + re-checks
+        ser = UpdateMaterialSerializer(data=request.data, partial=True)
+        ser.is_valid(raise_exception=True)
+        material = services.update_material(material_id=material.pk, fields=ser.validated_data)
+        return Response(LibraryMaterialSerializer(material).data)
+
+    @extend_schema(
+        request=None,
+        responses={202: OpenApiResponse(description="{request_id, status} — poll /ai/requests/{id}/")},
+        tags=["content"],
+    )
+    @action(detail=True, methods=["post"])
+    def generate(self, request, pk=None):
+        """F9-1: have the AI draft this DRAFT material's body (async). Reviewed + published
+        by a human afterwards."""
+        ai_request = services.request_material_generation(
+            material=self.get_object(), requested_by=request.user
+        )
+        return Response(
+            {"request_id": ai_request.pk, "status": ai_request.status}, status=status.HTTP_202_ACCEPTED
+        )
+
+    @extend_schema(request=None, responses={200: LibraryMaterialSerializer}, tags=["content"])
+    @action(detail=True, methods=["post"])
+    def publish(self, request, pk=None):
+        material = services.publish_material(material=self.get_object())
+        return Response(LibraryMaterialSerializer(material).data)

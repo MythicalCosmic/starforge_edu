@@ -8,6 +8,7 @@ from .views import (
     CourseViewSet,
     FolderViewSet,
     LessonFileViewSet,
+    LibraryMaterialViewSet,
     ModuleViewSet,
 )
 
@@ -18,6 +19,7 @@ router.register("modules", ModuleViewSet, basename="content-module")
 router.register("lessons", ContentLessonViewSet, basename="content-lesson")
 router.register("folders", FolderViewSet, basename="content-folder")
 router.register("files", LessonFileViewSet, basename="content-file")
+router.register("materials", LibraryMaterialViewSet, basename="content-material")
 
 urlpatterns = [
     path("upload-url/", ContentUploadUrlView.as_view(), name="content-upload-url"),

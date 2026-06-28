@@ -144,7 +144,7 @@ premium AI tiering (Opus/Sonnet/Haiku, metered).
 ## Theme C — AI usage-billing & content (#9)
 | # | Feature | Acceptance | New/Reuse | Status |
 |---|---------|-----------|-----------|--------|
-| F9-1 | AI library-material generation | manager requests; AI drafts a library item | reuse `ai` + `content` | TODO |
+| F9-1 | AI library-material generation | manager requests; AI drafts a library item | reuse `ai` + `content` | **DONE** (`content.LibraryMaterial` + `apps.ai` pipeline): a manager (`content:write`) creates a DRAFT material (title + topic), `POST /content/materials/{id}/generate/` has the AI draft its `body` (new `AIFeature.MATERIAL_GENERATION` + seed prompt + budget reserve/reconcile + `run_material_generation` task → `apply_generated_material`, which is DRAFT-only + locked + bounded, never overwrites a published body), hand-edits via PATCH (locked `update_material`, no lost-update), then PUBLISHES (`content:publish`; non-empty-body + lock gate — a human still signs off). **Visibility**: learners (`content:read` only) see only PUBLISHED materials in libraries they can access; content staff (write/approve/**publish**) see drafts — so the publish-only HOD (maker-checker: author≠publisher) can reach + publish a draft. Writes scoped to accessible libraries. Known limitation (systemic to all AI-gen features): a rapid double-`generate` while QUEUED can double-enqueue → soft budget over-charge. |
 | F9-2 | Metered/usage billing for AI gen (NOT in plan; charged per use) | record cost per gen → platform invoice line; reuse `ai.AIRequest.cost_microusd` + `billing` | extend billing | TODO |
 | *related* | per-tenant spend cap + alerts, prepaid AI credits, cost preview before generate | — | idea | — |
 

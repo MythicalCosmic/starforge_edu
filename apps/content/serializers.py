@@ -12,6 +12,7 @@ from apps.content.models import (
     Course,
     Folder,
     LessonFile,
+    LibraryMaterial,
     Module,
 )
 
@@ -177,3 +178,35 @@ class NewVersionSerializer(serializers.Serializer):
 
     def validate_filename(self, value: str) -> str:
         return _sanitize_filename(value)
+
+
+class LibraryMaterialSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = LibraryMaterial
+        fields = (
+            "id",
+            "library",
+            "title",
+            "topic",
+            "body",
+            "status",
+            "created_by",
+            "published_at",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("id", "status", "created_by", "published_at", "created_at", "updated_at")
+
+
+class CreateMaterialSerializer(serializers.Serializer):
+    library = serializers.PrimaryKeyRelatedField(queryset=ContentLibrary.objects.all())
+    title = serializers.CharField(max_length=200)
+    topic = serializers.CharField(max_length=500, required=False, allow_blank=True, default="")
+
+
+class UpdateMaterialSerializer(serializers.Serializer):
+    """Hand-edit a DRAFT material (e.g. tweak the AI draft) before publishing."""
+
+    title = serializers.CharField(max_length=200, required=False)
+    topic = serializers.CharField(max_length=500, required=False, allow_blank=True)
+    body = serializers.CharField(required=False, allow_blank=True)
