@@ -52,6 +52,12 @@ def scoped_pickups(*, user, roles: set[str] | None = None) -> QuerySet[PickupAut
     return qs.none()
 
 
+def parent_profile_for(user) -> ParentProfile | None:
+    """The signed-in user's own parent profile (self-service), or None — mirrors
+    students.selectors.student_profile_for for the parent self surfaces."""
+    return ParentProfile.objects.select_related("user").filter(user=user).first()
+
+
 def students_for_parent(*, parent: ParentProfile):
     from apps.students.models import StudentProfile
 

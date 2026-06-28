@@ -1,6 +1,8 @@
-from drf_spectacular.utils import extend_schema
+from django.utils.translation import gettext_lazy as _
+from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import status
 from rest_framework.decorators import action
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from apps.parents import selectors, services
@@ -12,9 +14,11 @@ from apps.parents.serializers import (
     ParentUpdateSerializer,
     PickupAuthorizationSerializer,
 )
+from apps.students.selectors import student_report
 from apps.students.serializers import StudentReadSerializer
+from core.exceptions import NotFoundException
 from core.permissions import default_perms, get_user_roles
-from core.viewsets import TenantSafeModelViewSet
+from core.viewsets import TenantSafeAPIView, TenantSafeModelViewSet
 
 
 class ParentViewSet(TenantSafeModelViewSet):
@@ -95,3 +99,48 @@ class PickupAuthorizationViewSet(TenantSafeModelViewSet):
 
     def get_queryset(self):
         return selectors.scoped_pickups(user=self.request.user, roles=get_user_roles(self.request))
+
+
+def _require_parent(request):
+    parent = selectors.parent_profile_for(request.user)
+    if parent is None:
+        raise NotFoundException(_("You do not have a parent profile."), code="not_a_parent")
+    return parent
+
+
+class ParentChildrenView(TenantSafeAPIView):
+    """GET /api/v1/parents/me/children/ — the signed-in parent's own linked children
+    (self-service; no parents:read grant needed — it returns only this parent's rows)."""
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="The signed-in parent's linked children",
+        responses=StudentReadSerializer(many=True),
+        tags=["parents"],
+    )
+    def get(self, request):
+        parent = _require_parent(request)
+        children = selectors.students_for_parent(parent=parent)
+        return Response(StudentReadSerializer(children, many=True).data)
+
+
+class ParentChildReportView(TenantSafeAPIView):
+    """GET /api/v1/parents/me/children/{student_id}/report/ — a parent sees ONE of their
+    children's report (per-lesson attendance, bill paid-status, and the child's own
+    classroom rank — never a leaderboard). 404 not_your_child if the student isn't linked
+    to this parent (so a parent can't enumerate other families' children by id)."""
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="A parent's child's attendance / payment / rank report",
+        responses={200: OpenApiResponse(description="{attendance, payment, rank}"), 404: OpenApiResponse()},
+        tags=["parents"],
+    )
+    def get(self, request, student_id):
+        parent = _require_parent(request)
+        student = selectors.students_for_parent(parent=parent).filter(pk=student_id).first()
+        if student is None:
+            raise NotFoundException(_("That is not one of your children."), code="not_your_child")
+        return Response(student_report(student=student))
