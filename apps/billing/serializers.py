@@ -6,7 +6,7 @@ from __future__ import annotations
 from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
 
-from apps.billing.models import Plan, Subscription, UsageSnapshot
+from apps.billing.models import AiUsageCharge, Plan, Subscription, UsageSnapshot
 
 
 class PlanSerializer(serializers.ModelSerializer):
@@ -21,6 +21,7 @@ class PlanSerializer(serializers.ModelSerializer):
             "ai_tokens_month",
             "storage_gb",
             "price_uzs",
+            "ai_overage_price_per_1k_uzs",
             "is_active",
         )
 
@@ -71,6 +72,30 @@ class UsageSnapshotSerializer(serializers.ModelSerializer):
             "ai_tokens_used",
             "created_at",
         )
+
+
+class AiUsageChargeSerializer(serializers.ModelSerializer):
+    """F9-2 metered AI-overage charge per (center, billing month)."""
+
+    center_name = serializers.CharField(source="center.name", read_only=True)
+
+    class Meta:
+        model = AiUsageCharge
+        fields = (
+            "id",
+            "center",
+            "center_name",
+            "period",
+            "included_tokens",
+            "used_tokens",
+            "overage_tokens",
+            "rate_per_1k_uzs",
+            "amount_uzs",
+            "cost_microusd",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = fields
 
 
 class CheckoutSerializer(serializers.Serializer):

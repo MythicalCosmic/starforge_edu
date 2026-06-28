@@ -7,6 +7,7 @@ from django.urls import path
 from rest_framework.routers import DefaultRouter
 
 from apps.billing.views import (
+    AiUsageChargeView,
     CheckoutView,
     PlanViewSet,
     SubscriptionViewSet,
@@ -19,6 +20,7 @@ router.register("subscriptions", SubscriptionViewSet, basename="billing-subscrip
 
 urlpatterns = [
     path("usage/", UsageView.as_view(), name="billing-usage"),
+    path("ai-charges/", AiUsageChargeView.as_view(), name="billing-ai-charges"),
     path("checkout/", CheckoutView.as_view(), name="billing-checkout"),
     *router.urls,
 ]

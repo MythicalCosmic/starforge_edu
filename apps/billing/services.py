@@ -35,6 +35,8 @@ logger = logging.getLogger("starforge.billing")
 
 TRIAL_DEFAULT_DAYS = 14  # fallback period when Center.trial_ends_at is unset
 PLATFORM_EXTENSION_DAYS = 30  # mock payment extends the period by this much
+_CENT = Decimal("0.01")
+_ZERO = Decimal("0.00")
 
 
 class PlanLimitExceeded(StarforgeError):
@@ -47,6 +49,69 @@ class PlanLimitExceeded(StarforgeError):
 
 def _invalidate_subscription_cache(schema_name: str) -> None:
     cache.delete(subscription_cache_key(schema_name))
+
+
+# ---------------------------------------------------------------------------
+# Metered AI overage billing (F9-2)
+# ---------------------------------------------------------------------------
+def meter_ai_overage(*, center_id: int, on=None):
+    """Record the AI-overage charge for a Center's current billing month (F9-2).
+
+    AI generation beyond the plan's ``ai_tokens_month`` allowance is billed per use.
+    Cross-schema like the nightly meter: reads the Subscription/Plan on the PUBLIC
+    schema, the month's AI token + provider-cost totals inside the Center's tenant
+    schema, then upserts the public ``AiUsageCharge`` row. Idempotent per (center,
+    period) — re-running re-computes the month-to-date charge in place (never
+    duplicated). Returns the charge, or None when the Center has no subscription
+    (nothing to bill against) or is inactive."""
+    from django_tenants.utils import get_public_schema_name
+
+    from apps.ai.selectors import cost_consumed, tokens_consumed
+    from apps.billing.models import AiUsageCharge
+    from apps.tenancy.models import Center
+
+    # The billing month is the center's LOCAL month. Derive BOTH the charge bucket
+    # (period) AND the usage window from this single local date — never mix a UTC date
+    # for the period with a local-month token window, or at a month boundary (local
+    # 00:00-05:00 == prior-day UTC) the period would resolve to the previous month while
+    # the usage is the new month, overwriting the prior month's finalized charge.
+    on = on or timezone.localdate()
+    period = on.replace(day=1)
+
+    with schema_context(get_public_schema_name()):
+        center = Center.objects.filter(pk=center_id, is_active=True).first()
+        sub = (
+            Subscription.objects.select_related("plan").filter(center_id=center_id).first()
+            if center is not None
+            else None
+        )
+    if center is None or sub is None:
+        return None
+
+    allowance = sub.plan.ai_tokens_month
+    rate = sub.plan.ai_overage_price_per_1k_uzs or _ZERO
+
+    with schema_context(center.schema_name):
+        used_tokens = tokens_consumed(period, on)  # [first-of-month, on] — same date source
+        cost_microusd = cost_consumed(period, on)
+
+    overage = max(0, used_tokens - allowance)
+    amount = (Decimal(overage) * rate / Decimal(1000)).quantize(_CENT) if overage > 0 else _ZERO
+
+    with schema_context(get_public_schema_name()):
+        charge, _created = AiUsageCharge.objects.update_or_create(
+            center_id=center_id,
+            period=period,
+            defaults={
+                "included_tokens": allowance,
+                "used_tokens": used_tokens,
+                "overage_tokens": overage,
+                "rate_per_1k_uzs": rate,
+                "amount_uzs": amount,
+                "cost_microusd": cost_microusd,
+            },
+        )
+    return charge
 
 
 # ---------------------------------------------------------------------------

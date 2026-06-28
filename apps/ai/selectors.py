@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, time
 
-from django.db.models import F, IntegerField, QuerySet, Sum, Value
+from django.db.models import BigIntegerField, F, IntegerField, QuerySet, Sum, Value
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 
@@ -53,6 +53,24 @@ def tokens_used_current_month() -> int:
     """
     today = timezone.localdate()
     return tokens_consumed(today.replace(day=1), today)
+
+
+def cost_consumed(start: date, end: date) -> int:
+    """Total AI provider cost (micro-USD) of every ``AIRequest`` created in the inclusive
+    day range — the platform's underlying cost, summed for metered overage billing (F9-2).
+    Mirrors ``tokens_consumed`` so billing and the usage report share one accounting path."""
+    lo, hi = _day_bounds(start, end)
+    agg = AIRequest.objects.filter(created_at__gte=lo, created_at__lt=hi).aggregate(
+        total=Coalesce(Sum("cost_microusd"), Value(0), output_field=BigIntegerField())
+    )
+    return int(agg["total"] or 0)
+
+
+def cost_used_current_month() -> int:
+    """AI provider cost (micro-USD) consumed by the current tenant this calendar month
+    (F9-2 metered billing). Delegates to ``cost_consumed`` for a single accounting path."""
+    today = timezone.localdate()
+    return cost_consumed(today.replace(day=1), today)
 
 
 def list_requests() -> QuerySet[AIRequest]:

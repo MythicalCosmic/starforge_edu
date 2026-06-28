@@ -18,6 +18,7 @@ from rest_framework.views import APIView
 from apps.billing import selectors, services
 from apps.billing.models import Plan, Subscription
 from apps.billing.serializers import (
+    AiUsageChargeSerializer,
     CheckoutSerializer,
     PlanSerializer,
     SubscriptionSerializer,
@@ -200,6 +201,29 @@ class UsageView(APIView):
             raise ValidationException("`center` must be an integer.", code="validation_error") from None
         qs = selectors.usage_for_center(center_id=center_id_int)
         return Response(UsageSnapshotSerializer(qs, many=True).data)
+
+
+class AiUsageChargeView(APIView):
+    """GET /api/v1/platform/billing/ai-charges/?center=<id> — F9-2 metered AI-overage
+    charges per billing month for a Center."""
+
+    permission_classes = [IsAdminUser]
+
+    @extend_schema(
+        summary="List metered AI-overage charges for a center",
+        responses={200: AiUsageChargeSerializer(many=True)},
+        tags=["platform-billing"],
+    )
+    def get(self, request):
+        center_id = request.query_params.get("center")
+        if not center_id:
+            raise ValidationException("Query param `center` is required.", code="validation_error")
+        try:
+            center_id_int = int(center_id)
+        except (TypeError, ValueError):
+            raise ValidationException("`center` must be an integer.", code="validation_error") from None
+        qs = selectors.ai_charges_for_center(center_id=center_id_int)
+        return Response(AiUsageChargeSerializer(qs, many=True).data)
 
 
 class CheckoutView(APIView):

@@ -55,7 +55,7 @@ def meter_center(*, center_id: int) -> None:
     from django_tenants.utils import get_public_schema_name
 
     from apps.billing.models import Subscription, UsageSnapshot
-    from apps.billing.services import apply_state_flip, evaluate_subscription_state
+    from apps.billing.services import apply_state_flip, evaluate_subscription_state, meter_ai_overage
     from apps.tenancy.models import Center
 
     with schema_context(get_public_schema_name()):
@@ -87,6 +87,10 @@ def meter_center(*, center_id: int) -> None:
 
     if sub is None:
         return
+    # F9-2: re-compute this month's metered AI-overage charge (idempotent per month).
+    # Pass the LOCAL date so the charge period and the token window share one month source
+    # (a UTC date here would misbill at the month boundary — see meter_ai_overage).
+    meter_ai_overage(center_id=center.pk, on=timezone.localdate())
     new_status = evaluate_subscription_state(subscription=sub)
     if new_status is not None:
         apply_state_flip(subscription=sub, new_status=new_status)

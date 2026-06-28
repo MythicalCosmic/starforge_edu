@@ -15,7 +15,7 @@ from django.db.models import QuerySet
 from django.utils import timezone
 from django_tenants.utils import get_public_schema_name, schema_context
 
-from apps.billing.models import Plan, Subscription, UsageSnapshot
+from apps.billing.models import AiUsageCharge, Plan, Subscription, UsageSnapshot
 
 SUBSCRIPTION_CACHE_TIMEOUT = 60  # seconds (D3-E-4: avoid a public-schema query per request)
 
@@ -66,6 +66,11 @@ def subscription_for_center(*, center_id: int) -> Subscription | None:
 
 def usage_for_center(*, center_id: int) -> QuerySet[UsageSnapshot]:
     return UsageSnapshot.objects.filter(center_id=center_id).select_related("center")
+
+
+def ai_charges_for_center(*, center_id: int) -> QuerySet[AiUsageCharge]:
+    """F9-2: a Center's metered AI-overage charges, newest billing month first."""
+    return AiUsageCharge.objects.filter(center_id=center_id).select_related("center")
 
 
 def center_dau(*, schema_name: str, on: date | None = None) -> int:
