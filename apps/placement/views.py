@@ -16,6 +16,7 @@ from apps.placement.serializers import (
     GeneratePlacementSerializer,
     GroupProposalSerializer,
     LeadAttemptSerializer,
+    ManualWritingMarkSerializer,
     PlacementAttemptSerializer,
     PlacementQuestionSerializer,
     PlacementTestCreateSerializer,
@@ -207,6 +208,7 @@ class PlacementAttemptViewSet(TenantSafeModelViewSet):
         "create": "placement:write",
         "suggestions": "placement:write",
         "mark_writing": "placement:write",
+        "mark_writing_manual": "placement:write",
     }
     filterset_fields = ("status", "test", "student")
 
@@ -318,6 +320,21 @@ class PlacementAttemptViewSet(TenantSafeModelViewSet):
             {"request_id": ai_request.pk, "status": ai_request.status},
             status=status.HTTP_202_ACCEPTED,
         )
+
+    @extend_schema(
+        request=ManualWritingMarkSerializer, responses={200: PlacementAttemptSerializer}, tags=["placement"]
+    )
+    @action(detail=True, methods=["post"], url_path="mark-writing-manual")
+    def mark_writing_manual(self, request, pk=None):
+        """F8-3 (manual): a human marker scores this submitted attempt's writing answers
+        directly — no AI, no budget. Staff-only (a lead can't mark their own work). The
+        scores are applied + the grade recomputed synchronously."""
+        ser = ManualWritingMarkSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        attempt = services.mark_writing_manually(
+            attempt=self.get_object(), marks=ser.validated_data["marks"]
+        )
+        return Response(PlacementAttemptSerializer(attempt).data)
 
 
 class GroupProposalViewSet(TenantSafeModelViewSet):

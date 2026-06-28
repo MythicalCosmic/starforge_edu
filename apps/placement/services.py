@@ -735,3 +735,71 @@ def apply_writing_marks(*, attempt_id: int, output_text: str) -> int:
     if marked:
         _grade_attempt(attempt)
     return marked
+
+
+@transaction.atomic
+def mark_writing_manually(*, attempt: PlacementAttempt, marks: list[dict]) -> PlacementAttempt:
+    """A human marker scores the WRITING answers directly — no AI, no budget — for a
+    center that marks by hand or has exhausted its AI budget. Same effect as
+    apply_writing_marks (set awarded_points + is_correct so writing counts, then recompute
+    the grade), but STRICT: a person's input is validated, not tolerated like untrusted
+    model output. An unknown / duplicate / non-writing question, or an out-of-range score,
+    is a clean 4xx — never silently skipped or clamped. Idempotent: re-marking a question
+    overwrites its previous mark; partial marking is allowed (unmarked writing stays
+    uncounted). The row is locked so two markers can't race."""
+    attempt = (
+        PlacementAttempt.objects.select_for_update()
+        .select_related("test", "student")
+        .get(pk=attempt.pk)
+    )
+    if attempt.status != PlacementAttempt.Status.GRADED:
+        raise UnprocessableEntity(
+            _("Only a submitted attempt can be marked."), code="attempt_not_graded"
+        )
+    writing_answers = {
+        a.question_id: a
+        for a in attempt.answers.select_related("question").filter(
+            question__question_type=_QT.WRITING
+        )
+    }
+    if not writing_answers:
+        raise UnprocessableEntity(
+            _("This attempt has no writing answers to mark."), code="no_writing_answers"
+        )
+    seen: set[int] = set()
+    updates: list[PlacementAnswer] = []
+    for item in marks:
+        qid = item.get("question")
+        score = item.get("score")
+        # bool is an int subclass — reject it so JSON `true` can't pose as an id or a score.
+        if not isinstance(qid, int) or isinstance(qid, bool) or qid not in writing_answers:
+            raise ValidationException(
+                _("Unknown writing question for this attempt."),
+                code="unknown_writing_question",
+                fields={"question": [str(qid)]},
+            )
+        if qid in seen:
+            raise ValidationException(_("Duplicate mark for a question."), code="duplicate_mark")
+        seen.add(qid)
+        if not isinstance(score, int) or isinstance(score, bool) or score < 0:
+            raise ValidationException(
+                _("A score must be a whole number of zero or more."),
+                code="invalid_score",
+                fields={"question": [str(qid)]},
+            )
+        answer = writing_answers[qid]
+        if score > answer.question.points:
+            # A human's mark above the maximum is a mistake, not something to silently
+            # clamp (unlike the tolerant AI path) — surface it so they can correct it.
+            raise ValidationException(
+                _("The score may not exceed the question's points."),
+                code="score_out_of_range",
+                fields={"question": [str(qid)]},
+            )
+        answer.awarded_points = score
+        answer.is_correct = score > 0
+        updates.append(answer)
+    for answer in updates:
+        answer.save(update_fields=["awarded_points", "is_correct"])
+    _grade_attempt(attempt)
+    return attempt

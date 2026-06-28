@@ -203,3 +203,19 @@ class SubmitAttemptSerializer(serializers.Serializer):
             if not isinstance(item, dict) or "question" not in item:
                 raise serializers.ValidationError(_("each answer needs a 'question' id."))
         return value
+
+
+class ManualWritingMarkSerializer(serializers.Serializer):
+    """A human marker's per-question writing scores (F8-3 manual path)."""
+
+    marks = serializers.JSONField()
+
+    def validate_marks(self, value):
+        if not isinstance(value, list) or not value:
+            raise serializers.ValidationError(
+                _("marks must be a non-empty list of {question, score} objects.")
+            )
+        for item in value:
+            if not isinstance(item, dict) or "question" not in item or "score" not in item:
+                raise serializers.ValidationError(_("each mark needs a 'question' id and a 'score'."))
+        return value
