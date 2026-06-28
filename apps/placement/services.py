@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import unicodedata
 from datetime import timedelta
 from typing import Any
 
@@ -102,6 +103,18 @@ def _validate_question(question_type: str, options: Any, correct_answer: Any) ->
                 raise ValidationException(
                     _("The correct answers must be unique."), code="duplicate_answers"
                 )
+    elif question_type == _QT.SHORT_ANSWER:
+        # The key is a non-empty list of acceptable answers (synonyms / spellings);
+        # a typed response auto-grades correct if it normalizes to any of them.
+        if not isinstance(correct_answer, list) or not correct_answer:
+            raise ValidationException(
+                _("A short-answer question needs at least one acceptable answer."),
+                code="answer_not_list",
+            )
+        if any(not isinstance(a, str) or not a.strip() for a in correct_answer):
+            raise ValidationException(
+                _("Each acceptable answer must be non-empty text."), code="invalid_answers"
+            )
     elif question_type == _QT.TRUE_FALSE:
         if not isinstance(correct_answer, bool):
             raise ValidationException(
@@ -287,15 +300,27 @@ def _validate_response(question: PlacementQuestion, response: Any) -> None:
         raise bad(_("Answer must be one of the options."), "answer_not_in_options")
 
 
+def _normalize(text: str) -> str:
+    """Fold a typed short answer for comparison: NFC-normalize, casefold, then collapse
+    all whitespace. A transparent, forgiving rule — case, Unicode composition form, and
+    spacing don't matter (so an accented Uzbek/Russian answer typed in a different
+    keyboard normal form isn't mis-graded), but it is NOT fuzzy matching, so what counts
+    as correct stays predictable for staff and leads alike."""
+    return " ".join(unicodedata.normalize("NFC", text).casefold().split())
+
+
 def _grade_answer(question: PlacementQuestion, response: Any) -> tuple[bool | None, int]:
     """(is_correct, awarded_points). Writing is marked by a person later → (None, 0).
     Multiple-choice is all-or-nothing: the chosen SET must equal the correct set
-    exactly (a transparent rule, no partial credit). `_validate_response` has already
-    guaranteed `response` is a list of option strings, so set() is safe here."""
+    exactly. Short-answer matches the normalized response against any acceptable answer.
+    `_validate_response` has already type-checked `response`, so set()/_normalize are safe."""
     if question.question_type not in PlacementQuestion.AUTO_GRADED_TYPES:
         return None, 0
     if question.question_type == _QT.MULTIPLE_CHOICE:
         is_correct = isinstance(response, list) and set(response) == set(question.correct_answer or [])
+    elif question.question_type == _QT.SHORT_ANSWER:
+        accepted = {_normalize(a) for a in (question.correct_answer or [])}
+        is_correct = isinstance(response, str) and _normalize(response) in accepted
     else:
         is_correct = response == question.correct_answer
     return is_correct, (question.points if is_correct else 0)
