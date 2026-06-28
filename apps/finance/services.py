@@ -298,6 +298,16 @@ def _build_discount_lines(*, student, base_uzs: Decimal, on: date, settings) -> 
         amount = _discount_amount(discount, base_uzs)
         if amount <= _ZERO:
             continue
+        # F23-1: a one-time credit (an absence deduction) credits exactly ONE invoice, then
+        # retires — so a single missed lesson is never credited twice. Claim it with a
+        # conditional UPDATE (short-circuited so it only runs for single_use discounts): it
+        # matches 0 rows — and we skip the line — if a concurrent invoice already consumed
+        # it, since the row lock serialises the two issuers inside issue_invoice's
+        # transaction. So it can't double-credit even under concurrent issuance.
+        if discount.single_use and not Discount.objects.filter(
+            pk=discount.pk, is_active=True
+        ).update(is_active=False):
+            continue
         lines.append(
             {
                 "description": str(_("Discount: %(t)s")) % {"t": discount.get_discount_type_display()},

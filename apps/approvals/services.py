@@ -34,6 +34,11 @@ KIND_LOAN = "loan"
 # student OWES (a penalty invoice), never a cash payout — so its amount lives in
 # the payload and the request's amount_uzs stays null (it can't be disbursed).
 KIND_FINE = "fine"
+# A decision-only KIND (acts at approve, like discount): it credits a student for a
+# lesson they MISSED — materializes a standing Discount (a negative invoice line),
+# gated by a per-center policy and tied to a real absence record (anti-fraud: you can
+# only deduct for an absence that actually happened, and only once).
+KIND_ABSENCE_DEDUCTION = "absence_deduction"
 
 # Money/percent columns are NUMERIC(_, 2); normalize payload values to that scale.
 _TWO_PLACES = Decimal("0.01")
@@ -327,6 +332,100 @@ def _validate_fine_payload(payload: dict) -> dict:
     return clean
 
 
+def _validate_absence_deduction_payload(payload: dict) -> dict:
+    """Validate + normalize an absence-deduction payload at creation time. Shape:
+
+        {student_id, attendance_id, fixed_amount_uzs}
+
+    The center must have opted into the policy (CenterSettings.absence_deduction_enabled),
+    the referenced attendance record must be a real absence for THIS student, and — when
+    the center restricts to excused absences — it must be EXCUSED (carry an accepted
+    reason). A given absence can be deducted only once (anti-fraud: no double credit for
+    one missed lesson). The deduction amount is the missed lesson's worth the manager
+    specifies; it materializes as a standing finance.Discount on approval.
+    """
+    from apps.attendance.models import AttendanceRecord
+    from apps.org.selectors import get_center_settings
+    from apps.students.models import StudentProfile
+
+    settings_obj = get_center_settings()
+    if not settings_obj.absence_deduction_enabled:
+        raise ValidationException(
+            _("This center does not allow absence deductions."), code="absence_deduction_disabled"
+        )
+
+    student_id = payload.get("student_id")
+    if (
+        not isinstance(student_id, int)
+        or isinstance(student_id, bool)
+        or not StudentProfile.objects.filter(pk=student_id).exists()
+    ):
+        raise ValidationException(
+            _("An absence-deduction request needs a valid student_id in its payload."),
+            code="absence_deduction_student_required",
+            fields={"payload": ["student_id"]},
+        )
+
+    attendance_id = payload.get("attendance_id")
+    record = (
+        AttendanceRecord.objects.filter(pk=attendance_id, student_id=student_id).first()
+        if isinstance(attendance_id, int) and not isinstance(attendance_id, bool)
+        else None
+    )
+    absences = (AttendanceRecord.Status.ABSENT, AttendanceRecord.Status.EXCUSED)
+    if record is None or record.status not in absences:
+        raise ValidationException(
+            _("attendance_id must reference an absence for this student."),
+            code="absence_deduction_attendance_invalid",
+            fields={"payload": ["attendance_id"]},
+        )
+    if settings_obj.absence_deduction_excused_only and record.status != AttendanceRecord.Status.EXCUSED:
+        raise ValidationException(
+            _("This center only deducts for excused (reasoned) absences."),
+            code="absence_deduction_requires_excuse",
+        )
+
+    # Anti-fraud: one deduction per absence. A still-live (pending/approved) request for
+    # the same attendance record blocks a second; a rejected/cancelled one does not (an
+    # overturned deduction may be re-requested).
+    if (
+        ApprovalRequest.objects.filter(kind=KIND_ABSENCE_DEDUCTION, payload__attendance_id=attendance_id)
+        .exclude(status__in=(ApprovalRequest.Status.REJECTED, ApprovalRequest.Status.CANCELLED))
+        .exists()
+    ):
+        raise ValidationException(
+            _("This absence has already been deducted."), code="absence_deduction_duplicate"
+        )
+
+    # The deduction value (the missed lesson's worth) — same never-500 discipline as the
+    # discount fixed amount: finite, positive, within NUMERIC(18,2), re-checked after the
+    # quantize that could round up across the boundary.
+    try:
+        fv = Decimal(str(payload.get("fixed_amount_uzs")))
+    except (InvalidOperation, ValueError):
+        raise ValidationException(
+            _("fixed_amount_uzs must be a number."), code="absence_deduction_amount_invalid"
+        ) from None
+    if not fv.is_finite():
+        raise ValidationException(
+            _("fixed_amount_uzs must be a finite number."), code="absence_deduction_amount_invalid"
+        )
+    if fv <= 0:
+        raise ValidationException(
+            _("fixed_amount_uzs must be positive."), code="absence_deduction_amount_range"
+        )
+    if fv >= Decimal("1e16"):
+        raise ValidationException(
+            _("fixed_amount_uzs is too large."), code="absence_deduction_amount_range"
+        )
+    fv = fv.quantize(_TWO_PLACES)
+    if fv >= Decimal("1e16"):
+        raise ValidationException(
+            _("fixed_amount_uzs is too large."), code="absence_deduction_amount_range"
+        )
+    return {"student_id": student_id, "attendance_id": attendance_id, "fixed_amount_uzs": str(fv)}
+
+
 @transaction.atomic
 def create_request(
     *,
@@ -339,6 +438,11 @@ def create_request(
     payload: dict | None = None,
 ) -> ApprovalRequest:
     payload = payload or {}
+    # The serializer's JSONField accepts any JSON value (a string/array/number is valid
+    # JSON), so a non-object payload would reach a kind validator's .get() and 500 with an
+    # AttributeError. Reject a non-object payload here as a clean 400 for every kind.
+    if not isinstance(payload, dict):
+        raise ValidationException(_("payload must be a JSON object."), code="payload_invalid")
     if kind == KIND_DISCOUNT:
         # A discount is decision-only (the Discount it grants is the effect, not a
         # cash payout) — it never disburses, so drop any amount the caller passed.
@@ -358,6 +462,10 @@ def create_request(
         # Fold the top-level amount into the payload and null the request amount so it
         # can never be disbursed (disburse pays money OUT; a fine collects money IN).
         payload = _validate_fine_payload({**(payload or {}), "amount_uzs": amount_uzs})
+        amount_uzs = None
+    elif kind == KIND_ABSENCE_DEDUCTION:
+        # Decision-only: the effect is a credit (a standing Discount), not a cash payout.
+        payload = _validate_absence_deduction_payload(payload)
         amount_uzs = None
     return ApprovalRequest.objects.create(
         kind=kind,
@@ -434,6 +542,54 @@ def _apply_fine_effect(req: ApprovalRequest, actor) -> None:
     req.payload = {**p, "invoice_id": invoice.pk, "invoice_number": invoice.number}
 
 
+def _apply_absence_deduction_effect(req: ApprovalRequest, actor) -> None:
+    """On approval, an absence-deduction materializes a SINGLE-USE finance.Discount that
+    credits the student for the one lesson they missed — finance applies it to the next
+    invoice and then retires it (single_use), so one missed lesson is credited exactly once
+    and never recurs on later bills. Runs inside approve()'s transaction so a failed effect
+    rolls the approval back. The attendance row is locked first so two requests for the
+    same absence can't both approve (write-skew → double credit); the approve-time re-check
+    then rejects the loser. The created discount id is stamped back as the audit link."""
+    from apps.attendance.models import AttendanceRecord
+    from apps.finance.models import Discount
+    from apps.students.models import StudentProfile
+
+    p = dict(req.payload or {})
+    if p.get("discount_id"):  # defensive: the status gate already prevents re-approval
+        return
+    student_id = p.get("student_id")
+    if not student_id or not StudentProfile.objects.filter(pk=student_id).exists():
+        raise UnprocessableEntity(
+            _("The deduction's student no longer exists."), code="absence_deduction_student_missing"
+        )
+    attendance_id = p["attendance_id"]  # always present (validated at creation)
+    # Serialize concurrent approvals for the same absence on the attendance row, so the
+    # "already deducted?" check below is race-free (no write-skew double credit).
+    AttendanceRecord.objects.select_for_update().filter(pk=attendance_id).first()
+    if (
+        ApprovalRequest.objects.filter(
+            kind=KIND_ABSENCE_DEDUCTION,
+            status=ApprovalRequest.Status.APPROVED,
+            payload__attendance_id=attendance_id,
+        )
+        .exclude(pk=req.pk)
+        .exists()
+    ):
+        raise UnprocessableEntity(
+            _("This absence has already been deducted."), code="absence_deduction_duplicate"
+        )
+    discount = Discount.objects.create(
+        student_id=student_id,
+        discount_type=Discount.DiscountType.MANUAL,
+        fixed_amount_uzs=Decimal(p["fixed_amount_uzs"]),
+        approved_by=actor,
+        # One-time: the credit is for ONE missed lesson, so it applies to a single invoice
+        # then retires (it must not recur on every future bill like a standing scholarship).
+        single_use=True,
+    )
+    req.payload = {**p, "discount_id": discount.pk}
+
+
 def _apply_payment_delay_effect(req: ApprovalRequest, actor) -> None:
     """On approval, a payment-delay request pushes its target invoice's due date
     via the finance service (which re-validates + un-overdues atomically). The
@@ -468,6 +624,8 @@ def _apply_approval_effect(req: ApprovalRequest, actor) -> None:
         _apply_discount_effect(req, actor)
     elif req.kind == KIND_FINE:
         _apply_fine_effect(req, actor)
+    elif req.kind == KIND_ABSENCE_DEDUCTION:
+        _apply_absence_deduction_effect(req, actor)
     elif req.kind == KIND_PAYMENT_DELAY:
         _apply_payment_delay_effect(req, actor)
 
@@ -503,6 +661,19 @@ def _reverse_fine_effect(req: ApprovalRequest) -> None:
     req.payload = {**p, "effect_reversed": True}
 
 
+def _reverse_absence_deduction_effect(req: ApprovalRequest) -> None:
+    """Deactivate the credit Discount so an overturned deduction stops crediting — and the
+    absence becomes deductible again (a fresh request is no longer blocked as a duplicate,
+    since rejected requests are excluded from the duplicate guard)."""
+    from apps.finance.models import Discount
+
+    p = dict(req.payload or {})
+    discount_id = p.get("discount_id")
+    if discount_id:
+        Discount.objects.filter(pk=discount_id).update(is_active=False)
+        req.payload = {**p, "effect_reversed": True}
+
+
 def _reverse_payment_delay_effect(req: ApprovalRequest, actor) -> None:
     """Put the invoice's due date back to its pre-extension value (snapshotted at
     approve time), re-flagging OVERDUE if appropriate."""
@@ -528,6 +699,8 @@ def _reverse_approval_effect(req: ApprovalRequest, actor) -> None:
         _reverse_discount_effect(req)
     elif req.kind == KIND_FINE:
         _reverse_fine_effect(req)
+    elif req.kind == KIND_ABSENCE_DEDUCTION:
+        _reverse_absence_deduction_effect(req)
     elif req.kind == KIND_PAYMENT_DELAY:
         _reverse_payment_delay_effect(req, actor)
 

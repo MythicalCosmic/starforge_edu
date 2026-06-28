@@ -15,6 +15,7 @@ REQUEST_KINDS = (
     "procurement",
     "discount",
     "fine",
+    "absence_deduction",
     "payment_delay",
     "salary_prep",
     "event_split",

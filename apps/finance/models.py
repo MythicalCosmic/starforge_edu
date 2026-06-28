@@ -186,6 +186,10 @@ class Discount(models.Model):
         "users.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
     )
     is_active = models.BooleanField(default=True, db_index=True)
+    # F23-1: a one-time credit (e.g. an absence deduction) — retires (is_active=False)
+    # the first time it actually applies to an invoice, so it credits exactly one bill
+    # instead of recurring on every future invoice like a standing scholarship.
+    single_use = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

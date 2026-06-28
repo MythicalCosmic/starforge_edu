@@ -160,6 +160,13 @@ class CenterSettings(models.Model):
     # F15-1: when False, the student/parent report omits classroom rank entirely — some
     # centers reject ranking on principle (dignity DNA). Default True (rank shown).
     show_classroom_rank = models.BooleanField(default=True)
+    # F23-1: when True, a manager may request an `absence_deduction` (an A-1 KIND) that
+    # credits a student for a lesson they missed — dignity DNA (don't charge for teaching
+    # not delivered). Off by default; a center opts in to the policy.
+    absence_deduction_enabled = models.BooleanField(default=False)
+    # F23-1: when True (default) only an EXCUSED absence (one with an accepted reason)
+    # qualifies for a deduction; when False a plain ABSENT record qualifies too.
+    absence_deduction_excused_only = models.BooleanField(default=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
