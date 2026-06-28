@@ -8,7 +8,10 @@ was VALID, so a revoked/lost card is rejected. The stored-value wallet is a late
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 from django.db import models
+from django.utils.translation import gettext_lazy as _
 
 
 class CardType(models.Model):
@@ -71,3 +74,60 @@ class CardScan(models.Model):
 
     def __str__(self) -> str:  # pragma: no cover
         return f"scan#{self.pk}:c{self.card_id}:{'ok' if self.was_valid else 'invalid'}"
+
+
+class Wallet(models.Model):
+    """A student's stored-value balance (F12-1) — load money in, spend it at the
+    canteen/shop (kill cash). The `balance_uzs` is the running total of its append-only
+    `WalletTransaction`s; it is mutated only under a row lock so two concurrent spends
+    can't overdraw it. A CheckConstraint backstops the never-negative invariant."""
+
+    student = models.OneToOneField(
+        "students.StudentProfile", on_delete=models.PROTECT, related_name="wallet"
+    )
+    balance_uzs = models.DecimalField(max_digits=18, decimal_places=2, default=Decimal("0"))
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(balance_uzs__gte=Decimal("0")), name="wallet_balance_non_negative"
+            ),
+        ]
+
+    def __str__(self) -> str:  # pragma: no cover
+        return f"wallet:s{self.student_id}:{self.balance_uzs}"
+
+
+class WalletTransaction(models.Model):
+    """An append-only entry on a wallet (the audit trail of every load + spend). `amount_uzs`
+    is always positive; `kind` gives the direction. `balance_after_uzs` snapshots the
+    running balance so a statement reads straight off the ledger."""
+
+    class Kind(models.TextChoices):
+        TOPUP = "topup", _("Top up")
+        SPEND = "spend", _("Spend")
+        REFUND = "refund", _("Refund")
+
+    wallet = models.ForeignKey(Wallet, on_delete=models.PROTECT, related_name="transactions")
+    kind = models.CharField(max_length=8, choices=Kind.choices, db_index=True)
+    amount_uzs = models.DecimalField(max_digits=18, decimal_places=2)
+    balance_after_uzs = models.DecimalField(max_digits=18, decimal_places=2)
+    created_by = models.ForeignKey(
+        "users.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    note = models.CharField(max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("-created_at", "-id")
+        indexes = [models.Index(fields=("wallet", "created_at"))]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(amount_uzs__gt=Decimal("0")), name="wallet_txn_amount_positive"
+            ),
+        ]
+
+    def __str__(self) -> str:  # pragma: no cover
+        return f"wtxn#{self.pk}:{self.kind}:{self.amount_uzs}"

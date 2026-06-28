@@ -4,6 +4,7 @@ from django.utils.translation import gettext_lazy as _
 from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import status
 from rest_framework.decorators import action
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from apps.cards import services
@@ -14,9 +15,12 @@ from apps.cards.serializers import (
     IssueCardSerializer,
     RevokeCardSerializer,
     ScanSerializer,
+    WalletAmountSerializer,
+    WalletSerializer,
+    WalletTransactionSerializer,
 )
 from apps.students.selectors import student_profile_for
-from core.exceptions import PermissionException
+from core.exceptions import NotFoundException, PermissionException
 from core.permissions import Role, RolePermission, get_role_memberships, get_user_roles, has_permission_code
 from core.viewsets import TenantSafeAPIView, TenantSafeModelViewSet
 
@@ -131,3 +135,98 @@ class CardScanView(TenantSafeAPIView):
         ser.is_valid(raise_exception=True)
         result = services.scan_card(code=ser.validated_data["code"], scanned_by=request.user)
         return Response(result)
+
+
+def _wallet_payload(wallet) -> dict:
+    txns = wallet.transactions.all()[:50]
+    return {
+        "wallet": WalletSerializer(wallet).data,
+        "transactions": WalletTransactionSerializer(txns, many=True).data,
+    }
+
+
+class WalletMeView(TenantSafeAPIView):
+    """GET /api/v1/cards/wallets/me/ — the signed-in student's stored-value wallet +
+    recent transactions (F12-1)."""
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(responses={200: OpenApiResponse(description="{wallet, transactions}")}, tags=["cards"])
+    def get(self, request):
+        from apps.cards.models import Wallet
+
+        profile = student_profile_for(request.user)
+        if profile is None:
+            raise NotFoundException(_("You do not have a student profile."), code="not_a_student")
+        wallet, _created = Wallet.objects.get_or_create(student=profile)
+        return Response(_wallet_payload(wallet))
+
+
+class _StaffWalletBase(TenantSafeAPIView):
+    permission_classes = [RolePermission]
+    resource = "wallet"
+
+    def _student(self, request, student_id):
+        from apps.students.models import StudentProfile
+
+        student = StudentProfile.objects.filter(pk=student_id).first()
+        if student is None:
+            raise NotFoundException(_("Student not found."), code="student_not_found")
+        if not (request.user.is_superuser or Role.DIRECTOR in get_user_roles(request)):
+            my = {m.branch_id for m in get_role_memberships(request) if m.branch_id}
+            if student.branch_id not in my:
+                raise PermissionException(
+                    _("You can only manage a student in your own branch."), code="branch_out_of_scope"
+                )
+        return student
+
+
+class StudentWalletView(_StaffWalletBase):
+    """GET /api/v1/cards/wallets/{student_id}/ — a staff member (wallet:read) reads a
+    student's wallet + recent transactions (branch-scoped)."""
+
+    required_perms = {"get": "wallet:read"}
+
+    @extend_schema(responses={200: OpenApiResponse(description="{wallet, transactions}")}, tags=["cards"])
+    def get(self, request, student_id):
+        from apps.cards.models import Wallet
+
+        student = self._student(request, student_id)
+        wallet, _created = Wallet.objects.get_or_create(student=student)
+        return Response(_wallet_payload(wallet))
+
+
+class WalletTopUpView(_StaffWalletBase):
+    """POST /api/v1/cards/wallets/{student_id}/topup/ — load money onto the wallet
+    (wallet:write, branch-scoped)."""
+
+    required_perms = {"post": "wallet:write"}
+
+    @extend_schema(request=WalletAmountSerializer, responses={201: WalletTransactionSerializer}, tags=["cards"])
+    def post(self, request, student_id):
+        student = self._student(request, student_id)
+        ser = WalletAmountSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        txn = services.top_up(
+            student=student, amount=ser.validated_data["amount"], actor=request.user,
+            note=ser.validated_data.get("note", ""),
+        )
+        return Response(WalletTransactionSerializer(txn).data, status=status.HTTP_201_CREATED)
+
+
+class WalletSpendView(_StaffWalletBase):
+    """POST /api/v1/cards/wallets/{student_id}/spend/ — charge the wallet (e.g. a canteen
+    purchase). 422 insufficient_funds if the balance is too low (wallet:write)."""
+
+    required_perms = {"post": "wallet:write"}
+
+    @extend_schema(request=WalletAmountSerializer, responses={201: WalletTransactionSerializer}, tags=["cards"])
+    def post(self, request, student_id):
+        student = self._student(request, student_id)
+        ser = WalletAmountSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        txn = services.spend(
+            student=student, amount=ser.validated_data["amount"], actor=request.user,
+            note=ser.validated_data.get("note", ""),
+        )
+        return Response(WalletTransactionSerializer(txn).data, status=status.HTTP_201_CREATED)

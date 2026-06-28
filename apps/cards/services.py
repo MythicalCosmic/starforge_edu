@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import secrets
+from decimal import Decimal, InvalidOperation
 
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
-from apps.cards.models import Card, CardScan, CardType
+from apps.cards.models import Card, CardScan, CardType, Wallet, WalletTransaction
 from core.exceptions import NotFoundException, UnprocessableEntity
+
+_CENT = Decimal("0.01")
 
 
 @transaction.atomic
@@ -86,3 +89,74 @@ def scan_card(*, code: str, scanned_by=None) -> dict:
         "card_type": card.card_type.name,
         "scanned_at": scan.scanned_at,
     }
+
+
+# ---------------------------------------------------------------------------
+# Stored-value wallet (F12-1) — load + spend, append-only, locked balance
+# ---------------------------------------------------------------------------
+
+
+def _clean_amount(raw) -> Decimal:
+    """A positive, finite, in-range money amount — a clean 4xx on junk, never a 500 (the
+    NaN/Infinity + NUMERIC(18,2) overflow class)."""
+    try:
+        amount = Decimal(str(raw))
+    except (InvalidOperation, ValueError):
+        raise UnprocessableEntity(_("Amount must be a number."), code="invalid_amount") from None
+    if not amount.is_finite():
+        raise UnprocessableEntity(_("Amount must be a finite number."), code="invalid_amount")
+    if not (Decimal("0") < amount < Decimal("1e16")):
+        raise UnprocessableEntity(_("Amount is out of range."), code="amount_out_of_range")
+    amount = amount.quantize(_CENT)
+    if not (Decimal("0") < amount < Decimal("1e16")):  # rounding can tip 0.00x / boundary
+        raise UnprocessableEntity(_("Amount is out of range."), code="amount_out_of_range")
+    return amount
+
+
+def _locked_wallet(student) -> Wallet:
+    """The student's wallet, created on first use, then RE-FETCHED under select_for_update
+    so the balance read-modify-write serialises (no concurrent overdraw / lost update)."""
+    Wallet.objects.get_or_create(student=student)
+    return Wallet.objects.select_for_update().get(student=student)
+
+
+def _post(wallet: Wallet, *, kind, amount: Decimal, actor, note: str) -> WalletTransaction:
+    wallet.save(update_fields=["balance_uzs", "updated_at"])
+    return WalletTransaction.objects.create(
+        wallet=wallet,
+        kind=kind,
+        amount_uzs=amount,
+        balance_after_uzs=wallet.balance_uzs,
+        created_by=actor,
+        note=(note or "")[:255],
+    )
+
+
+@transaction.atomic
+def top_up(*, student, amount, actor=None, note: str = "", refund: bool = False) -> WalletTransaction:
+    """Load money onto a student's wallet (or REFUND money back). Locked balance update +
+    an append-only transaction. `refund=True` records it as a refund rather than a top-up."""
+    amt = _clean_amount(amount)
+    wallet = _locked_wallet(student)
+    new_balance = wallet.balance_uzs + amt
+    # NUMERIC(18,2) ceiling: a single amount is bounded, but the CUMULATIVE balance must
+    # be too — reject an overflowing total as a clean 422 rather than a DB-overflow 500.
+    if new_balance >= Decimal("1e16"):
+        raise UnprocessableEntity(
+            _("That would exceed the wallet's maximum balance."), code="balance_overflow"
+        )
+    wallet.balance_uzs = new_balance
+    kind = WalletTransaction.Kind.REFUND if refund else WalletTransaction.Kind.TOPUP
+    return _post(wallet, kind=kind, amount=amt, actor=actor, note=note)
+
+
+@transaction.atomic
+def spend(*, student, amount, actor=None, note: str = "") -> WalletTransaction:
+    """Charge a student's wallet (e.g. a canteen purchase). The row lock + the
+    insufficient-funds check make an overdraw impossible even under concurrent spends."""
+    amt = _clean_amount(amount)
+    wallet = _locked_wallet(student)
+    if wallet.balance_uzs < amt:
+        raise UnprocessableEntity(_("Insufficient wallet balance."), code="insufficient_funds")
+    wallet.balance_uzs = wallet.balance_uzs - amt
+    return _post(wallet, kind=WalletTransaction.Kind.SPEND, amount=amt, actor=actor, note=note)

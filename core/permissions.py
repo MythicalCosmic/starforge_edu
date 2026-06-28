@@ -132,9 +132,11 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "penalty:staff",
         # F3-5: HOD schedules staff meetings (reading/RSVP is open to invitees).
         "meeting:write",
-        # F12-1: HOD manages card types + issues/revokes cards in their branch.
+        # F12-1: HOD manages card types + issues/revokes cards in their branch, and reads
+        # student wallets (oversight; the cashier/reception load + charge them).
         "card:read",
         "card:write",
+        "wallet:read",
     },
     Role.TEACHER: {
         "students:read",
@@ -205,7 +207,9 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "achievements:read",
         # F24-1: a student sees their own demerit record (row-scoped to self).
         "penalty:read",
-        # F12-1: a student sees their own card(s) (row-scoped to self in get_queryset).
+        # F12-1: a student sees their own card(s) (row-scoped to self). Their own wallet
+        # is read via /wallets/me/ (IsAuthenticated, self-resolved) — NOT wallet:read,
+        # which is the STAFF grant for reading any student's wallet by id.
         "card:read",
     },
     Role.PARENT: {
@@ -274,6 +278,9 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "sale:write",
         "sale:refund",
         "penalty:read",  # F24-1: see own discipline
+        # F12-1: the cashier loads + charges student wallets (stored value at the till).
+        "wallet:read",
+        "wallet:write",
     },
     # F24-1: every staff member holds penalty:read so they can see their OWN disciplinary
     # record (get_queryset still scopes a non-manager to their own rows only).
@@ -299,10 +306,13 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
         "cohorts:*",
         "parents:*",
         "teachers:read",
-        # F12-1: reception issues cards + scans them at the front desk.
+        # F12-1: reception issues cards + scans them at the front desk, and loads/charges
+        # student wallets (stored value at the front desk).
         "card:read",
         "card:write",
         "card:scan",
+        "wallet:read",
+        "wallet:write",
         "schedule:*",
         "printing:read",  # D4-LD-7: manage printers/agents
         "printing:write",
