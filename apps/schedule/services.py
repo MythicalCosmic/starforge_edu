@@ -19,7 +19,7 @@ from core.utils import current_schema
 
 ICAL_SALT = "schedule.ical"
 # A leaked feed URL grants the user's schedule until the token expires; bound to
-# token_version so password-change / logout-all also revokes outstanding feeds.
+# token_version so password-change / logout also revokes outstanding feeds.
 ICAL_TOKEN_MAX_AGE = dt.timedelta(days=30)
 
 
@@ -318,7 +318,7 @@ def lessons_for_token(token: str):
     if user is None or not user.is_active:
         # A deactivated account's feed URL must stop leaking schedule data.
         raise AuthenticationException(_("Invalid feed token."), code="authentication_failed")
-    # token_version mismatch ⇒ password-change / logout-all revoked this feed.
+    # token_version mismatch ⇒ password-change / logout revoked this feed.
     if data.get("tv") != user.token_version:
         raise AuthenticationException(_("Invalid feed token."), code="authentication_failed")
     try:

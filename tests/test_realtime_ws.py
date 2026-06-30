@@ -37,10 +37,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # helpers
 # --------------------------------------------------------------------------- #
 def _mint_access(tenant, user) -> str:
-    from apps.auth.services import issue_token_pair
+    from apps.auth.services import issue_token
 
     with schema_context(tenant.schema_name):
-        return issue_token_pair(user)["access"]
+        return issue_token(user)["access"]
 
 
 async def _connect(path: str, headers, token: str | None = None):

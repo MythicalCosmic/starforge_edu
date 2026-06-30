@@ -16,8 +16,7 @@ from .serializers import (
     PasswordChangeSerializer,
     PasswordResetConfirmSerializer,
     PasswordResetRequestSerializer,
-    RefreshSerializer,
-    TokenPairSerializer,
+    TokenSerializer,
 )
 from .throttles import (
     LoginIPThrottle,
@@ -39,7 +38,7 @@ class LoginView(APIView):
         summary="Log in with username and password",
         request=LoginSerializer,
         responses={
-            200: TokenPairSerializer,
+            200: TokenSerializer,
             401: OpenApiResponse(description="invalid_credentials envelope"),
             429: OpenApiResponse(description="throttled envelope"),
         },
@@ -62,14 +61,14 @@ class LoginView(APIView):
             platform=data.get("platform", ""),
             user_agent=ua,
         )
-        return Response(services.issue_token_pair(user))
+        return Response(services.issue_token(user))
 
 
 class PasswordChangeView(APIView):
     """POST /api/v1/auth/password/change/  body: {old_password, new_password}
 
-    Ends every other session (all refreshes blacklisted, `tv` bumped) and
-    returns a fresh pair so THIS device stays logged in.
+    Ends every other session (bumps `tv`) and returns a fresh access token so
+    THIS device stays logged in.
     """
 
     permission_classes = [IsAuthenticated, DenyWriteForReadOnlyToken]
@@ -78,7 +77,7 @@ class PasswordChangeView(APIView):
         summary="Change password (ends all other sessions)",
         request=PasswordChangeSerializer,
         responses={
-            200: TokenPairSerializer,
+            200: TokenSerializer,
             400: OpenApiResponse(description="wrong_password / weak_password envelope"),
         },
         tags=["auth"],
@@ -86,12 +85,12 @@ class PasswordChangeView(APIView):
     def post(self, request):
         serializer = PasswordChangeSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        pair = services.change_password(
+        token = services.change_password(
             user=request.user,
             old_password=serializer.validated_data["old_password"],
             new_password=serializer.validated_data["new_password"],
         )
-        return Response(pair)
+        return Response(token)
 
 
 class PasswordResetRequestView(APIView):
@@ -157,71 +156,17 @@ class PasswordResetConfirmView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-class JWTRefreshView(APIView):
-    """POST /api/v1/auth/refresh/  body: {refresh}  -> {access, refresh}
+class LogoutView(APIView):
+    """POST /api/v1/auth/logout/  -> 204
 
-    Rotates the refresh token (the old one is blacklisted) and re-stamps the
-    TD-1 claims onto the new pair. Tenant-bound: a refresh minted on another
-    center returns 401 `tenant_mismatch`. Replaying a blacklisted token revokes
-    all of the user's sessions (401 `refresh_reused`).
-    """
-
-    permission_classes = [AllowAny]
-
-    @extend_schema(
-        summary="Rotate a refresh token",
-        request=RefreshSerializer,
-        responses={
-            200: TokenPairSerializer,
-            401: OpenApiResponse(
-                description="authentication_failed / tenant_mismatch / refresh_reused envelope"
-            ),
-        },
-        tags=["auth"],
-    )
-    def post(self, request):
-        serializer = RefreshSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        pair = services.rotate_refresh_token(serializer.validated_data["refresh"])
-        return Response(pair)
-
-
-class JWTLogoutView(APIView):
-    """POST /api/v1/auth/logout/  body: {refresh}  -> 200
-
-    Blacklists a single refresh token (this device), tenant-bound: a token from
-    another center is rejected (401 tenant_mismatch) instead of silently failing.
-    """
-
-    permission_classes = [AllowAny]
-
-    @extend_schema(
-        summary="Log out this device (blacklist one refresh token)",
-        request=RefreshSerializer,
-        responses={
-            200: OpenApiResponse(description="Refresh token blacklisted."),
-            401: OpenApiResponse(description="authentication_failed / tenant_mismatch envelope"),
-        },
-        tags=["auth"],
-    )
-    def post(self, request):
-        serializer = RefreshSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        services.logout_one(serializer.validated_data["refresh"])
-        return Response(status=status.HTTP_200_OK)
-
-
-class LogoutAllView(APIView):
-    """POST /api/v1/auth/logout-all/  -> 204
-
-    Revokes every session: blacklists all of the user's refresh tokens and bumps
-    `token_version` so live access tokens are rejected too (D1-LC-8).
-    """
+    Single-token auth: revokes every session for the caller by bumping
+    `token_version`, so the live access token (and any other) is rejected on the
+    next request. Requires the caller's own (full-scope) access token."""
 
     permission_classes = [IsAuthenticated, DenyWriteForReadOnlyToken]
 
     @extend_schema(
-        summary="Log out of every device",
+        summary="Log out (revoke all of the caller's sessions)",
         request=None,
         responses={204: OpenApiResponse(description="All sessions revoked.")},
         tags=["auth"],

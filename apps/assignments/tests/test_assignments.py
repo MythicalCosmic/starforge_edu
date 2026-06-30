@@ -547,11 +547,11 @@ def test_assignment_action_endpoints_cross_tenant_rejected(
 ):
     """A token minted in tenant A must 401 `tenant_mismatch` against tenant B's
     host on every submission/grade/upload action — not leak a 403/404/422."""
-    from apps.auth.services import issue_token_pair
+    from apps.auth.services import issue_token
 
     user = user_in(tenant_a, roles=["director"])
     with schema_context(tenant_a.schema_name):
-        access = issue_token_pair(user)["access"]
+        access = issue_token(user)["access"]
 
     client_b = client_for(tenant_b)
     client_b.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")

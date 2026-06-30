@@ -568,11 +568,11 @@ def test_register_agent_registrar_own_branch_allowed(tenant_a, user_in, as_user)
 # Cross-tenant isolation (TD-1)
 # --------------------------------------------------------------------------- #
 def test_jobs_cross_tenant_token_rejected(tenant_a, tenant_b, user_in, client_for):
-    from apps.auth.services import issue_token_pair
+    from apps.auth.services import issue_token
 
     user = user_in(tenant_a, roles=[Role.DIRECTOR])
     with schema_context(tenant_a.schema_name):
-        access = issue_token_pair(user)["access"]
+        access = issue_token(user)["access"]
     client_b = client_for(tenant_b)
     client_b.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
     resp = client_b.get(JOBS_URL)

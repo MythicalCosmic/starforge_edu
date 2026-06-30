@@ -635,7 +635,7 @@ def test_dau_counts_users_seen_today(tenant_a):
 # API: cross-tenant isolation + permissions + query-count (D4-LB-5)
 # --------------------------------------------------------------------------- #
 def test_runs_cross_tenant_isolation(tenant_a, tenant_b, user_in, client_for):
-    from apps.auth.services import issue_token_pair
+    from apps.auth.services import issue_token
 
     with schema_context(tenant_a.schema_name):
         a_user = user_in(tenant_a, roles=[Role.DIRECTOR])
@@ -645,7 +645,7 @@ def test_runs_cross_tenant_isolation(tenant_a, tenant_b, user_in, client_for):
             format="pdf",
             status=ReportRun.Status.DONE,
         )
-        access = issue_token_pair(a_user)["access"]
+        access = issue_token(a_user)["access"]
     # A tenant-A token used against tenant-B's host must 401 (TD-1 tenant_mismatch).
     client = client_for(tenant_b)
     client.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")

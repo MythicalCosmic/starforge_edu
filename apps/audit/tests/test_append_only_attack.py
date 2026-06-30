@@ -52,12 +52,12 @@ def test_detail_mutations_405_as_director(tenant_a, user_in, as_user, method):
 @pytest.mark.parametrize("method", ["put", "patch", "delete"])
 def test_detail_mutations_405_as_superuser(tenant_a, client_for, method):
     row_id = _seed_one(tenant_a)
-    from apps.auth.services import issue_token_pair
+    from apps.auth.services import issue_token
     from apps.users.tests.factories import UserFactory
 
     with schema_context(tenant_a.schema_name):
         su = UserFactory(is_superuser=True, is_staff=True)
-        access = issue_token_pair(su)["access"]
+        access = issue_token(su)["access"]
     client = client_for(tenant_a)
     client.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
     resp = getattr(client, method)(DETAIL_URL.format(row_id), {}, format="json")
@@ -73,12 +73,12 @@ def test_collection_post_405_as_director(tenant_a, user_in, as_user):
 
 
 def test_collection_post_405_as_superuser(tenant_a, client_for):
-    from apps.auth.services import issue_token_pair
+    from apps.auth.services import issue_token
     from apps.users.tests.factories import UserFactory
 
     with schema_context(tenant_a.schema_name):
         su = UserFactory(is_superuser=True, is_staff=True)
-        access = issue_token_pair(su)["access"]
+        access = issue_token(su)["access"]
     client = client_for(tenant_a)
     client.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
     resp = client.post(LIST_URL, {"action": "create"}, format="json")

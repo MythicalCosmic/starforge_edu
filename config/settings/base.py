@@ -299,10 +299,10 @@ REST_FRAMEWORK = {
 NUM_PROXIES = env("NUM_PROXIES")
 
 SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=15),
-    "REFRESH_TOKEN_LIFETIME": timedelta(days=14),
-    "ROTATE_REFRESH_TOKENS": True,
-    "BLACKLIST_AFTER_ROTATION": True,
+    # Single-token auth (no refresh): the access token IS the session, so it is
+    # longer-lived. Server-side revocation is via `token_version` (logout / password
+    # change / role change bump it; core.authentication rejects a stale tv).
+    "ACCESS_TOKEN_LIFETIME": timedelta(days=env.int("ACCESS_TOKEN_DAYS", default=7)),
     "UPDATE_LAST_LOGIN": True,
     "AUTH_HEADER_TYPES": ("Bearer",),
     "USER_ID_FIELD": "id",

@@ -32,13 +32,13 @@ async def test_ws_authed_connect_accepted(tenant_a, user_in):
 
     Pins the middleware doing the user lookup under the tenant schema on the
     database_sync_to_async worker thread (the loop-thread set_tenant bug)."""
-    from apps.auth.services import issue_token_pair
+    from apps.auth.services import issue_token
 
     @sync_to_async
     def _mint():
         user = user_in(tenant_a)  # creates the user inside tenant_a's schema
         with schema_context(tenant_a.schema_name):
-            return user.pk, issue_token_pair(user)["access"]
+            return user.pk, issue_token(user)["access"]
 
     user_pk, token = await _mint()
     comm = WebsocketCommunicator(application, f"/ws/ping/?token={token}", headers=HOST_HEADERS)
@@ -54,13 +54,13 @@ async def test_ws_authed_connect_accepted(tenant_a, user_in):
 async def test_ws_cross_tenant_token_rejected(tenant_a, tenant_b, user_in):
     """TD-1 over Channels: a tenant_a token presented on tenant_b's host must
     NOT authenticate (schema claim != resolved tenant -> AnonymousUser -> 4401)."""
-    from apps.auth.services import issue_token_pair
+    from apps.auth.services import issue_token
 
     @sync_to_async
     def _mint():
         user = user_in(tenant_a)
         with schema_context(tenant_a.schema_name):
-            return issue_token_pair(user)["access"]
+            return issue_token(user)["access"]
 
     token = await _mint()
     comm = WebsocketCommunicator(application, f"/ws/ping/?token={token}", headers=HOST_HEADERS_B)
@@ -75,14 +75,14 @@ async def test_ws_cross_tenant_token_rejected(tenant_a, tenant_b, user_in):
 async def test_ws_stale_tv_rejected(tenant_a, user_in):
     """TD-1 tv claim over Channels: bumping token_version (logout-everywhere /
     role change) invalidates already-minted access tokens for websockets too."""
-    from apps.auth.services import issue_token_pair
+    from apps.auth.services import issue_token
     from apps.users.services import bump_token_version
 
     @sync_to_async
     def _mint_and_bump():
         user = user_in(tenant_a)
         with schema_context(tenant_a.schema_name):
-            token = issue_token_pair(user)["access"]
+            token = issue_token(user)["access"]
             bump_token_version(user.pk)
         return token
 

@@ -20,9 +20,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
-from rest_framework_simplejwt.exceptions import TokenError
-from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
-from rest_framework_simplejwt.tokens import RefreshToken, UntypedToken
+from rest_framework_simplejwt.tokens import AccessToken
 
 from apps.auth.signals import login_failed, login_succeeded, otp_failed, otp_requested, otp_verified
 from apps.users.models import OTP
@@ -94,14 +92,14 @@ def login_with_password(*, username: str, password: str, ip: str = "", user_agen
 
 
 def change_password(*, user: User, old_password: str, new_password: str) -> dict[str, str]:
-    """Verify the old password, set the new one (ending every session), and
-    return a fresh token pair so the current device stays logged in."""
+    """Verify the old password, set the new one (ending every other session by bumping
+    tv), and return a fresh access token so THIS device stays logged in."""
     if not user.check_password(old_password):
         raise ValidationException(_("Current password is incorrect."), code="wrong_password")
     _validate_new_password(new_password, user)
-    set_user_password(user, new_password)  # blacklists all refreshes + bumps tv
+    set_user_password(user, new_password)  # bumps tv -> every existing token dies
     user.refresh_from_db(fields=["token_version"])
-    return issue_token_pair(user)
+    return issue_token(user)
 
 
 def _validate_new_password(raw: str, user: User | None) -> None:
@@ -371,130 +369,23 @@ def _token_claims(user: User) -> dict[str, object]:
     }
 
 
-def issue_token_pair(user: User) -> dict[str, str]:
-    """Mint an access+refresh pair via simplejwt, both carrying TD-1 claims."""
+def issue_token(user: User) -> dict[str, str]:
+    """Mint a SINGLE access token carrying the TD-1 claims (schema / tv / roles).
 
-    refresh = RefreshToken.for_user(user)
-    access = refresh.access_token
-    claims = _token_claims(user)
-    for token in (refresh, access):
-        for key, value in claims.items():
-            token[key] = value
-    return {"access": str(access), "refresh": str(refresh)}
-
-
-def rotate_refresh_token(raw_refresh: str) -> dict[str, str]:
-    """Rotate a refresh token: blacklist the old, mint a fresh pair (with TD-1
-    claims). Tenant-bound (BLOCKER fix): a refresh minted on tenant A presented
-    to tenant B is rejected before any user resolution — per-schema pk
-    collisions would otherwise mint valid tokens for an unrelated user.
-    Presenting an already-blacklisted token is treated as theft — every session
-    for that user is revoked and 401 ``refresh_reused`` raised."""
-    try:
-        refresh = RefreshToken(raw_refresh)  # type: ignore[arg-type]
-    except TokenError as exc:
-        _detect_refresh_reuse(raw_refresh)  # raises refresh_reused if it is reuse
-        raise AuthenticationException(
-            _("Invalid or expired refresh token."), code="authentication_failed"
-        ) from exc
-
-    if refresh.get("schema") != current_schema():
-        raise AuthenticationException(
-            _("This token was issued for a different center."), code="tenant_mismatch"
-        )
-
-    user = User.objects.filter(pk=refresh.get("user_id")).first()
-    if user is None:
-        raise AuthenticationException(_("Invalid or expired refresh token."), code="authentication_failed")
-
-    # A deactivated account must not mint fresh tokens. The HTTP access path is
-    # already covered by simplejwt's get_user(is_active) check, but this refresh
-    # path does its own user lookup, so enforce it here too (symmetric paths).
-    if not user.is_active:
-        raise AuthenticationException(_("This account is inactive."), code="user_inactive")
-
-    # Honour the token_version like the access path (core/authentication.py): a
-    # password change / role change / logout-all bumps tv, so a refresh carrying
-    # a stale tv must NOT mint a fresh pair — otherwise the session never ends.
-    if refresh.get("tv") != user.token_version:
-        raise AuthenticationException(
-            _("Your session is no longer valid. Please sign in again."), code="token_stale"
-        )
-
-    refresh.blacklist()
-    return issue_token_pair(user)
-
-
-def logout_one(raw_refresh: str) -> None:
-    """Blacklist a single refresh token (this device). Tenant-bound: a refresh
-    minted on another center is rejected (it must be blacklisted in ITS schema,
-    where its jti lives) rather than silently no-op'ing here (the stock
-    TokenBlacklistView skipped this check)."""
-    try:
-        refresh = RefreshToken(raw_refresh)  # type: ignore[arg-type]
-    except TokenError as exc:
-        raise AuthenticationException(
-            _("Invalid or expired refresh token."), code="authentication_failed"
-        ) from exc
-    if refresh.get("schema") != current_schema():
-        raise AuthenticationException(
-            _("This token was issued for a different center."), code="tenant_mismatch"
-        )
-    refresh.blacklist()
-
-
-def _detect_refresh_reuse(raw_refresh: str) -> None:
-    """If `raw_refresh` is a syntactically valid token whose jti is already
-    blacklisted, this *may* be a replay-theft — revoke all of that user's tokens.
-    Only ever acts on tokens minted for THIS schema (cross-tenant tokens must not
-    revoke a pk-colliding stranger's sessions).
-
-    Crucially, theft is distinguished from legitimate invalidation by the `tv`
-    claim: rotation blacklists a token WITHOUT bumping `tv` (so a replayed
-    rotated token still carries the live `tv` = theft signal), whereas
-    logout-everywhere / password-change / role-change blacklist tokens AND bump
-    `tv`. A blacklisted token whose `tv` is already stale was killed by one of
-    those — re-nuking would also kill the fresh pair the user just received, so
-    we treat it as a plain expired token instead."""
-    try:
-        token = UntypedToken(raw_refresh)  # type: ignore[arg-type]  # signature + exp only
-    except TokenError:
-        return
-    if token.get("schema") != current_schema():
-        return
-    jti = token.get("jti")
-    user_id = token.get("user_id")
-    if not jti or not user_id:
-        return
-    if not BlacklistedToken.objects.filter(token__jti=jti).exists():
-        return
-    user = User.objects.filter(pk=user_id).first()
-    if user is None or token.get("tv") != user.token_version:
-        return  # already invalidated by a tv bump — not theft
-    _revoke_all_refresh_tokens(user_id)
-    bump_token_version(user_id)
-    # TD-9: refresh-reuse is a security event (no dedicated signal) — audit it.
-    from apps.audit.services import audit_log
-
-    audit_log(
-        actor=user,
-        action="login_failed",
-        resource_type="users.User",
-        resource_id=str(user_id),
-        after={"event": "refresh_reuse_detected", "jti": jti},
-    )
-    raise AuthenticationException(_("Refresh token reuse detected."), code="refresh_reused")
-
-
-def _revoke_all_refresh_tokens(user_id: int) -> None:
-    for outstanding in OutstandingToken.objects.filter(user_id=user_id):
-        BlacklistedToken.objects.get_or_create(token=outstanding)
+    Single-token auth (no refresh): a longer-lived access token is the whole session.
+    Revocation is via ``token_version`` — logout, password change, and role change all
+    bump ``tv``, which ``core.authentication`` rejects on the next request, so a token
+    can still be killed server-side without a refresh/blacklist round-trip."""
+    access = AccessToken.for_user(user)
+    for key, value in _token_claims(user).items():
+        access[key] = value
+    return {"access": str(access)}
 
 
 def logout_everywhere(user: User) -> None:
-    """Blacklist every outstanding refresh for the user and bump `tv` so live
-    access tokens die too (D1-LC-8)."""
-    _revoke_all_refresh_tokens(user.pk)
+    """Revoke every session for the user by bumping ``tv`` — live access tokens carry
+    the old ``tv`` and ``core.authentication`` rejects them on the next request
+    (single-token auth: there are no refresh tokens to blacklist)."""
     bump_token_version(user.pk)
     # TD-9: logout has no signal — audit it directly.
     from apps.audit.services import audit_log

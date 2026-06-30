@@ -134,15 +134,15 @@ def user_in():
 
 @pytest.fixture
 def as_user(client_for):
-    """as_user(tenant, user) → authed APIClient. Mints a REAL token pair via
-    apps.auth.services.issue_token_pair inside the tenant schema, so the TD-1
+    """as_user(tenant, user) → authed APIClient. Mints a REAL access token via
+    apps.auth.services.issue_token inside the tenant schema, so the TD-1
     schema/tv claims are exercised for free."""
 
     def _make(tenant, user):
-        from apps.auth.services import issue_token_pair
+        from apps.auth.services import issue_token
 
         with schema_context(tenant.schema_name):
-            access = issue_token_pair(user)["access"]
+            access = issue_token(user)["access"]
         client = client_for(tenant)
         client.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
         return client

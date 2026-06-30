@@ -14,8 +14,7 @@ LOGIN_URL = "/api/v1/auth/login/"
 CHANGE_URL = "/api/v1/auth/password/change/"
 RESET_REQUEST_URL = "/api/v1/auth/password/reset/request/"
 RESET_CONFIRM_URL = "/api/v1/auth/password/reset/confirm/"
-REFRESH_URL = "/api/v1/auth/refresh/"
-LOGOUT_ALL_URL = "/api/v1/auth/logout-all/"
+LOGOUT_URL = "/api/v1/auth/logout/"
 ME_URL = "/api/v1/users/me/"
 
 PASSWORD = "Quasar-Lantern-42"
@@ -53,7 +52,7 @@ def test_login_happy_path_registers_device(tenant_a, client_for, user_in):
     assert resp.status_code == 200
     body = resp.json()
     assert "access" in body
-    assert "refresh" in body
+    assert "refresh" not in body  # single-token auth — no refresh issued
 
     with schema_context(tenant_a.schema_name):
         assert user.devices.filter(device_id="dev-1", platform="android").exists()
@@ -122,28 +121,27 @@ def test_password_change_wrong_old_400(tenant_a, user_in, as_user):
 
 
 def test_password_change_ends_other_sessions(tenant_a, client_for, user_in, as_user):
-    from apps.auth.services import issue_token_pair
+    from apps.auth.services import issue_token
 
     user = _password_user(tenant_a, user_in)
     with schema_context(tenant_a.schema_name):
-        old_pair = issue_token_pair(user)
+        old = issue_token(user)
     client = as_user(tenant_a, user)
 
     resp = client.post(CHANGE_URL, {"old_password": PASSWORD, "new_password": NEW_PASSWORD}, format="json")
     assert resp.status_code == 200
-    new_pair = resp.json()
+    new = resp.json()
+    assert "access" in new
+    assert "refresh" not in new
 
-    # Old access dies (tv bumped), old refresh dies (blacklisted)...
+    # Old access dies (tv bumped)...
     stale = client_for(tenant_a)
-    stale.credentials(HTTP_AUTHORIZATION=f"Bearer {old_pair['access']}")
+    stale.credentials(HTTP_AUTHORIZATION=f"Bearer {old['access']}")
     assert stale.get(ME_URL).status_code == 401
-    assert (
-        client_for(tenant_a).post(REFRESH_URL, {"refresh": old_pair["refresh"]}, format="json")
-    ).status_code == 401
 
-    # ...the returned pair works, and so does the new password.
+    # ...the returned token works, and so does the new password.
     fresh = client_for(tenant_a)
-    fresh.credentials(HTTP_AUTHORIZATION=f"Bearer {new_pair['access']}")
+    fresh.credentials(HTTP_AUTHORIZATION=f"Bearer {new['access']}")
     assert fresh.get(ME_URL).status_code == 200
     assert (
         client_for(tenant_a).post(
@@ -252,43 +250,8 @@ def test_reset_request_ip_distinct_identifier_cap(tenant_a, client_for):
 
 
 # ---------------------------------------------------------------------------
-# Refresh rotation, reuse detection, tenant binding
+# Single-token session revocation (token_version), tenant binding
 # ---------------------------------------------------------------------------
-
-
-def test_refresh_rotation_and_reuse_detection(tenant_a, client_for, user_in):
-    from apps.auth.services import issue_token_pair
-
-    user = user_in(tenant_a, roles=["teacher"])
-    with schema_context(tenant_a.schema_name):
-        pair = issue_token_pair(user)
-    client = client_for(tenant_a)
-
-    rotated = client.post(REFRESH_URL, {"refresh": pair["refresh"]}, format="json")
-    assert rotated.status_code == 200
-    assert rotated.json()["refresh"] != pair["refresh"]
-
-    replay = client.post(REFRESH_URL, {"refresh": pair["refresh"]}, format="json")
-    assert replay.status_code == 401
-    assert replay.json()["error"]["code"] == "refresh_reused"
-
-    # Reuse revokes EVERYTHING — the rotated refresh is dead too (D1-LC-6).
-    dead = client.post(REFRESH_URL, {"refresh": rotated.json()["refresh"]}, format="json")
-    assert dead.status_code == 401
-
-
-def test_cross_tenant_refresh_rejected(tenant_a, tenant_b, client_for, user_in):
-    """BLOCKER regression: a refresh minted on tenant A presented to tenant B
-    must 401 tenant_mismatch — never resolve a pk-colliding user in B."""
-    from apps.auth.services import issue_token_pair
-
-    user = user_in(tenant_a, roles=["teacher"])
-    with schema_context(tenant_a.schema_name):
-        pair = issue_token_pair(user)
-
-    resp = client_for(tenant_b).post(REFRESH_URL, {"refresh": pair["refresh"]}, format="json")
-    assert resp.status_code == 401
-    assert resp.json()["error"]["code"] == "tenant_mismatch"
 
 
 def test_token_stale_after_role_change(tenant_a, user_in, as_user):
@@ -307,24 +270,19 @@ def test_token_stale_after_role_change(tenant_a, user_in, as_user):
     assert resp.json()["error"]["code"] == "token_stale"
 
 
-def test_logout_all_kills_access_and_refresh(tenant_a, client_for, user_in, as_user):
-    from apps.auth.services import issue_token_pair
-
+def test_logout_revokes_the_access_token(tenant_a, user_in, as_user):
+    """Single-token logout bumps token_version, so the caller's live access token is
+    rejected (token_stale) on the very next request — server-side revocation with no
+    refresh/blacklist round-trip."""
     user = user_in(tenant_a, roles=["teacher"])
-    with schema_context(tenant_a.schema_name):
-        pair = issue_token_pair(user)
     client = as_user(tenant_a, user)
+    assert client.get(ME_URL).status_code == 200
 
-    assert client.post(LOGOUT_ALL_URL).status_code == 204
+    assert client.post(LOGOUT_URL).status_code == 204
 
-    stale = client_for(tenant_a)
-    stale.credentials(HTTP_AUTHORIZATION=f"Bearer {pair['access']}")
-    resp = stale.get(ME_URL)
+    resp = client.get(ME_URL)  # same token, now stale
     assert resp.status_code == 401
     assert resp.json()["error"]["code"] == "token_stale"
-    assert (
-        client_for(tenant_a).post(REFRESH_URL, {"refresh": pair["refresh"]}, format="json")
-    ).status_code == 401
 
 
 def test_throttle_survives_non_string_identifier(tenant_a, client_for):

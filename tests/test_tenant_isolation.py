@@ -18,11 +18,11 @@ CROSS_TENANT_URLS = ["/api/v1/users/me/", "/api/v1/students/", "/api/v1/cohorts/
 
 @pytest.mark.parametrize("url", CROSS_TENANT_URLS)
 def test_cross_tenant_token_rejected(tenant_a, tenant_b, user_in, client_for, url):
-    from apps.auth.services import issue_token_pair
+    from apps.auth.services import issue_token
 
     user = user_in(tenant_a, roles=["director"])
     with schema_context(tenant_a.schema_name):
-        access = issue_token_pair(user)["access"]
+        access = issue_token(user)["access"]
 
     client_b = client_for(tenant_b)
     client_b.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")

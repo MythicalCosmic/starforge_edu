@@ -42,10 +42,7 @@ class PasswordResetConfirmSerializer(_StrictIdentifierMixin, serializers.Seriali
     new_password = serializers.CharField(max_length=128, trim_whitespace=False)
 
 
-class TokenPairSerializer(serializers.Serializer):
+class TokenSerializer(serializers.Serializer):
+    """Single-token auth response: one JWT access token (no refresh)."""
+
     access = serializers.CharField()
-    refresh = serializers.CharField()
-
-
-class RefreshSerializer(serializers.Serializer):
-    refresh = serializers.CharField()
