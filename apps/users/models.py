@@ -133,6 +133,38 @@ class Device(models.Model):
         ordering = ("-last_seen_at",)
 
 
+class Session(models.Model):
+    """Custom auth session (no JWT): the opaque ``key`` is the Bearer token sent on
+    every request. The row lives in the tenant schema, so a key only authenticates
+    against the center that issued it — tenant binding is automatic, no token claim
+    needed. Revocation is a row update (``revoked_at``); roles are read live per
+    request, so a role change takes effect immediately (no stale-token window)."""
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="auth_sessions")
+    key = models.CharField(max_length=64, unique=True, db_index=True)
+    ip_address = models.CharField(max_length=64, blank=True)
+    user_agent = models.CharField(max_length=512, blank=True)
+    device_id = models.CharField(max_length=128, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_used_at = models.DateTimeField(default=timezone.now)
+    expires_at = models.DateTimeField(db_index=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    # D4-LE-4: an impersonation session is read-only (DenyWriteForReadOnlyToken
+    # blocks writes under it). Replaces the old read_only JWT claim.
+    read_only = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ("-created_at",)
+        indexes = [models.Index(fields=("user", "revoked_at"))]
+
+    def __str__(self) -> str:  # pragma: no cover
+        return f"Session(user={self.user_id}, active={self.is_active})"
+
+    @property
+    def is_active(self) -> bool:
+        return self.revoked_at is None and self.expires_at > timezone.now()
+
+
 class RoleMembership(models.Model):
     """Assignment of a Role to a User scoped by Branch (and optionally Department).
 

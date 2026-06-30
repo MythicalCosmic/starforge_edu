@@ -250,11 +250,14 @@ def test_reset_request_ip_distinct_identifier_cap(tenant_a, client_for):
 
 
 # ---------------------------------------------------------------------------
-# Single-token session revocation (token_version), tenant binding
+# Custom-session auth: live roles, revocation, tenant binding
 # ---------------------------------------------------------------------------
 
 
-def test_token_stale_after_role_change(tenant_a, user_in, as_user):
+def test_role_change_is_live_without_reauth(tenant_a, user_in, as_user):
+    """Custom session auth reads roles LIVE each request — granting a role does NOT
+    invalidate the session (no JWT-style stale-token window); it just takes effect
+    immediately, so the session keeps working with the new role."""
     user = user_in(tenant_a, roles=["teacher"])
     client = as_user(tenant_a, user)
     assert client.get(ME_URL).status_code == 200
@@ -264,25 +267,24 @@ def test_token_stale_after_role_change(tenant_a, user_in, as_user):
         from apps.users.models import RoleMembership
 
         RoleMembership.objects.create(user=user, branch=BranchFactory(), role="librarian")
+        roles = set(user.role_memberships.values_list("role", flat=True))
 
-    resp = client.get(ME_URL)
-    assert resp.status_code == 401
-    assert resp.json()["error"]["code"] == "token_stale"
+    assert client.get(ME_URL).status_code == 200  # session still valid, no re-login
+    assert "librarian" in roles  # the grant is live (read fresh per request)
 
 
-def test_logout_revokes_the_access_token(tenant_a, user_in, as_user):
-    """Single-token logout bumps token_version, so the caller's live access token is
-    rejected (token_stale) on the very next request — server-side revocation with no
-    refresh/blacklist round-trip."""
+def test_logout_revokes_the_session(tenant_a, user_in, as_user):
+    """Logout revokes the caller's session row, so the same Bearer key is rejected
+    (authentication_failed) on the very next request — instant server-side revocation."""
     user = user_in(tenant_a, roles=["teacher"])
     client = as_user(tenant_a, user)
     assert client.get(ME_URL).status_code == 200
 
     assert client.post(LOGOUT_URL).status_code == 204
 
-    resp = client.get(ME_URL)  # same token, now stale
+    resp = client.get(ME_URL)  # same key, now revoked
     assert resp.status_code == 401
-    assert resp.json()["error"]["code"] == "token_stale"
+    assert resp.json()["error"]["code"] == "authentication_failed"
 
 
 def test_throttle_survives_non_string_identifier(tenant_a, client_for):

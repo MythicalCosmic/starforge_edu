@@ -20,7 +20,6 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
-from rest_framework_simplejwt.tokens import AccessToken
 
 from apps.auth.signals import login_failed, login_succeeded, otp_failed, otp_requested, otp_verified
 from apps.users.models import OTP
@@ -353,39 +352,32 @@ def _fire_failed(identifier: str, ip: str, user_agent: str, *, reason: str) -> N
 
 
 # ---------------------------------------------------------------------------
-# JWT pairs (TD-1 claims) and the tenant-bound refresh path
+# Custom session auth (no JWT): the opaque session key is the whole credential
 # ---------------------------------------------------------------------------
 
 
-def _token_claims(user: User) -> dict[str, object]:
-    """TD-1/TD-5 claims baked into both access and refresh tokens."""
-    roles = list(
-        user.role_memberships.filter(revoked_at__isnull=True).values_list("role", flat=True).distinct()
-    )
-    return {
-        "schema": current_schema(),
-        "tv": user.token_version,
-        "roles": roles,
-    }
+def issue_token(
+    user: User, *, ip: str = "", user_agent: str = "", device_id: str = ""
+) -> dict[str, str]:
+    """Issue an auth session and return its opaque key as ``{"access": <key>}``.
 
+    Custom session auth (no JWT library): the key IS the credential — tenant-bound by
+    the schema it's created in, revocable via ``Session.revoked_at``, with roles read
+    live each request (no claims, no token_version). Kept named ``issue_token`` so every
+    caller (conftest ``as_user``, test helpers, the login view) works unchanged."""
+    from core.session_auth import create_session
 
-def issue_token(user: User) -> dict[str, str]:
-    """Mint a SINGLE access token carrying the TD-1 claims (schema / tv / roles).
-
-    Single-token auth (no refresh): a longer-lived access token is the whole session.
-    Revocation is via ``token_version`` — logout, password change, and role change all
-    bump ``tv``, which ``core.authentication`` rejects on the next request, so a token
-    can still be killed server-side without a refresh/blacklist round-trip."""
-    access = AccessToken.for_user(user)
-    for key, value in _token_claims(user).items():
-        access[key] = value
-    return {"access": str(access)}
+    session = create_session(user, ip=ip, user_agent=user_agent, device_id=device_id)
+    return {"access": session.key}
 
 
 def logout_everywhere(user: User) -> None:
-    """Revoke every session for the user by bumping ``tv`` — live access tokens carry
-    the old ``tv`` and ``core.authentication`` rejects them on the next request
-    (single-token auth: there are no refresh tokens to blacklist)."""
+    """Revoke EVERY session for the user (logout / password change / reset). Also bumps
+    ``token_version`` (kept for any non-auth consumer); the live credential dies because
+    its ``Session`` row is now revoked, rejected on the next request by session auth."""
+    from core.session_auth import revoke_all_for_user
+
+    revoke_all_for_user(user.pk)
     bump_token_version(user.pk)
     # TD-9: logout has no signal — audit it directly.
     from apps.audit.services import audit_log

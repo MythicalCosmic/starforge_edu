@@ -22,13 +22,8 @@ from urllib.parse import parse_qs
 
 from channels.db import database_sync_to_async
 from channels.middleware import BaseMiddleware
-from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
 from django_tenants.utils import get_public_schema_name, get_tenant_model, schema_context
-from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
-from rest_framework_simplejwt.tokens import AccessToken
-
-User = get_user_model()
 
 
 @database_sync_to_async
@@ -42,44 +37,25 @@ def _resolve_tenant_by_hostname(hostname: str):
 
 @database_sync_to_async
 def _user_from_token(raw_token: str, tenant):
-    try:
-        # AccessToken enforces token_type == "access" — a refresh token must
-        # not authenticate a socket.
-        validated = AccessToken(raw_token)  # type: ignore[arg-type]
-    except (InvalidToken, TokenError):
-        return AnonymousUser()
+    """Resolve a session-key Bearer token to its user, scoped to the host-resolved
+    tenant's schema.
 
-    # TD-1, mirroring core/authentication.TenantAwareJWTAuthentication: the
-    # schema binding MUST be checked BEFORE the user lookup. A cross-tenant
-    # token's user_id row may not exist in THIS schema, so looking the user up
-    # first would mask the mismatch as a plain "user not found". The consumer
-    # turns the resulting AnonymousUser into a close 4401 (cross-tenant replay).
+    Custom session auth (no JWT): the schema switch happens on THIS thread (asgiref's
+    thread-sensitive executor, whose DB connection the event loop never touched), and
+    the session lookup runs inside it. A cross-tenant key is simply not in this schema's
+    Session table -> AnonymousUser (the consumer closes 4401). A revoked/expired session
+    -> AnonymousUser. Roles are read live, so there is no token_version check."""
+    from core.session_auth import validate_session_key
+
     expected_schema = tenant.schema_name if tenant is not None else get_public_schema_name()
-    if validated.get("schema") != expected_schema:
-        return AnonymousUser()
-
-    user_id = validated.get("user_id")
-    if user_id is None:
-        return AnonymousUser()
-
-    # Switch schema on THIS thread — database_sync_to_async runs on asgiref's
-    # thread-sensitive executor whose connection the event loop never touched.
     with schema_context(expected_schema):
-        try:
-            user = User.objects.get(pk=user_id)
-        except User.DoesNotExist:
-            return AnonymousUser()
-        # TD-1 `tv` claim: a stale token_version (logout-everywhere, password
-        # change, role grant/revoke) invalidates every already-minted access
-        # token — for websockets exactly as for HTTP (4401 token_stale).
-        if not user.is_active or validated.get("tv") != getattr(user, "token_version", None):
-            return AnonymousUser()
-        return user
+        session = validate_session_key(raw_token)
+        return session.user if session is not None else AnonymousUser()
 
 
 class TenantAwareJWTAuthMiddleware(BaseMiddleware):
-    """Resolves tenant by hostname; reads JWT from query string `token=` or
-    Sec-WebSocket-Protocol header (`bearer.<token>`).
+    """Resolves tenant by hostname; reads the session-key Bearer token from query
+    string `token=` or the Sec-WebSocket-Protocol header (`bearer.<token>`).
     """
 
     async def __call__(self, scope, receive, send):

@@ -72,21 +72,21 @@ async def test_ws_cross_tenant_token_rejected(tenant_a, tenant_b, user_in):
 @pytest.mark.channels
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_ws_stale_tv_rejected(tenant_a, user_in):
-    """TD-1 tv claim over Channels: bumping token_version (logout-everywhere /
-    role change) invalidates already-minted access tokens for websockets too."""
+async def test_ws_revoked_session_rejected(tenant_a, user_in):
+    """Custom session auth over Channels: revoking the session (logout / password
+    change) rejects the websocket key too — the consumer closes 4401."""
     from apps.auth.services import issue_token
-    from apps.users.services import bump_token_version
+    from core.session_auth import revoke_all_for_user
 
     @sync_to_async
-    def _mint_and_bump():
+    def _mint_and_revoke():
         user = user_in(tenant_a)
         with schema_context(tenant_a.schema_name):
             token = issue_token(user)["access"]
-            bump_token_version(user.pk)
+            revoke_all_for_user(user.pk)
         return token
 
-    token = await _mint_and_bump()
+    token = await _mint_and_revoke()
     comm = WebsocketCommunicator(application, f"/ws/ping/?token={token}", headers=HOST_HEADERS)
     connected, close_code = await comm.connect()
     assert not connected

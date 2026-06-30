@@ -1,9 +1,9 @@
 """Auth/permission decorators for the layered (plain-Django) view style.
 
 Function-based views in the new architecture authenticate with these decorators
-instead of DRF's permission machinery. They REUSE the existing tenant-bound JWT
-authenticator and the role-permission matrix, so a migrated endpoint enforces the
-exact same security as the DRF stack (tenant binding, token_version, the matrix).
+instead of DRF's permission machinery. They REUSE the custom session authenticator
+and the role-permission matrix, so a migrated endpoint enforces the exact same
+security as the DRF stack (session validation + tenant binding + the matrix).
 
     @require_auth
     @require_perm("students:write")
@@ -18,9 +18,9 @@ from typing import Any
 
 from django.http import HttpRequest, HttpResponse
 
-from core.authentication import TenantAwareJWTAuthentication
+from core.session_auth import SessionAuthentication
 
-_authenticator = TenantAwareJWTAuthentication()
+_authenticator = SessionAuthentication()
 
 ViewFunc = Callable[..., HttpResponse]
 

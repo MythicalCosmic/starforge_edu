@@ -558,7 +558,7 @@ def test_assignment_action_endpoints_cross_tenant_rejected(
     resp = getattr(client_b, method)(url, {}, format="json")
 
     assert resp.status_code == 401
-    assert resp.json()["error"]["code"] == "tenant_mismatch"
+    assert resp.json()["error"]["code"] == "authentication_failed"
 
 
 def test_assignments_list_query_budget(tenant_a, user_in, as_user, django_assert_max_num_queries):

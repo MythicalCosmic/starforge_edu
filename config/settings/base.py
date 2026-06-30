@@ -5,8 +5,9 @@ Tenancy: schema-per-tenant via django-tenants. Center is the tenant model;
 Domain maps a hostname (subdomain) to a Center. The public schema holds
 shared/platform-level data; each tenant schema holds the per-center data.
 
-Auth: JWT everywhere via simplejwt with refresh rotation + blacklist.
-Sessions remain enabled only so the built-in /admin/ keeps working.
+Auth: custom session auth (core.session_auth) — an opaque ``Session.key`` Bearer
+token validated against a per-tenant ``Session`` row (no JWT library). Django's
+cookie sessions remain enabled only so the built-in /admin/ keeps working.
 """
 
 from datetime import timedelta
@@ -260,8 +261,10 @@ AUTH_PASSWORD_VALIDATORS = [
 # ---------------------------------------------------------------------------
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        # TD-1: tenant-bound JWT (rejects cross-tenant + stale-tv tokens).
-        "core.authentication.TenantAwareJWTAuthentication",
+        # Custom session auth (no JWT): opaque Session.key Bearer token, tenant-bound
+        # by the schema it lives in. (Django's cookie SessionAuthentication stays as a
+        # fallback for the admin; the API is pure Bearer.)
+        "core.session_auth.SessionAuthentication",
         "rest_framework.authentication.SessionAuthentication",
     ],
     "DEFAULT_PERMISSION_CLASSES": [
@@ -306,9 +309,9 @@ REST_FRAMEWORK = {
 NUM_PROXIES = env("NUM_PROXIES")
 
 SIMPLE_JWT = {
-    # Single-token auth (no refresh): the access token IS the session, so it is
-    # longer-lived. Server-side revocation is via `token_version` (logout / password
-    # change / role change bump it; core.authentication rejects a stale tv).
+    # Request auth is custom session auth (core.session_auth), NOT JWT. simplejwt
+    # stays configured only for the schedule iCal-feed signed token (a calendar
+    # subscription URL can't carry a session). SESSION_TTL_DAYS bounds real sessions.
     "ACCESS_TOKEN_LIFETIME": timedelta(days=env.int("ACCESS_TOKEN_DAYS", default=7)),
     "UPDATE_LAST_LOGIN": True,
     "AUTH_HEADER_TYPES": ("Bearer",),

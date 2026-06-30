@@ -10,7 +10,6 @@ from django.db import IntegrityError, connection, transaction
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from django_tenants.utils import schema_context
-from rest_framework_simplejwt.tokens import AccessToken
 
 from core.exceptions import NotFoundException, ValidationException
 
@@ -266,12 +265,15 @@ def mint_impersonation_token(*, center: Center, user_id: int, impersonator) -> d
         target = User.objects.filter(pk=user_id).first()
         if target is None:
             raise NotFoundException(_("No such user in that center."), code="user_not_found")
-        token = AccessToken.for_user(target)
-        token.set_exp(lifetime=timedelta(seconds=IMPERSONATION_TOKEN_TTL_SECONDS))
-        token["schema"] = center.schema_name
-        token["tv"] = target.token_version
-        token["impersonator_id"] = getattr(impersonator, "pk", None)
-        token["read_only"] = True
+        # A short-lived READ-ONLY session in the center's schema (custom session auth):
+        # tenant-bound by the schema, read_only enforced by DenyWriteForReadOnlyToken,
+        # and revocable. Cannot be extended (no refresh).
+        from core.session_auth import create_session
+
+        session = create_session(target, read_only=True)
+        session.expires_at = timezone.now() + timedelta(seconds=IMPERSONATION_TOKEN_TTL_SECONDS)
+        session.save(update_fields=["expires_at"])
+        token_key = session.key
         # Tenant-side audit row: the school's own AuditLog records the access.
         _audit_impersonation_started(
             target=target,
@@ -284,7 +286,7 @@ def mint_impersonation_token(*, center: Center, user_id: int, impersonator) -> d
         event=PlatformEvent.Event.IMPERSONATION_MINTED,
         payload={"target_user_id": user_id, "read_only": True},
     )
-    return {"access": str(token), "expires_in": IMPERSONATION_TOKEN_TTL_SECONDS}
+    return {"access": token_key, "expires_in": IMPERSONATION_TOKEN_TTL_SECONDS}
 
 
 def _audit_impersonation_started(*, target, impersonator) -> None:

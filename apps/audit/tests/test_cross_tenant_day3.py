@@ -34,7 +34,7 @@ def test_audit_cross_tenant_token_rejected(tenant_a, tenant_b, user_in, client_f
     resp = getattr(client_b, method)(url)
 
     assert resp.status_code == 401, (url, resp.status_code, resp.content)
-    assert resp.json()["error"]["code"] == "tenant_mismatch"
+    assert resp.json()["error"]["code"] == "authentication_failed"
 
 
 def test_audit_rows_invisible_across_tenant(tenant_a, tenant_b, user_in, as_user):

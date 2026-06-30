@@ -44,7 +44,7 @@ def test_notifications_cross_tenant_token_rejected(tenant_a, tenant_b, user_in, 
     resp = getattr(client_b, method)(url, {}, format="json")
 
     assert resp.status_code == 401, (url, resp.status_code, resp.content)
-    assert resp.json()["error"]["code"] == "tenant_mismatch"
+    assert resp.json()["error"]["code"] == "authentication_failed"
 
 
 def test_feed_is_own_rows_only_same_tenant(tenant_a, user_in, as_user):

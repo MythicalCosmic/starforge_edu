@@ -365,21 +365,25 @@ def test_impersonation_token_expires(staff_client, tenant_a, user_in, client_for
     assert tclient.get("/api/v1/org/branches/").status_code == 401
 
 
-def test_impersonation_claims_shape(staff_client, tenant_a, user_in):
-    """The minted token carries the published claim shape (Day-5 security review
-    consumes it): schema, impersonator_id, read_only:true, tv."""
-    from rest_framework_simplejwt.tokens import UntypedToken
+def test_impersonation_mints_a_readonly_session(staff_client, tenant_a, user_in):
+    """Impersonation issues an opaque READ-ONLY session in the target center's schema
+    (custom session auth) — tenant-bound, read_only, short-lived, for the target user."""
+    from django.utils import timezone
+    from django_tenants.utils import schema_context
+
+    from apps.users.models import Session
 
     target = user_in(tenant_a, roles=["teacher"])
-    staff_admin_id = None  # captured from PlatformEvent below
 
-    token = _mint_impersonation(staff_client, tenant_a, target.pk).json()["access"]
-    claims = UntypedToken(token)  # signature/exp validated; claim dict accessible
-    assert claims["schema"] == tenant_a.schema_name
-    assert claims["read_only"] is True
-    assert claims["tv"] == target.token_version
-    assert claims.get("impersonator_id") is not None
-    _ = staff_admin_id
+    key = _mint_impersonation(staff_client, tenant_a, target.pk).json()["access"]
+
+    with schema_context(tenant_a.schema_name):
+        session = Session.objects.get(key=key)
+        assert session.user_id == target.pk
+        assert session.read_only is True
+        assert session.revoked_at is None
+        # Short-lived (cannot be extended) — far under the default multi-day TTL.
+        assert session.expires_at < timezone.now() + timedelta(hours=1)
 
 
 # ---------------------------------------------------------------------------

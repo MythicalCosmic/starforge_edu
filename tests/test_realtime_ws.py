@@ -90,18 +90,18 @@ async def test_notifications_cross_tenant_rejected_4401(tenant_a, tenant_b, user
 @pytest.mark.channels
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_notifications_stale_tv_rejected_4401(tenant_a, user_in):
-    from apps.users.services import bump_token_version
+async def test_notifications_revoked_session_rejected_4401(tenant_a, user_in):
+    from core.session_auth import revoke_all_for_user
 
     @sync_to_async
-    def _mint_and_bump():
+    def _mint_and_revoke():
         user = user_in(tenant_a)
         token = _mint_access(tenant_a, user)
         with schema_context(tenant_a.schema_name):
-            bump_token_version(user.pk)
+            revoke_all_for_user(user.pk)
         return token
 
-    token = await _mint_and_bump()
+    token = await _mint_and_revoke()
     _comm, connected, code = await _connect("/ws/notifications/", HOST_A, token)
     assert not connected
     assert code == 4401

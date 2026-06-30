@@ -57,7 +57,7 @@ def test_invoice_cross_tenant_token_rejected(tenant_a, tenant_b, user_in, client
     client_b.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
     resp = client_b.get(INVOICES_URL)
     assert resp.status_code == 401
-    assert resp.json()["error"]["code"] == "tenant_mismatch"
+    assert resp.json()["error"]["code"] == "authentication_failed"
 
 
 def test_invoice_not_visible_across_tenants(tenant_a, tenant_b, as_role):

@@ -390,7 +390,7 @@ class TestAuditAPIAppendOnly:
         client_b.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
         resp = client_b.get(AUDIT_URL)
         assert resp.status_code == 401
-        assert resp.json()["error"]["code"] == "tenant_mismatch"
+        assert resp.json()["error"]["code"] == "authentication_failed"
 
     def test_tenant_isolation_rows_not_leaked(self, tenant_a, tenant_b, as_role):
         with schema_context(tenant_a.schema_name):
