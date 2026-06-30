@@ -31,12 +31,12 @@ def test_patch_cross_branch_department_400(as_role, setup):
     # Department from another branch (branch unchanged) -> 400.
     resp = client.patch(url, {"department": setup["other_dept"].id}, format="json")
     assert resp.status_code == 400
-    assert "department" in resp.json()["error"]["fields"]
+    assert "department" in resp.json()["errors"]
 
     # Branch change that orphans the existing department -> 400.
     resp = client.patch(url, {"branch": setup["other_branch"].id}, format="json")
     assert resp.status_code == 400
-    assert "department" in resp.json()["error"]["fields"]
+    assert "department" in resp.json()["errors"]
 
 
 def test_patch_consistent_branch_and_department_200(as_role, setup, tenant_a):

@@ -1,14 +1,13 @@
 from django.urls import path
-from rest_framework.routers import DefaultRouter
 
-from .views import TeacherDashboardView, TeacherViewSet
+from apps.teachers.views.v1.teacher_views import (
+    teacher_dashboard_view,
+    teacher_detail_view,
+    teachers_collection_view,
+)
 
-router = DefaultRouter()
-router.register(r"", TeacherViewSet, basename="teachers")
-
-# `dashboard/` MUST precede the router's <pk> detail route (which would otherwise
-# capture "dashboard" as a teacher pk).
 urlpatterns = [
-    path("dashboard/", TeacherDashboardView.as_view(), name="teacher-dashboard"),
-    *router.urls,
+    path("dashboard/", teacher_dashboard_view, name="teacher-dashboard"),
+    path("", teachers_collection_view, name="teachers-list"),
+    path("<int:pk>/", teacher_detail_view, name="teachers-detail"),
 ]

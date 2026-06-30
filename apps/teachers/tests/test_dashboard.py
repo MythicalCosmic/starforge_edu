@@ -28,7 +28,7 @@ def test_teacher_dashboard_aggregates(tenant_a, as_user):
         student = StudentProfileFactory(branch=branch)
         CohortMembershipFactory(cohort=cohort, student=student)
 
-    body = as_user(tenant_a, teacher.user).get(URL).json()
+    body = as_user(tenant_a, teacher.user).get(URL).json()["data"]
     assert body["groups_count"] == 1
     assert body["students_count"] == 1
     assert body["level_groups"] == {"A1": 1}
@@ -40,4 +40,4 @@ def test_dashboard_404_for_non_teacher(tenant_a, as_role):
     director, _ = as_role(Role.DIRECTOR)  # a director has no teacher profile
     resp = director.get(URL)
     assert resp.status_code == 404
-    assert resp.json()["error"]["code"] == "not_a_teacher"
+    assert resp.json()["code"] == "not_a_teacher"  # layered view -> success/error envelope

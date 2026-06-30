@@ -44,3 +44,14 @@ def assert_in_branch_scope(request: Any, obj: Any) -> None:
         from core.exceptions import PermissionException
 
         raise PermissionException(code="out_of_scope")
+
+
+def assert_branch_id_in_scope(request: Any, branch_id: int | None) -> None:
+    """403 if ``branch_id`` is outside the caller's branches — for CREATE, where there
+    is no object yet (a branch-scoped role must not create rows in another branch)."""
+    if is_unscoped(request):
+        return
+    if branch_id not in branch_ids(request):
+        from core.exceptions import PermissionException
+
+        raise PermissionException(code="out_of_scope")
