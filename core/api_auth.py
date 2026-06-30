@@ -47,20 +47,39 @@ def require_auth(view_func: ViewFunc) -> ViewFunc:
     return wrapper
 
 
+_SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
+
+
 def require_perm(*codes: str) -> Callable[[ViewFunc], ViewFunc]:
     """Require the caller hold AT LEAST ONE of ``codes`` in the role matrix.
 
-    Must wrap a ``@require_auth`` view (it reads ``request``'s resolved roles). A
-    superuser/DIRECTOR (``*:*``) passes any check via ``has_permission_code``."""
+    Faithfully mirrors the DRF ``RolePermission`` + ``DenyWriteForReadOnlyToken`` so a
+    migrated endpoint enforces identical authz: superuser bypass, the per-center A-2
+    permission overrides, DIRECTOR (``*:*``) via ``has_permission_code``, and a 403
+    ``read_only_token`` for any write under a read-only impersonation session. Wraps a
+    ``@require_auth`` view (it reads ``request.user`` / resolved roles)."""
 
     def decorator(view_func: ViewFunc) -> ViewFunc:
         @wraps(view_func)
         def wrapper(request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
             from core.exceptions import PermissionException
-            from core.permissions import get_user_roles, has_permission_code
+            from core.permissions import (
+                _request_overrides,
+                get_user_roles,
+                has_permission_code,
+                is_read_only_token,
+            )
 
-            roles = get_user_roles(request)  # type: ignore[arg-type]
-            if not any(has_permission_code(roles, code) for code in codes):
+            # The permission helpers are duck-typed on .user/.method; a plain
+            # HttpRequest satisfies them at runtime (typed as Request upstream).
+            req: Any = request
+            if request.method not in _SAFE_METHODS and is_read_only_token(req):
+                raise PermissionException(code="read_only_token")
+            if getattr(req.user, "is_superuser", False):
+                return view_func(request, *args, **kwargs)
+            roles = get_user_roles(req)
+            overrides = _request_overrides(req)
+            if not any(has_permission_code(roles, code, overrides) for code in codes):
                 raise PermissionException(
                     "You do not have permission to perform this action.", code="forbidden"
                 )
