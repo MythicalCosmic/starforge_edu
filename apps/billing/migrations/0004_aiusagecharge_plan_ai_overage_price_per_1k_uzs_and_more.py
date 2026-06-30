@@ -44,10 +44,6 @@ class Migration(migrations.Migration):
             name='center',
             field=models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='ai_usage_charges', to='tenancy.center'),
         ),
-        migrations.AddIndex(
-            model_name='aiusagecharge',
-            index=models.Index(fields=['center', 'period'], name='billing_ai_charge_center_period'),
-        ),
         migrations.AddConstraint(
             model_name='aiusagecharge',
             constraint=models.UniqueConstraint(fields=('center', 'period'), name='ai_charge_one_per_center_period'),
