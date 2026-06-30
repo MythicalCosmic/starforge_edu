@@ -194,6 +194,26 @@ class JsonErrorResponseMiddleware:
     def __call__(self, request: HttpRequest) -> HttpResponse:
         return self._jsonify(self.get_response(request))
 
+    def process_exception(self, request: HttpRequest, exc: Exception) -> HttpResponse | None:
+        """Render a domain error raised by a plain (non-DRF) view as JSON.
+
+        DRF views handle ``StarforgeError`` inside their own exception handler; the
+        layered function-based views let it propagate to here, where it becomes the
+        ``{"success": false, code, message}`` envelope with the error's HTTP status."""
+        from core.exceptions import StarforgeError
+
+        if not isinstance(exc, StarforgeError):
+            return None
+        body: dict[str, object] = {"success": False, "code": exc.code, "message": str(exc.detail)}
+        fields = getattr(exc, "fields", None)
+        if fields:
+            body["errors"] = fields
+        response = JsonResponse(body, status=exc.status_code)
+        wait = getattr(exc, "wait", None)
+        if wait is not None:
+            response["Retry-After"] = str(int(wait))
+        return response
+
     @staticmethod
     def _jsonify(response: HttpResponse) -> HttpResponse:
         if getattr(response, "streaming", False) or response.status_code < 400:
