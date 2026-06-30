@@ -19,3 +19,10 @@ urlpatterns = [
     # by <center_slug> in the path, then verify the provider signature.
     path("api/v1/webhooks/", include("apps.payments.webhook_urls")),
 ]
+
+# Backend API: Django's own error responses (unmatched URL, uncaught 500, CSRF
+# 403, suspicious-operation 400) return the JSON {"error": {...}} envelope.
+handler400 = "core.middleware.json_400"
+handler403 = "core.middleware.json_403"
+handler404 = "core.middleware.json_404"
+handler500 = "core.middleware.json_500"

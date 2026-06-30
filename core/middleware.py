@@ -114,3 +114,94 @@ class InactiveTenantMiddleware:
                     status=503,
                 )
         return self.get_response(request)
+
+
+# ---------------------------------------------------------------------------
+# JSON error envelope — project-wide (backend API: never serve an HTML error)
+# ---------------------------------------------------------------------------
+
+# Map an HTTP status to a stable, branchable error code (mirrors the DRF
+# envelope in core.exceptions so API and non-API errors are indistinguishable).
+_ERROR_CODES = {
+    400: "bad_request",
+    401: "authentication_failed",
+    403: "forbidden",
+    404: "not_found",
+    405: "method_not_allowed",
+    406: "not_acceptable",
+    415: "unsupported_media_type",
+    429: "throttled",
+    500: "server_error",
+    502: "bad_gateway",
+    503: "service_unavailable",
+}
+_ERROR_DETAILS = {
+    400: "Bad request.",
+    401: "Authentication credentials were not provided or are invalid.",
+    403: "You do not have permission to perform this action.",
+    404: "Resource not found.",
+    405: "Method not allowed.",
+    429: "Too many requests.",
+    500: "Internal server error.",
+    503: "Service unavailable.",
+}
+
+
+def _error_envelope(status_code: int) -> dict[str, dict[str, str]]:
+    return {
+        "error": {
+            "code": _ERROR_CODES.get(status_code, "error"),
+            "detail": _ERROR_DETAILS.get(status_code, "An error occurred."),
+        }
+    }
+
+
+# ROOT_URLCONF / PUBLIC_SCHEMA_URLCONF handlerXXX — keep Django's own error
+# responses (unmatched URL, uncaught 500, CSRF 403) as JSON, not HTML templates.
+def json_404(request: HttpRequest, exception: object | None = None) -> JsonResponse:
+    return JsonResponse(_error_envelope(404), status=404)
+
+
+def json_400(request: HttpRequest, exception: object | None = None) -> JsonResponse:
+    return JsonResponse(_error_envelope(400), status=400)
+
+
+def json_403(request: HttpRequest, exception: object | None = None) -> JsonResponse:
+    return JsonResponse(_error_envelope(403), status=403)
+
+
+def json_500(request: HttpRequest) -> JsonResponse:
+    return JsonResponse(_error_envelope(500), status=500)
+
+
+class JsonErrorResponseMiddleware:
+    """Guarantee every error response is JSON, project-wide.
+
+    DRF endpoints already emit the ``{"error": {...}}`` envelope via
+    ``core.exceptions.drf_exception_handler``. This is the safety net for everything
+    that does NOT pass through DRF — an unmatched URL, a non-DRF view, the admin, and
+    (crucially) the DEBUG technical 404/500 pages — rewriting any HTML error response
+    into the same envelope so an API/mobile client never receives an HTML page.
+
+    Sits just below ``RequestIDMiddleware`` so it runs late on the way out: it MUTATES
+    the response in place (never builds a new one), preserving headers inner middleware
+    set — CORS, ``Retry-After`` — so a browser SPA can still read the error body.
+    """
+
+    def __init__(self, get_response: GetResponse) -> None:
+        self.get_response = get_response
+
+    def __call__(self, request: HttpRequest) -> HttpResponse:
+        return self._jsonify(self.get_response(request))
+
+    @staticmethod
+    def _jsonify(response: HttpResponse) -> HttpResponse:
+        if getattr(response, "streaming", False) or response.status_code < 400:
+            return response
+        if "text/html" not in response.get("Content-Type", ""):
+            return response  # already JSON (DRF) or a non-HTML body (e.g. a PDF)
+        import json
+
+        response.content = json.dumps(_error_envelope(response.status_code)).encode("utf-8")
+        response["Content-Type"] = "application/json"
+        return response

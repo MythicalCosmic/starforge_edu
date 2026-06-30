@@ -179,6 +179,10 @@ MIDDLEWARE = [
     # Outermost: stamps every request/response with an X-Request-ID and exposes
     # it to log records — must wrap everything, including the health probes.
     "core.middleware.RequestIDMiddleware",
+    # Backend API: rewrite ANY HTML error response (unmatched URL, non-DRF 500,
+    # admin, DEBUG technical pages) into the JSON {"error": {...}} envelope. Just
+    # below RequestID so it runs late outbound and preserves inner CORS headers.
+    "core.middleware.JsonErrorResponseMiddleware",
     # Liveness/readiness probes answer on ANY Host header and must bypass tenant
     # resolution, so this sits before TenantMainMiddleware (D1-LA-8).
     "core.middleware.HealthCheckMiddleware",
@@ -263,6 +267,9 @@ REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",
     ],
+    # Backend JSON API (no HTML browsable-API UI): respond JSON only. The OpenAPI
+    # schema + Swagger/Redoc stay available as API docs for the mobile/web clients.
+    "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     "DEFAULT_PAGINATION_CLASS": "core.pagination.DefaultPagination",
     "PAGE_SIZE": 25,

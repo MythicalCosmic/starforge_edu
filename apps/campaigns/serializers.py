@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
 
 from apps.campaigns.models import Campaign, CampaignRecipient, DoNotContact, MessageTemplate
@@ -48,7 +49,7 @@ class DoNotContactSerializer(serializers.ModelSerializer):
     def validate_phone(self, value: str) -> str:
         value = (value or "").strip()
         if not value:
-            raise serializers.ValidationError("A phone number is required.")
+            raise serializers.ValidationError(_("A phone number is required."))
         # Every User.phone is stored E.164 (core.validators.normalize_phone, the single
         # chokepoint). Canonicalize the opt-out the SAME way, or a do-not-contact typed
         # as "998..." / with spaces would never byte-match the E.164 phone and the family
@@ -77,12 +78,12 @@ class CreateCampaignSerializer(serializers.Serializer):
         # Exactly one: reject BOTH (else the typed message would be silently dropped in
         # favour of the template body) and reject NEITHER.
         if message and template is not None:
-            raise serializers.ValidationError("Provide a message OR a template, not both.")
+            raise serializers.ValidationError(_("Provide a message OR a template, not both."))
         if not message and template is None:
-            raise serializers.ValidationError("Provide a message or pick a template.")
+            raise serializers.ValidationError(_("Provide a message or pick a template."))
         # A picked template supplies the text; its body must not be empty.
         if template is not None and not (template.body or "").strip():
-            raise serializers.ValidationError("That template has no body yet.")
+            raise serializers.ValidationError(_("That template has no body yet."))
         attrs["message"] = template.body if template is not None else message
         return attrs
 
