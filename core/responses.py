@@ -14,7 +14,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from django.http import JsonResponse
+from django.http import HttpResponse, JsonResponse
+
+
+def no_content() -> HttpResponse:
+    """A bodyless 204 (e.g. logout, delete)."""
+    return HttpResponse(status=204)
 
 
 def success(data: Any = None, *, message: str = "", status: int = 200) -> JsonResponse:
@@ -28,10 +33,6 @@ def success(data: Any = None, *, message: str = "", status: int = 200) -> JsonRe
 
 def created(data: Any = None, *, message: str = "") -> JsonResponse:
     return success(data, message=message, status=201)
-
-
-def no_content() -> JsonResponse:
-    return JsonResponse({"success": True}, status=204)
 
 
 def paginated(

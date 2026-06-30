@@ -1,9 +1,10 @@
-"""Auth orchestration: username+password login, JWT pairs, password reset via OTP.
+"""Auth DOMAIN functions: username+password login helpers, password reset via OTP,
+custom-session issuance/revocation.
 
-Owner decision (2026-06-11): login is username + password. OTP codes are no
-longer a login mechanism — they serve password reset (and, later, contact
-verification). JWTs carry TD-1 claims (`schema`, `tv`, `roles`) on both the
-access and refresh tokens, and every refresh-path operation is tenant-bound.
+These are the tested domain helpers the layered ``AuthService`` (services/v1/) reuses.
+Login is username+password; OTP codes serve password reset only (not login). Auth is
+custom session auth — ``issue_token`` creates a Session and returns its opaque key (kept
+under this name so conftest ``as_user`` and other callers stay unchanged).
 """
 
 from __future__ import annotations

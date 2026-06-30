@@ -1,5 +1,6 @@
-"""Auth lifecycle flows: username+password login, password change/reset (OTP),
-JWT rotation, tenant binding (TASKS §26; owner auth pivot 2026-06-11)."""
+"""Auth lifecycle flows over the layered architecture + custom session auth:
+username+password login, password change/reset (OTP), session revocation, live roles,
+tenant binding. Responses use the success()/error() envelope."""
 
 import re
 
@@ -51,14 +52,15 @@ def test_login_happy_path_registers_device(tenant_a, client_for, user_in):
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert "access" in body
-    assert "refresh" not in body  # single-token auth — no refresh issued
+    assert body["success"] is True
+    assert "access" in body["data"]
+    assert "refresh" not in body["data"]  # single-token session auth — no refresh
 
     with schema_context(tenant_a.schema_name):
         assert user.devices.filter(device_id="dev-1", platform="android").exists()
 
     authed = client_for(tenant_a)
-    authed.credentials(HTTP_AUTHORIZATION=f"Bearer {body['access']}")
+    authed.credentials(HTTP_AUTHORIZATION=f"Bearer {body['data']['access']}")
     me = authed.get(ME_URL)
     assert me.status_code == 200
     assert me.json()["username"] == user.username
@@ -70,7 +72,7 @@ def test_login_wrong_password_401(tenant_a, client_for, user_in):
         LOGIN_URL, {"username": user.username, "password": "wrong-wrong-1"}, format="json"
     )
     assert resp.status_code == 401
-    assert resp.json()["error"]["code"] == "invalid_credentials"
+    assert resp.json()["code"] == "invalid_credentials"
 
 
 def test_login_unknown_username_same_error(tenant_a, client_for):
@@ -78,7 +80,7 @@ def test_login_unknown_username_same_error(tenant_a, client_for):
         LOGIN_URL, {"username": "ghost-user", "password": "whatever-123"}, format="json"
     )
     assert resp.status_code == 401
-    assert resp.json()["error"]["code"] == "invalid_credentials"
+    assert resp.json()["code"] == "invalid_credentials"
 
 
 def test_login_inactive_user_same_error(tenant_a, client_for, user_in):
@@ -90,7 +92,7 @@ def test_login_inactive_user_same_error(tenant_a, client_for, user_in):
         LOGIN_URL, {"username": user.username, "password": PASSWORD}, format="json"
     )
     assert resp.status_code == 401
-    assert resp.json()["error"]["code"] == "invalid_credentials"
+    assert resp.json()["code"] == "invalid_credentials"
 
 
 def test_login_per_username_throttle_429(tenant_a, client_for, user_in):
@@ -102,7 +104,7 @@ def test_login_per_username_throttle_429(tenant_a, client_for, user_in):
         ).status_code == 401
     resp = client.post(LOGIN_URL, {"username": user.username, "password": "bad-pass-123"}, format="json")
     assert resp.status_code == 429
-    assert resp.json()["error"]["code"] == "throttled"
+    assert resp.json()["code"] == "throttled"
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +119,7 @@ def test_password_change_wrong_old_400(tenant_a, user_in, as_user):
         CHANGE_URL, {"old_password": "not-the-one-1", "new_password": NEW_PASSWORD}, format="json"
     )
     assert resp.status_code == 400
-    assert resp.json()["error"]["code"] == "wrong_password"
+    assert resp.json()["code"] == "wrong_password"
 
 
 def test_password_change_ends_other_sessions(tenant_a, client_for, user_in, as_user):
@@ -131,17 +133,17 @@ def test_password_change_ends_other_sessions(tenant_a, client_for, user_in, as_u
     resp = client.post(CHANGE_URL, {"old_password": PASSWORD, "new_password": NEW_PASSWORD}, format="json")
     assert resp.status_code == 200
     new = resp.json()
-    assert "access" in new
-    assert "refresh" not in new
+    assert "access" in new["data"]
+    assert "refresh" not in new["data"]
 
-    # Old access dies (tv bumped)...
+    # Old session revoked by the password change...
     stale = client_for(tenant_a)
     stale.credentials(HTTP_AUTHORIZATION=f"Bearer {old['access']}")
     assert stale.get(ME_URL).status_code == 401
 
-    # ...the returned token works, and so does the new password.
+    # ...the returned session works, and so does the new password.
     fresh = client_for(tenant_a)
-    fresh.credentials(HTTP_AUTHORIZATION=f"Bearer {new['access']}")
+    fresh.credentials(HTTP_AUTHORIZATION=f"Bearer {new['data']['access']}")
     assert fresh.get(ME_URL).status_code == 200
     assert (
         client_for(tenant_a).post(
@@ -197,7 +199,7 @@ def test_password_reset_wrong_code_400(tenant_a, client_for, user_in, sms_outbox
         format="json",
     )
     assert resp.status_code == 400
-    assert resp.json()["error"]["code"] == "validation_error"
+    assert resp.json()["code"] == "validation_error"
 
 
 def test_password_reset_wrong_code_5x_invalidates(tenant_a, client_for, user_in, sms_outbox):
@@ -221,7 +223,7 @@ def test_password_reset_wrong_code_5x_invalidates(tenant_a, client_for, user_in,
         format="json",
     )
     assert resp.status_code == 429
-    assert resp.json()["error"]["code"] == "throttled"
+    assert resp.json()["code"] == "throttled"
 
 
 def test_reset_request_cooldown_silently_202_no_resend(tenant_a, client_for, user_in, sms_outbox):
@@ -282,7 +284,7 @@ def test_logout_revokes_the_session(tenant_a, user_in, as_user):
 
     assert client.post(LOGOUT_URL).status_code == 204
 
-    resp = client.get(ME_URL)  # same key, now revoked
+    resp = client.get(ME_URL)  # same key, now revoked (/me/ is still a DRF endpoint)
     assert resp.status_code == 401
     assert resp.json()["error"]["code"] == "authentication_failed"
 

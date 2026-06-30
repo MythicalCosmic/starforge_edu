@@ -10,7 +10,12 @@ from django.conf import settings
 from django.db import connection
 
 if TYPE_CHECKING:
+    from django.http import HttpRequest
     from rest_framework.request import Request
+
+    # Both the DRF Request and a plain Django HttpRequest expose ``.META`` — these
+    # helpers serve both view styles during the off-DRF migration.
+    AnyRequest = HttpRequest | Request
 
 
 def current_schema() -> str:
@@ -18,7 +23,7 @@ def current_schema() -> str:
     return connection.schema_name  # type: ignore[attr-defined]
 
 
-def client_ip(request: Request) -> str:
+def client_ip(request: AnyRequest) -> str:
     """Client IP with rightmost-trusted-hop semantics.
 
     ``X-Forwarded-For`` is honored only for the configured ``NUM_PROXIES``
@@ -36,7 +41,7 @@ def client_ip(request: Request) -> str:
     return remote_addr
 
 
-def user_agent(request: Request) -> str:
+def user_agent(request: AnyRequest) -> str:
     return request.META.get("HTTP_USER_AGENT", "")[:512]
 
 
