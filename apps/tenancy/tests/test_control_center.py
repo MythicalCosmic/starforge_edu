@@ -321,7 +321,7 @@ def test_impersonation_token_get_works_write_denied(staff_client, tenant_a, user
         format="json",
     )
     assert write.status_code == 403
-    assert write.json()["error"]["code"] == "read_only_token"
+    assert write.json()["code"] == "read_only_token"  # org/branches is now a layered view
 
 
 def test_impersonation_write_denied_on_apiview(staff_client, tenant_a, user_in, client_for):
@@ -338,7 +338,7 @@ def test_impersonation_write_denied_on_apiview(staff_client, tenant_a, user_in, 
     assert tclient.get("/api/v1/org/settings/").status_code == 200  # read under impersonation
     write = tclient.patch("/api/v1/org/settings/", {"late_threshold_minutes": 15}, format="json")
     assert write.status_code == 403
-    assert write.json()["error"]["code"] == "read_only_token"
+    assert write.json()["code"] == "read_only_token"  # org/settings is now a layered view
 
 
 def test_impersonation_token_get_works_unconditionally(staff_client, tenant_a, user_in, client_for):

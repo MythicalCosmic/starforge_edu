@@ -115,5 +115,5 @@ def test_threshold_round_trips_through_the_settings_api(tenant_a, as_role):
     director, _ = as_role(Role.DIRECTOR)
     patched = director.patch(SETTINGS, {"penalty_escalation_threshold": 25}, format="json")
     assert patched.status_code == 200, patched.content
-    assert patched.json()["penalty_escalation_threshold"] == 25
-    assert director.get(SETTINGS).json()["penalty_escalation_threshold"] == 25
+    assert patched.json()["data"]["penalty_escalation_threshold"] == 25
+    assert director.get(SETTINGS).json()["data"]["penalty_escalation_threshold"] == 25

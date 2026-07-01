@@ -28,6 +28,6 @@ def test_branches_list_query_count(as_role, tenant_a, django_assert_max_num_quer
     with django_assert_max_num_queries(11):  # +1: A-2 per-request permission-override load
         body = client.get("/api/v1/org/branches/").json()
 
-    assert set(body) == {"count", "next", "previous", "results"}
-    assert body["count"] >= 10
-    assert any(b["working_hours"] for b in body["results"])
+    assert set(body) == {"success", "data", "pagination"}
+    assert body["pagination"]["total"] >= 10
+    assert any(b["working_hours"] for b in body["data"])

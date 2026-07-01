@@ -49,8 +49,8 @@ def test_patch_department_head_validated_at_api(as_role, tenant_a):
 
     resp = client.patch(url, {"head": non_teacher.id}, format="json")
     assert resp.status_code == 400
-    assert resp.json()["error"]["code"] == "head_not_teacher"
+    assert resp.json()["code"] == "head_not_teacher"
 
     resp = client.patch(url, {"head": teacher.user_id}, format="json")
     assert resp.status_code == 200
-    assert resp.json()["head"] == teacher.user_id
+    assert resp.json()["data"]["head"] == teacher.user_id

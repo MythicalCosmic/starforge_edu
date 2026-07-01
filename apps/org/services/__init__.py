@@ -9,9 +9,8 @@ from django.db import transaction
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
+from apps.org.models import Branch, BranchTransfer, BranchWorkingHours, Department
 from core.exceptions import ConflictException, ValidationException
-
-from .models import Branch, BranchTransfer, BranchWorkingHours, Department
 
 # Enrollment states that still occupy capacity (mirrors Lane D's StudentProfile).
 ACTIVE_STUDENT_STATUSES_EXCLUDED = ("graduated", "withdrawn")

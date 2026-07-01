@@ -9,6 +9,7 @@ TENANTS = {"tenant_a": "a.localhost", "tenant_b": "b.localhost"}
 
 
 def _ensure_tenants() -> None:
+    from apps.org.models import CenterSettings
     from apps.tenancy.models import Center
     from apps.tenancy.services import provision_center
 
@@ -17,6 +18,14 @@ def _ensure_tenants() -> None:
             # Cheap if the schema already exists (django-tenants skips creation
             # via check_if_exists) — only the rows are restored.
             provision_center(name=slug.replace("_", " ").title(), slug=slug, primary_domain=host)
+        else:
+            # A `transaction=True` test flushes tenant tables. If the public Center
+            # row survives (so provision_center is skipped above) the tenant's
+            # CenterSettings singleton can still be gone — restore it so an
+            # order-dependent test that asserts a fully-provisioned tenant never sees
+            # a half-healed one (get_or_create pk=1; a no-op when already present).
+            with schema_context(slug):
+                CenterSettings.load()
 
 
 @pytest.fixture(scope="session")

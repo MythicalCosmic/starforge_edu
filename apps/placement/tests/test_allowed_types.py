@@ -101,8 +101,8 @@ def test_setting_round_trips_and_dedupes_through_the_api(tenant_a, as_role):
         format="json",
     )
     assert patched.status_code == 200, patched.content
-    assert patched.json()["placement_allowed_question_types"] == ["writing", "single_choice"]  # deduped
-    got = director.get(SETTINGS).json()["placement_allowed_question_types"]
+    assert patched.json()["data"]["placement_allowed_question_types"] == ["writing", "single_choice"]  # deduped
+    got = director.get(SETTINGS).json()["data"]["placement_allowed_question_types"]
     assert got == ["writing", "single_choice"]
 
 

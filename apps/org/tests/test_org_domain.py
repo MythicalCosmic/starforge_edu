@@ -32,19 +32,19 @@ def test_room_crud_and_branch_scope(as_role, tenant_a):
 
     resp = client.post("/api/v1/org/rooms/", {"branch": b1.id, "name": "R1", "capacity": 20}, format="json")
     assert resp.status_code == 201
-    room_id = resp.json()["id"]
+    room_id = resp.json()["data"]["id"]
 
     body = client.get(f"/api/v1/org/rooms/?branch={b1.id}").json()
-    assert [r["id"] for r in body["results"]] == [room_id]
+    assert [r["id"] for r in body["data"]] == [room_id]
 
     resp = client.patch(f"/api/v1/org/rooms/{room_id}/", {"capacity": 25}, format="json")
     assert resp.status_code == 200
-    assert resp.json()["capacity"] == 25
+    assert resp.json()["data"]["capacity"] == 25
 
     # Duplicate (branch, name) -> 400 envelope (UniqueTogetherValidator).
     dup = client.post("/api/v1/org/rooms/", {"branch": b1.id, "name": "R1"}, format="json")
     assert dup.status_code == 400
-    assert dup.json()["error"]["code"] == "validation_error"
+    assert dup.json()["code"] == "validation_error"
 
     assert client.delete(f"/api/v1/org/rooms/{room_id}/").status_code == 204
     with schema_context(tenant_a.schema_name):
@@ -58,7 +58,7 @@ def test_room_write_denied(as_role, tenant_a, role):
     client, _ = as_role(role)
     resp = client.post("/api/v1/org/rooms/", {"branch": branch.id, "name": "Nope"}, format="json")
     assert resp.status_code == 403
-    assert resp.json()["error"]["code"] == "forbidden"
+    assert resp.json()["code"] == "forbidden"
 
 
 def test_working_hours_bulk_replace_atomic(as_role, tenant_a):
@@ -80,7 +80,7 @@ def test_working_hours_bulk_replace_atomic(as_role, tenant_a):
     dup_week = [*new_week, {**new_week[0]}]
     resp = client.put(url, dup_week, format="json")
     assert resp.status_code == 400
-    assert resp.json()["error"]["code"] == "invalid_working_hours"
+    assert resp.json()["code"] == "invalid_working_hours"
     with schema_context(tenant_a.schema_name):
         assert BranchWorkingHours.objects.filter(branch=branch).count() == 7
 
@@ -104,7 +104,7 @@ def test_holiday_unique_per_branch_date(as_role, tenant_a):
     assert client.post(url, payload, format="json").status_code == 201
     dup = client.post(url, payload, format="json")
     assert dup.status_code == 409
-    assert dup.json()["error"]["code"] == "holiday_exists"
+    assert dup.json()["code"] == "holiday_exists"
 
 
 def test_department_head_late_validation(tenant_a):
@@ -127,7 +127,7 @@ def test_branch_archive_instead_of_delete(as_role, tenant_a):
 
     resp = client.delete(f"/api/v1/org/branches/{occupied.id}/")
     assert resp.status_code == 409
-    assert resp.json()["error"]["code"] == "branch_has_active_students"
+    assert resp.json()["code"] == "branch_has_active_students"
 
     assert client.delete(f"/api/v1/org/branches/{empty.id}/").status_code == 204
     with schema_context(tenant_a.schema_name):
@@ -144,6 +144,6 @@ def test_branch_archived_excluded_from_list(as_role, tenant_a):
         archived = BranchFactory.create()
     assert client.delete(f"/api/v1/org/branches/{archived.id}/").status_code == 204
 
-    ids = [b["id"] for b in client.get("/api/v1/org/branches/").json()["results"]]
+    ids = [b["id"] for b in client.get("/api/v1/org/branches/").json()["data"]]
     assert visible.id in ids
     assert archived.id not in ids

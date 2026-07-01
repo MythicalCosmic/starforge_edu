@@ -68,8 +68,8 @@ def test_student_report_endpoint_respects_the_setting(tenant_a, user_in, as_user
 
 def test_setting_round_trips_through_the_api(tenant_a, as_role):
     director, _ = as_role(Role.DIRECTOR)
-    assert director.get(SETTINGS).json()["show_classroom_rank"] is True  # default
+    assert director.get(SETTINGS).json()["data"]["show_classroom_rank"] is True  # default
     patched = director.patch(SETTINGS, {"show_classroom_rank": False}, format="json")
     assert patched.status_code == 200, patched.content
-    assert patched.json()["show_classroom_rank"] is False
-    assert director.get(SETTINGS).json()["show_classroom_rank"] is False
+    assert patched.json()["data"]["show_classroom_rank"] is False
+    assert director.get(SETTINGS).json()["data"]["show_classroom_rank"] is False

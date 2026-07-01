@@ -203,8 +203,8 @@ def test_toggle_is_settable_through_the_settings_api(tenant_a, user_in, as_user,
         "/api/v1/org/settings/", {"require_group_acceptance": True}, format="json"
     )
     assert patched.status_code == 200
-    assert patched.json()["require_group_acceptance"] is True
-    assert director.get("/api/v1/org/settings/").json()["require_group_acceptance"] is True
+    assert patched.json()["data"]["require_group_acceptance"] is True
+    assert director.get("/api/v1/org/settings/").json()["data"]["require_group_acceptance"] is True
     # ...and it actually drives the flow: a proposal now waits for a manager
     proposed = s["reception"].post(
         PROPOSALS, {"student": s["lead"].id, "cohort": s["cohort"].id}, format="json"
