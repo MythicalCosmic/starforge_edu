@@ -1,14 +1,43 @@
+"""Student routes — plain function views (off DRF). Mounted at /api/v1/students/.
+
+The self-service (me/…) and collection-action prefixes are listed before the
+parent catch-all; detail routes use ``<int:pk>`` so they never capture a literal
+segment like "import" or "birthdays".
+"""
+
+from __future__ import annotations
+
 from django.urls import path
-from rest_framework.routers import DefaultRouter
 
-from .views import StudentDashboardView, StudentReportView, StudentViewSet
+from apps.students.views.v1.student_views import (
+    student_block_view,
+    student_dashboard_view,
+    student_detail_view,
+    student_events_view,
+    student_report_view,
+    student_transition_view,
+    student_unblock_view,
+    students_birthdays_view,
+    students_collection_view,
+    students_comparison_view,
+    students_import_view,
+    students_stats_view,
+)
 
-router = DefaultRouter()
-router.register(r"", StudentViewSet, basename="students")
-
-# The self-scoped views must precede the router so "me" is not parsed as a pk.
 urlpatterns = [
-    path("me/dashboard/", StudentDashboardView.as_view(), name="student-dashboard"),
-    path("me/report/", StudentReportView.as_view(), name="student-report"),
-    *router.urls,
+    # Self-service (F4-1 / F15-1) — before the router so "me" isn't read as a pk.
+    path("me/dashboard/", student_dashboard_view, name="student-dashboard"),
+    path("me/report/", student_report_view, name="student-report"),
+    # Collection actions.
+    path("import/", students_import_view, name="students-import"),
+    path("birthdays/", students_birthdays_view, name="students-birthdays"),
+    path("stats/", students_stats_view, name="students-stats"),
+    path("comparison/", students_comparison_view, name="students-comparison"),
+    # Collection + detail.
+    path("", students_collection_view, name="students-collection"),
+    path("<int:pk>/", student_detail_view, name="students-detail"),
+    path("<int:pk>/transition/", student_transition_view, name="students-transition"),
+    path("<int:pk>/block/", student_block_view, name="students-block"),
+    path("<int:pk>/unblock/", student_unblock_view, name="students-unblock"),
+    path("<int:pk>/events/", student_events_view, name="students-events"),
 ]

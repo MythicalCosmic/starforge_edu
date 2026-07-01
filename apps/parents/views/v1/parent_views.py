@@ -35,11 +35,11 @@ def _service() -> IParentService:
 
 
 def _students_payload(students) -> list:
-    """Serialize a set of students to the shared read shape. Bridges to the
-    students app's DRF serializer until that app is migrated (response parity)."""
-    from apps.students.serializers import StudentReadSerializer
+    """Serialize a set of students to the shared read shape (no medical_notes) via
+    the students app's layered presenter."""
+    from apps.students.presenters import student_to_dict
 
-    return list(StudentReadSerializer(students, many=True).data)
+    return [student_to_dict(s) for s in students]
 
 
 @csrf_exempt

@@ -120,7 +120,7 @@ def test_create_student_rejects_archived_branch(as_role, tenant_a):
         format="json",
     )
     assert resp.status_code == 400
-    assert "branch" in resp.json()["error"]["fields"]
+    assert "branch" in resp.json()["errors"]
 
 
 def test_generate_student_id_rejects_broken_pattern(tenant_a):

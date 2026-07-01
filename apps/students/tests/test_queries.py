@@ -24,5 +24,5 @@ def test_students_list_query_count(as_role, tenant_a, django_assert_max_num_quer
     with django_assert_max_num_queries(10):  # fixed budget; MUST NOT scale with rows
         body = client.get("/api/v1/students/").json()
 
-    assert set(body) == {"count", "next", "previous", "results"}
-    assert body["count"] >= 50
+    assert set(body) == {"success", "data", "pagination"}
+    assert body["pagination"]["total"] >= 50

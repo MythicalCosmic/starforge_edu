@@ -48,7 +48,7 @@ def test_parent_sees_only_own_children(tenant_a, as_user, family):
     client = as_user(tenant_a, family["parent_user"])
 
     body = client.get("/api/v1/students/").json()
-    assert [s["id"] for s in body["results"]] == [family["own_child"].id]
+    assert [s["id"] for s in body["data"]] == [family["own_child"].id]
 
     resp = client.get(f"/api/v1/parents/{family['parent'].id}/students/")
     assert resp.status_code == 200
@@ -87,4 +87,4 @@ def test_student_sees_only_self(tenant_a, user_in, as_user, family):
     client = as_user(tenant_a, student_user)
 
     body = client.get("/api/v1/students/").json()
-    assert [s["id"] for s in body["results"]] == [own_profile.id]
+    assert [s["id"] for s in body["data"]] == [own_profile.id]

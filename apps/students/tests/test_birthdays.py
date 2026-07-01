@@ -32,7 +32,7 @@ def test_birthdays_days_over_cap_400(as_role):
     client, _ = as_role(Role.DIRECTOR)
     resp = client.get(URL, {"days": 2_000_000})
     assert resp.status_code == 400
-    assert resp.json()["error"]["code"] == "validation_error"
+    assert resp.json()["code"] == "validation_error"
 
 
 @pytest.mark.parametrize("params", [{"branch": "abc"}, {"cohort": "abc"}, {"days": "abc"}])
@@ -40,7 +40,7 @@ def test_birthdays_non_numeric_params_400(as_role, params):
     client, _ = as_role(Role.DIRECTOR)
     resp = client.get(URL, params)
     assert resp.status_code == 400
-    assert resp.json()["error"]["code"] == "validation_error"
+    assert resp.json()["code"] == "validation_error"
 
 
 def test_birthdays_window_filters(as_role, tenant_a):
@@ -55,6 +55,6 @@ def test_birthdays_window_filters(as_role, tenant_a):
         )
 
     body = client.get(URL, {"days": 7}).json()
-    ids = [s["id"] for s in body["results"]]
+    ids = [s["id"] for s in body["data"]]
     assert soon.id in ids
     assert far.id not in ids

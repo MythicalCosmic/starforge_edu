@@ -58,7 +58,7 @@ def test_student_report(tenant_a, user_in, as_user):
             AttendanceRecord.objects.create(student=me, lesson=lesson, status=st)
         InvoiceFactory.create(student=me, status=Invoice.Status.OVERDUE)
 
-    body = as_user(tenant_a, student_user).get(REPORT).json()
+    body = as_user(tenant_a, student_user).get(REPORT).json()["data"]
     # attendance sheet (per-lesson) + summary
     assert len(body["attendance"]["sheet"]) == 3
     assert body["attendance"]["present"] == 2
@@ -83,7 +83,7 @@ def test_ungraded_student_is_unranked(tenant_a, user_in, as_user):
         cohort = CohortFactory.create(branch=branch)
         StudentProfileFactory.create(user=student_user, branch=branch, current_cohort=cohort)
 
-    body = as_user(tenant_a, student_user).get(REPORT).json()
+    body = as_user(tenant_a, student_user).get(REPORT).json()["data"]
     assert body["rank"] is None  # no grades -> no rank, no division error
     assert body["attendance"]["rate"] is None  # no lessons yet
 
@@ -118,7 +118,7 @@ def test_attendance_rate_excludes_excused_and_counts_late(tenant_a, user_in, as_
             )
             AttendanceRecord.objects.create(student=me, lesson=lesson, status=st)
 
-    att = as_user(tenant_a, student_user).get(REPORT).json()["attendance"]
+    att = as_user(tenant_a, student_user).get(REPORT).json()["data"]["attendance"]
     assert len(att["sheet"]) == 4  # the excused lesson still shows on the sheet
     assert att["of"] == 3  # ...but is dropped from the rate denominator
     assert att["present"] == 2  # present + late both count as attended
@@ -157,7 +157,7 @@ def test_rank_excludes_other_cohorts_unpublished_and_withdrawn(tenant_a, user_in
         other_exam = ExamFactory.create(is_published=True, cohort=other_cohort)
         ExamResultFactory.create(exam=other_exam, student=outsider, score=Decimal("99"))
 
-    rank = as_user(tenant_a, student_user).get(REPORT).json()["rank"]
+    rank = as_user(tenant_a, student_user).get(REPORT).json()["data"]["rank"]
     assert rank["rank"] == 2  # only me(70) + active(90) count -> I'm 2nd
     assert rank["of"] == 2
     assert set(rank.keys()) == {"rank", "of", "average_pct"}  # no classmate identity/scores leak
@@ -167,4 +167,4 @@ def test_report_404_for_non_student(tenant_a, as_role):
     teacher, _ = as_role(Role.TEACHER)  # has no student profile
     r = teacher.get(REPORT)
     assert r.status_code == 404
-    assert r.json()["error"]["code"] == "not_a_student"
+    assert r.json()["code"] == "not_a_student"

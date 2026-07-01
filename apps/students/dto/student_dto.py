@@ -1,0 +1,30 @@
+"""Student-domain DTOs (create + enrollment transition; updates via a changes dict)."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from apps.students.models import StudentProfile
+
+
+@dataclass(frozen=True)
+class StudentCreateDTO:
+    branch_id: int
+    phone: str = ""
+    email: str = ""
+    first_name: str = ""
+    last_name: str = ""
+    middle_name: str = ""
+    status: str = StudentProfile.Status.LEAD
+    academic_level: str = ""
+    location: str = ""
+    previous_school: str = ""
+    medical_notes: str = ""
+    emergency_contacts: list = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class TransitionDTO:
+    to_status: str
+    reason_code: str = ""
+    note: str = ""

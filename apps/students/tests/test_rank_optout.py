@@ -61,9 +61,9 @@ def test_student_report_endpoint_respects_the_setting(tenant_a, user_in, as_user
         StudentProfileFactory.create(user=student_user, branch=branch, status=StudentProfile.Status.ACTIVE)
     client = as_user(tenant_a, student_user)
 
-    assert client.get(ME_REPORT).json()["rank"] == {"position": 1, "of": 9}  # on by default
+    assert client.get(ME_REPORT).json()["data"]["rank"] == {"position": 1, "of": 9}  # on by default
     _disable_rank(tenant_a)
-    assert client.get(ME_REPORT).json()["rank"] is None  # suppressed end-to-end
+    assert client.get(ME_REPORT).json()["data"]["rank"] is None  # suppressed end-to-end
 
 
 def test_setting_round_trips_through_the_api(tenant_a, as_role):

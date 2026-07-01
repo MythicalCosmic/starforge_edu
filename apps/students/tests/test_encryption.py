@@ -43,8 +43,8 @@ def test_list_payload_has_no_medical_notes_key(tenant_a, user_in, as_user, stude
     branch, _student = student_with_notes
     client = as_user(tenant_a, user_in(tenant_a, roles=[Role.REGISTRAR], branch=branch))
     body = client.get("/api/v1/students/").json()
-    assert body["results"]
-    assert all("medical_notes" not in row for row in body["results"])
+    assert body["data"]
+    assert all("medical_notes" not in row for row in body["data"])
 
 
 def test_teacher_retrieve_gets_null_medical_notes(tenant_a, user_in, as_user, student_with_notes):
@@ -52,7 +52,7 @@ def test_teacher_retrieve_gets_null_medical_notes(tenant_a, user_in, as_user, st
     client = as_user(tenant_a, user_in(tenant_a, roles=[Role.TEACHER], branch=branch))
     resp = client.get(f"/api/v1/students/{student.id}/")
     assert resp.status_code == 200
-    assert resp.json()["medical_notes"] is None
+    assert resp.json()["data"]["medical_notes"] is None
 
 
 @pytest.mark.parametrize("role", [Role.REGISTRAR, Role.DIRECTOR])
@@ -61,7 +61,7 @@ def test_medical_roles_retrieve_plaintext(tenant_a, user_in, as_user, student_wi
     client = as_user(tenant_a, user_in(tenant_a, roles=[role], branch=branch))
     resp = client.get(f"/api/v1/students/{student.id}/")
     assert resp.status_code == 200
-    assert resp.json()["medical_notes"] == SECRET
+    assert resp.json()["data"]["medical_notes"] == SECRET
 
 
 # --------------------------------------------------------------------------- #
@@ -79,9 +79,9 @@ def test_non_medical_writer_patch_does_not_leak_medical_notes(tenant_a, user_in,
     )
     assert resp.status_code == 200
     # The write took effect...
-    assert resp.json()["academic_level"] == "grade-7"
+    assert resp.json()["data"]["academic_level"] == "grade-7"
     # ...but the PHI is gated out of the response, same as retrieve.
-    assert resp.json()["medical_notes"] is None
+    assert resp.json()["data"]["medical_notes"] is None
     # And the gate is real: the value persisted, a medical reader still sees it.
     student.refresh_from_db()
     assert student.medical_notes == SECRET
@@ -100,7 +100,7 @@ def test_non_medical_writer_patch_cannot_read_back_medical_notes_write(
         format="json",
     )
     assert resp.status_code == 200
-    assert resp.json()["medical_notes"] is None
+    assert resp.json()["data"]["medical_notes"] is None
     # Write capability is retained for students:write roles.
     student.refresh_from_db()
     assert student.medical_notes == "updated: tree-nut allergy"
@@ -116,4 +116,4 @@ def test_medical_role_patch_still_sees_medical_notes(tenant_a, user_in, as_user,
         format="json",
     )
     assert resp.status_code == 200
-    assert resp.json()["medical_notes"] == SECRET
+    assert resp.json()["data"]["medical_notes"] == SECRET

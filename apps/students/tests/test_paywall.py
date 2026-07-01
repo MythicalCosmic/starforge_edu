@@ -112,7 +112,7 @@ def test_api_create_at_active_past_cap_returns_402(tenant_a, user_in, as_user):
         format="json",
     )
     assert resp.status_code == 402
-    assert resp.json()["error"]["code"] == "plan_limit_exceeded"
+    assert resp.json()["code"] == "plan_limit_exceeded"
     # No student was persisted for the rejected create.
     with schema_context(tenant_a.schema_name):
         assert not StudentProfile.objects.filter(user__phone="+998905554005").exists()

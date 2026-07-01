@@ -41,7 +41,7 @@ def test_csv_import_partial_errors(registrar, tenant_a):
     client, branch = registrar
     resp = _post_csv(client, branch, _csv_with_two_bad_rows().encode())
     assert resp.status_code == 201
-    body = resp.json()
+    body = resp.json()["data"]
     assert body["created"] == 8
     assert [e["row"] for e in body["errors"]] == [9, 10]
     with schema_context(tenant_a.schema_name):
@@ -50,7 +50,7 @@ def test_csv_import_partial_errors(registrar, tenant_a):
     # Idempotent re-run: existing phones are skipped (as row errors), no dupes.
     resp = _post_csv(client, branch, _csv_with_two_bad_rows().encode())
     assert resp.status_code == 201
-    assert resp.json()["created"] == 0
+    assert resp.json()["data"]["created"] == 0
     with schema_context(tenant_a.schema_name):
         assert StudentProfile.objects.filter(branch=branch).count() == 8
 
@@ -62,7 +62,7 @@ def test_csv_import_handles_excel_bom(registrar, tenant_a):
     payload = "phone,first_name\n+998905556101,Bilol\n".encode("utf-8-sig")
     resp = _post_csv(client, branch, payload)
     assert resp.status_code == 201
-    body = resp.json()
+    body = resp.json()["data"]
     assert body == {"created": 1, "errors": []}
 
 
@@ -71,7 +71,7 @@ def test_csv_import_non_utf8_400(registrar):
     payload = "phone,first_name\n+998905556201,Фёдор\n".encode("cp1251")
     resp = _post_csv(client, branch, payload)
     assert resp.status_code == 400
-    assert resp.json()["error"]["code"] == "invalid_encoding"
+    assert resp.json()["code"] == "invalid_encoding"
 
 
 def test_csv_import_over_size_cap_400(registrar, tenant_a):
@@ -83,4 +83,4 @@ def test_csv_import_over_size_cap_400(registrar, tenant_a):
     payload = b"phone\n" + b"x" * (1024 * 1024)  # > 1 MB
     resp = _post_csv(client, branch, payload)
     assert resp.status_code == 400
-    assert resp.json()["error"]["code"] == "file_too_large"
+    assert resp.json()["code"] == "file_too_large"

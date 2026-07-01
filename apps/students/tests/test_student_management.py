@@ -38,8 +38,8 @@ def test_create_and_read_location_and_previous_school(tenant_a, user_in, as_user
         format="json",
     )
     assert resp.status_code == 201, resp.content
-    sid = resp.json()["id"]
-    body = client.get(f"/api/v1/students/{sid}/").json()
+    sid = resp.json()["data"]["id"]
+    body = client.get(f"/api/v1/students/{sid}/").json()["data"]
     assert body["location"] == "Tashkent, Yunusabad"
     assert body["previous_school"] == "School #110"
     assert body["is_blocked"] is False
@@ -56,14 +56,14 @@ def test_block_then_unblock_student(tenant_a, user_in, as_user):
 
     resp = client.post(f"/api/v1/students/{student.id}/block/", {"reason": "unpaid balance"}, format="json")
     assert resp.status_code == 200, resp.content
-    body = resp.json()
+    body = resp.json()["data"]
     assert body["is_blocked"] is True
     assert body["blocked_at"] is not None
     assert body["block_reason"] == "unpaid balance"
 
     resp = client.post(f"/api/v1/students/{student.id}/unblock/", {}, format="json")
     assert resp.status_code == 200
-    assert resp.json()["is_blocked"] is False
+    assert resp.json()["data"]["is_blocked"] is False
 
 
 def test_block_requires_write_role(tenant_a, user_in, as_user):
@@ -86,7 +86,7 @@ def test_student_filters(tenant_a, user_in, as_user):
         create_student(branch=branch, phone="+998905557021", location="Samarkand", academic_level="B2")
 
     def ids(query):
-        return {r["id"] for r in client.get(f"/api/v1/students/?{query}").json()["results"]}
+        return {r["id"] for r in client.get(f"/api/v1/students/?{query}").json()["data"]}
 
     assert ids("location=tash") == {a.id}
     assert ids("level=a1") == {a.id}  # iexact, case-insensitive
@@ -110,7 +110,7 @@ def test_stats_snapshot(tenant_a, user_in, as_user):
         create_student(branch=branch, phone="+998905557031")
     client.post(f"/api/v1/students/{a.id}/block/", {"reason": "x"}, format="json")
 
-    body = client.get("/api/v1/students/stats/").json()
+    body = client.get("/api/v1/students/stats/").json()["data"]
     assert body["total"] == 2
     assert body["without_cohort"] == 2
     assert body["with_cohort"] == 0
@@ -131,11 +131,11 @@ def test_comparison_joined_and_left(tenant_a, user_in, as_user):
         leaver = create_student(branch=branch, phone="+998905557041", status=StudentProfile.Status.ACTIVE)
         transition_enrollment(student=leaver, to_status=StudentProfile.Status.WITHDRAWN)
 
-    joined = client.get("/api/v1/students/comparison/?metric=joined&unit=year").json()
+    joined = client.get("/api/v1/students/comparison/?metric=joined&unit=year").json()["data"]
     assert joined["current"] == 2  # both records were created this year
     assert joined["previous"] == 0
 
-    left = client.get("/api/v1/students/comparison/?metric=left&unit=year").json()
+    left = client.get("/api/v1/students/comparison/?metric=left&unit=year").json()["data"]
     assert left["current"] == 1  # one withdrawal this year
     assert left["unit"] == "year"
 

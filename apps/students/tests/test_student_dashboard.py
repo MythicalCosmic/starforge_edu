@@ -39,7 +39,7 @@ def test_student_dashboard_returns_own_cockpit(tenant_a, user_in, as_user):
     client = as_user(tenant_a, user)
     resp = client.get("/api/v1/students/me/dashboard/")
     assert resp.status_code == 200, resp.content
-    body = resp.json()
+    body = resp.json()["data"]
     assert body["group"] == "Beginners A1"
     assert body["level"] == "A1"
     assert body["open_homework_count"] == 1
@@ -56,7 +56,7 @@ def test_dashboard_404_for_non_student(tenant_a, user_in, as_user):
     client = as_user(tenant_a, user_in(tenant_a, roles=[Role.TEACHER]))
     resp = client.get("/api/v1/students/me/dashboard/")
     assert resp.status_code == 404
-    assert resp.json()["error"]["code"] == "not_a_student"
+    assert resp.json()["code"] == "not_a_student"
 
 
 def test_dashboard_requires_auth(tenant_a, client_for):
