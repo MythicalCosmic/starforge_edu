@@ -41,7 +41,7 @@ def test_enroll_wrong_branch_student_400(director, tenant_a):
 
     resp = director.post(f"/api/v1/cohorts/{cohort.id}/enroll/", {"student": student.id}, format="json")
     assert resp.status_code == 400
-    assert resp.json()["error"]["code"] == "student_branch_mismatch"
+    assert resp.json()["code"] == "student_branch_mismatch"
 
     with schema_context(tenant_a.schema_name):
         assert not CohortMembership.objects.filter(cohort=cohort, student=student).exists()
@@ -64,7 +64,7 @@ def test_move_wrong_branch_student_400(director, tenant_a):
         format="json",
     )
     assert resp.status_code == 400
-    assert resp.json()["error"]["code"] == "student_branch_mismatch"
+    assert resp.json()["code"] == "student_branch_mismatch"
 
     with schema_context(tenant_a.schema_name):
         # The source membership is untouched (guard runs before any mutation).

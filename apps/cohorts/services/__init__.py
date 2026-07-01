@@ -1,5 +1,10 @@
 """Cohort write services: enrollment + mid-term moves that preserve history
-(TASKS §8)."""
+(TASKS §8).
+
+Kept as module-level domain functions (not just the layered service class) because
+the finance auto-issue receiver and several tests import them directly:
+``from apps.cohorts.services import enroll_student_in_cohort, move_student``.
+"""
 
 from __future__ import annotations
 

@@ -15,6 +15,14 @@ from core.permissions import Role, RolePermission
 
 pytestmark = pytest.mark.django_db
 
+
+def _err_code(resp) -> str | None:
+    """The stable error code from either envelope: layered plain views return
+    ``{"code": ...}``; still-DRF endpoints return ``{"error": {"code": ...}}``.
+    The matrix spans both during the off-DRF migration."""
+    body = resp.json()
+    return body["code"] if "code" in body else body.get("error", {}).get("code")
+
 # (role, http_method, url, allowed?) — `allowed=True` expects 200, else 403.
 MATRIX_CASES = [
     # users directory (users:read)
@@ -107,7 +115,7 @@ def test_permission_matrix(as_role, role, method, url, allowed):
         assert resp.status_code == 200, f"{role} {method} {url} -> {resp.status_code}"
     else:
         assert resp.status_code == 403, f"{role} {method} {url} -> {resp.status_code}"
-        assert resp.json()["error"]["code"] == "forbidden"
+        assert _err_code(resp) == "forbidden"
 
 
 def test_role_without_code_denied(as_role):

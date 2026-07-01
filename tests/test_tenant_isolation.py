@@ -29,7 +29,11 @@ def test_cross_tenant_token_rejected(tenant_a, tenant_b, user_in, client_for, ur
     resp = client_b.get(url)
 
     assert resp.status_code == 401
-    assert resp.json()["error"]["code"] == "authentication_failed"
+    # Either envelope: layered plain views (cohorts) return {"code": ...}; still-DRF
+    # endpoints (users/me, students) return {"error": {"code": ...}}.
+    body = resp.json()
+    code = body["code"] if "code" in body else body.get("error", {}).get("code")
+    assert code == "authentication_failed"
 
 
 def test_token_valid_on_own_tenant(tenant_a, user_in, as_user):
