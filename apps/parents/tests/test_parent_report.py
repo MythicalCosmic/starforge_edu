@@ -42,7 +42,7 @@ def family(tenant_a, user_in):
 
 def test_parent_lists_only_their_own_children(tenant_a, as_user, family):
     client = as_user(tenant_a, family["parent_user"])
-    body = client.get(CHILDREN).json()
+    body = client.get(CHILDREN).json()["data"]
     assert [s["id"] for s in body] == [family["own_child"].id]
 
 
@@ -50,7 +50,7 @@ def test_parent_reads_their_childs_report(tenant_a, as_user, family):
     client = as_user(tenant_a, family["parent_user"])
     r = client.get(f"{CHILDREN}{family['own_child'].id}/report/")
     assert r.status_code == 200, r.content
-    body = r.json()
+    body = r.json()["data"]
     # the same shape as the student's own /students/me/report/
     assert "attendance" in body
     assert "payment" in body
@@ -63,12 +63,12 @@ def test_parent_cannot_read_another_familys_child(tenant_a, as_user, family):
     client = as_user(tenant_a, family["parent_user"])
     r = client.get(f"{CHILDREN}{family['other_child'].id}/report/")
     assert r.status_code == 404
-    assert r.json()["error"]["code"] == "not_your_child"
+    assert r.json()["code"] == "not_your_child"
 
 
 def test_other_parent_sees_only_their_own_child(tenant_a, as_user, family):
     client = as_user(tenant_a, family["other_parent_user"])
-    listed = client.get(CHILDREN).json()
+    listed = client.get(CHILDREN).json()["data"]
     assert [s["id"] for s in listed] == [family["other_child"].id]
     # and can read their own child's report
     assert client.get(f"{CHILDREN}{family['other_child'].id}/report/").status_code == 200
@@ -80,7 +80,7 @@ def test_a_non_parent_gets_not_a_parent(tenant_a, as_role, family):
     staff, _ = as_role(Role.DIRECTOR)
     r = staff.get(CHILDREN)
     assert r.status_code == 404
-    assert r.json()["error"]["code"] == "not_a_parent"
+    assert r.json()["code"] == "not_a_parent"
     rep = staff.get(f"{CHILDREN}{family['own_child'].id}/report/")
     assert rep.status_code == 404
-    assert rep.json()["error"]["code"] == "not_a_parent"
+    assert rep.json()["code"] == "not_a_parent"

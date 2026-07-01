@@ -52,13 +52,13 @@ def test_parent_sees_only_own_children(tenant_a, as_user, family):
 
     resp = client.get(f"/api/v1/parents/{family['parent'].id}/students/")
     assert resp.status_code == 200
-    assert [s["id"] for s in resp.json()] == [family["own_child"].id]
+    assert [s["id"] for s in resp.json()["data"]] == [family["own_child"].id]
 
 
 def test_parent_list_returns_only_self(tenant_a, as_user, family):
     client = as_user(tenant_a, family["parent_user"])
     body = client.get("/api/v1/parents/").json()
-    assert [p["id"] for p in body["results"]] == [family["parent"].id]
+    assert [p["id"] for p in body["data"]] == [family["parent"].id]
 
 
 def test_parent_cannot_reach_other_parents_profile(tenant_a, as_user, family):
@@ -77,7 +77,7 @@ def test_parent_pickups_scoped_to_own_children(tenant_a, as_user, family):
         )
     client = as_user(tenant_a, family["parent_user"])
     body = client.get("/api/v1/parents/pickups/").json()
-    assert [p["id"] for p in body["results"]] == [own_pickup.id]
+    assert [p["id"] for p in body["data"]] == [own_pickup.id]
 
 
 def test_student_sees_only_self(tenant_a, user_in, as_user, family):

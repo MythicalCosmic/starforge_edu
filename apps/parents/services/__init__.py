@@ -1,4 +1,9 @@
-"""Parent / guardian write services (TASKS §6)."""
+"""Parent / guardian write services (TASKS §6).
+
+Kept as module-level domain functions (not only the layered service classes)
+because tests import them directly:
+``from apps.parents.services import create_parent, link_guardian``.
+"""
 
 from __future__ import annotations
 

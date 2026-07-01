@@ -17,9 +17,15 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from django.http import HttpRequest
 from rest_framework.permissions import BasePermission
 from rest_framework.request import Request
 from rest_framework.views import APIView
+
+# Both request styles flow through the role/permission helpers now: DRF views pass
+# a DRF Request, the layered plain views pass a Django HttpRequest. Both expose the
+# `.user` (and cache attrs) these helpers read.
+AnyRequest = HttpRequest | Request
 
 
 class Role:
@@ -486,7 +492,7 @@ def has_permission_code(
     return False
 
 
-def get_role_memberships(request: Request) -> list:
+def get_role_memberships(request: AnyRequest) -> list:
     """Active RoleMemberships for the request user, fetched once and memoized."""
     cached = getattr(request, "_role_memberships_cache", None)
     if cached is not None:
@@ -496,11 +502,11 @@ def get_role_memberships(request: Request) -> list:
         memberships: list = []
     else:
         memberships = list(user.role_memberships.filter(revoked_at__isnull=True))
-    request._role_memberships_cache = memberships  # type: ignore[attr-defined]
+    request._role_memberships_cache = memberships  # type: ignore[union-attr]
     return memberships
 
 
-def get_user_roles(request: Request) -> set[str]:
+def get_user_roles(request: AnyRequest) -> set[str]:
     return {m.role for m in get_role_memberships(request)}
 
 
