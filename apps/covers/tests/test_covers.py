@@ -60,12 +60,12 @@ def test_request_then_assign_reassigns_the_lesson(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     req = s["a_client"].post(COVER, {"lesson": s["lesson"].id, "reason": "sick"}, format="json")
     assert req.status_code == 201, req.content
-    assert req.json()["status"] == "open"
-    cid = req.json()["id"]
+    assert req.json()["data"]["status"] == "open"
+    cid = req.json()["data"]["id"]
 
     approved = s["manager"].post(f"{COVER}{cid}/assign/", {"cover_teacher": s["b_prof"].id}, format="json")
     assert approved.status_code == 200, approved.content
-    assert approved.json()["status"] == "approved"
+    assert approved.json()["data"]["status"] == "approved"
 
     with schema_context(tenant_a.schema_name):
         s["lesson"].refresh_from_db()
@@ -74,11 +74,11 @@ def test_request_then_assign_reassigns_the_lesson(tenant_a, user_in, as_user):
 
 def test_pool_then_claim_reassigns(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
-    cid = s["a_client"].post(COVER, {"lesson": s["lesson"].id}, format="json").json()["id"]
-    assert s["manager"].post(f"{COVER}{cid}/open-pool/", {}, format="json").json()["pool"] is True
+    cid = s["a_client"].post(COVER, {"lesson": s["lesson"].id}, format="json").json()["data"]["id"]
+    assert s["manager"].post(f"{COVER}{cid}/open-pool/", {}, format="json").json()["data"]["pool"] is True
     claimed = s["b_client"].post(f"{COVER}{cid}/claim/", {}, format="json")
     assert claimed.status_code == 200
-    assert claimed.json()["status"] == "approved"
+    assert claimed.json()["data"]["status"] == "approved"
     with schema_context(tenant_a.schema_name):
         s["lesson"].refresh_from_db()
         assert s["lesson"].teacher_id == s["b_prof"].id
@@ -100,10 +100,10 @@ def test_assign_to_a_busy_teacher_conflicts(tenant_a, user_in, as_user):
             starts_at=s["start"],
             ends_at=s["start"] + timedelta(hours=1),
         )
-    cid = s["a_client"].post(COVER, {"lesson": s["lesson"].id}, format="json").json()["id"]
+    cid = s["a_client"].post(COVER, {"lesson": s["lesson"].id}, format="json").json()["data"]["id"]
     conflict = s["manager"].post(f"{COVER}{cid}/assign/", {"cover_teacher": s["b_prof"].id}, format="json")
     assert conflict.status_code == 409
-    assert conflict.json()["error"]["code"] == "cover_conflict"
+    assert conflict.json()["code"] == "cover_conflict"
     # nothing changed: lesson still A, request still open
     with schema_context(tenant_a.schema_name):
         s["lesson"].refresh_from_db()
@@ -118,37 +118,39 @@ def test_cannot_request_cover_for_a_lesson_you_dont_teach(tenant_a, user_in, as_
     # teacher B doesn't teach A's lesson
     r = s["b_client"].post(COVER, {"lesson": s["lesson"].id}, format="json")
     assert r.status_code == 403
-    assert r.json()["error"]["code"] == "not_lesson_teacher"
+    assert r.json()["code"] == "not_lesson_teacher"
 
 
 def test_cannot_cover_self(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
-    cid = s["a_client"].post(COVER, {"lesson": s["lesson"].id}, format="json").json()["id"]
+    cid = s["a_client"].post(COVER, {"lesson": s["lesson"].id}, format="json").json()["data"]["id"]
     # assigning the original teacher as their own cover is rejected
     r = s["manager"].post(f"{COVER}{cid}/assign/", {"cover_teacher": s["a_prof"].id}, format="json")
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "cant_cover_self"
+    assert r.json()["code"] == "cant_cover_self"
 
 
 def test_requester_cancels_and_duplicate_blocked(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
-    cid = s["a_client"].post(COVER, {"lesson": s["lesson"].id}, format="json").json()["id"]
+    cid = s["a_client"].post(COVER, {"lesson": s["lesson"].id}, format="json").json()["data"]["id"]
     # a duplicate live request for the same lesson is blocked
     dup = s["a_client"].post(COVER, {"lesson": s["lesson"].id}, format="json")
     assert dup.status_code == 409
-    assert dup.json()["error"]["code"] == "cover_already_requested"
+    assert dup.json()["code"] == "cover_already_requested"
     # the requester cancels their own; afterwards a new request is allowed again
-    assert s["a_client"].post(f"{COVER}{cid}/cancel/", {}, format="json").json()["status"] == "cancelled"
+    assert (
+        s["a_client"].post(f"{COVER}{cid}/cancel/", {}, format="json").json()["data"]["status"] == "cancelled"
+    )
     again = s["a_client"].post(COVER, {"lesson": s["lesson"].id}, format="json")
     assert again.status_code == 201
 
 
 def test_manager_rejects(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
-    cid = s["a_client"].post(COVER, {"lesson": s["lesson"].id}, format="json").json()["id"]
+    cid = s["a_client"].post(COVER, {"lesson": s["lesson"].id}, format="json").json()["data"]["id"]
     rejected = s["manager"].post(f"{COVER}{cid}/reject/", {}, format="json")
     assert rejected.status_code == 200
-    assert rejected.json()["status"] == "rejected"
+    assert rejected.json()["data"]["status"] == "rejected"
 
 
 def test_cover_teacher_must_be_in_branch(tenant_a, user_in, as_user):
@@ -163,10 +165,10 @@ def test_cover_teacher_must_be_in_branch(tenant_a, user_in, as_user):
     foreign_user = user_in(tenant_a, roles=[Role.TEACHER], branch=other_branch)
     with schema_context(tenant_a.schema_name):
         foreign_prof = TeacherProfileFactory.create(user=foreign_user, branch=other_branch)
-    cid = s["a_client"].post(COVER, {"lesson": s["lesson"].id}, format="json").json()["id"]
+    cid = s["a_client"].post(COVER, {"lesson": s["lesson"].id}, format="json").json()["data"]["id"]
     r = s["manager"].post(f"{COVER}{cid}/assign/", {"cover_teacher": foreign_prof.id}, format="json")
     assert r.status_code == 403
-    assert r.json()["error"]["code"] == "cover_teacher_out_of_branch"
+    assert r.json()["code"] == "cover_teacher_out_of_branch"
     # the lesson is untouched and the request stays open
     with schema_context(tenant_a.schema_name):
         s["lesson"].refresh_from_db()
@@ -183,17 +185,17 @@ def test_recover_chain_after_approval(tenant_a, user_in, as_user):
 
     s = _setup(tenant_a, user_in, as_user)
     # A -> B (B now teaches the lesson)
-    cid = s["a_client"].post(COVER, {"lesson": s["lesson"].id}, format="json").json()["id"]
+    cid = s["a_client"].post(COVER, {"lesson": s["lesson"].id}, format="json").json()["data"]["id"]
     assert (
         s["manager"]
         .post(f"{COVER}{cid}/assign/", {"cover_teacher": s["b_prof"].id}, format="json")
-        .json()["status"]
+        .json()["data"]["status"]
         == "approved"
     )
     # B now requests cover for the same (reassigned) lesson — must not be blocked
     again = s["b_client"].post(COVER, {"lesson": s["lesson"].id}, format="json")
     assert again.status_code == 201, again.content
-    cid2 = again.json()["id"]
+    cid2 = again.json()["data"]["id"]
     # ...and it can be assigned onward to a third teacher C
     c_user = user_in(tenant_a, roles=[Role.TEACHER], branch=s["branch"])
     with schema_context(tenant_a.schema_name):
@@ -206,10 +208,10 @@ def test_recover_chain_after_approval(tenant_a, user_in, as_user):
 
 def test_manager_cannot_cancel_anothers_request(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
-    cid = s["a_client"].post(COVER, {"lesson": s["lesson"].id}, format="json").json()["id"]
+    cid = s["a_client"].post(COVER, {"lesson": s["lesson"].id}, format="json").json()["data"]["id"]
     r = s["manager"].post(f"{COVER}{cid}/cancel/", {}, format="json")
     assert r.status_code == 403
-    assert r.json()["error"]["code"] == "not_requester"
+    assert r.json()["code"] == "not_requester"
     with schema_context(tenant_a.schema_name):
         from apps.covers.models import CoverRequest
 
@@ -219,27 +221,29 @@ def test_manager_cannot_cancel_anothers_request(tenant_a, user_in, as_user):
 def test_non_teacher_cannot_claim(tenant_a, user_in, as_user):
     """A cover:write holder with no TeacherProfile (a manager) cannot claim."""
     s = _setup(tenant_a, user_in, as_user)
-    cid = s["a_client"].post(COVER, {"lesson": s["lesson"].id}, format="json").json()["id"]
+    cid = s["a_client"].post(COVER, {"lesson": s["lesson"].id}, format="json").json()["data"]["id"]
     s["manager"].post(f"{COVER}{cid}/open-pool/", {}, format="json")
     r = s["manager"].post(f"{COVER}{cid}/claim/", {}, format="json")
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "not_a_teacher"
+    assert r.json()["code"] == "not_a_teacher"
 
 
 def test_cannot_claim_non_pooled_request(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
-    cid = s["a_client"].post(COVER, {"lesson": s["lesson"].id}, format="json").json()["id"]
+    cid = s["a_client"].post(COVER, {"lesson": s["lesson"].id}, format="json").json()["data"]["id"]
     # the requester (who can see their own request) tries to claim it before it was
     # ever opened to the pool — the pool guard rejects it (no out-of-pool claim)
     r = s["a_client"].post(f"{COVER}{cid}/claim/", {}, format="json")
     assert r.status_code == 422
-    assert r.json()["error"]["code"] == "cover_not_claimable"
+    assert r.json()["code"] == "cover_not_claimable"
 
 
 def test_reject_frees_the_constraint(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
-    cid = s["a_client"].post(COVER, {"lesson": s["lesson"].id}, format="json").json()["id"]
-    assert s["manager"].post(f"{COVER}{cid}/reject/", {}, format="json").json()["status"] == "rejected"
+    cid = s["a_client"].post(COVER, {"lesson": s["lesson"].id}, format="json").json()["data"]["id"]
+    assert (
+        s["manager"].post(f"{COVER}{cid}/reject/", {}, format="json").json()["data"]["status"] == "rejected"
+    )
     # a rejection frees the lesson for a fresh request
     again = s["a_client"].post(COVER, {"lesson": s["lesson"].id}, format="json")
     assert again.status_code == 201
@@ -247,7 +251,7 @@ def test_reject_frees_the_constraint(tenant_a, user_in, as_user):
 
 def _ids(response):
     body = response.json()
-    items = body["results"] if isinstance(body, dict) and "results" in body else body
+    items = body["data"] if isinstance(body, dict) and "data" in body else body
     return [row["id"] for row in items]
 
 
@@ -259,7 +263,7 @@ def test_opening_to_pool_notifies_the_claimable_teacher_pool(tenant_a, user_in, 
     from apps.notifications.models import Notification
 
     s = _setup(tenant_a, user_in, as_user)
-    cid = s["a_client"].post(COVER, {"lesson": s["lesson"].id}, format="json").json()["id"]
+    cid = s["a_client"].post(COVER, {"lesson": s["lesson"].id}, format="json").json()["data"]["id"]
     s["manager"].post(f"{COVER}{cid}/open-pool/", {}, format="json")
 
     with schema_context(tenant_a.schema_name):
@@ -274,7 +278,7 @@ def test_pool_board_lists_only_pooled_open_covers(tenant_a, user_in, as_user):
     """F18-2: the /cover/pool/ board shows a teacher the requests opened to the pool in
     their branch — empty until a manager opens one, then listing it for the taking."""
     s = _setup(tenant_a, user_in, as_user)
-    cid = s["a_client"].post(COVER, {"lesson": s["lesson"].id}, format="json").json()["id"]
+    cid = s["a_client"].post(COVER, {"lesson": s["lesson"].id}, format="json").json()["data"]["id"]
     before = s["b_client"].get(f"{COVER}pool/")
     assert before.status_code == 200, before.content
     assert _ids(before) == []  # not on the board until a manager opens it

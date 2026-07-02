@@ -1,4 +1,9 @@
-"""Cover-request services (F18-1)."""
+"""Cover-request services (F18-1).
+
+Domain functions live here (imported by the layered service in ``services/v1``). They
+hold the transactional core of the cover flow — the select-for-update lock, the lesson
+reassignment + time-overlap handling, and the notification fan-out.
+"""
 
 from __future__ import annotations
 
