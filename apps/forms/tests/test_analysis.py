@@ -33,10 +33,10 @@ def _seed_form_ai(tenant):
 
 
 def _published_form(director):
-    fid = director.post(FORMS, {"title": "Feedback"}, format="json").json()["id"]
+    fid = director.post(FORMS, {"title": "Feedback"}, format="json").json()["data"]["id"]
     field = director.post(
         f"{FORMS}{fid}/fields/", {"label": "Comments", "field_type": "textarea"}, format="json"
-    ).json()["id"]
+    ).json()["data"]["id"]
     pub = director.post(f"{FORMS}{fid}/publish/", {}, format="json")
     assert pub.status_code == 200, pub.content
     return fid, field
@@ -53,7 +53,10 @@ def _mock_complete(monkeypatch, capture=None):
     def _fake(*, system, messages, max_tokens, effort):
         if capture is not None:
             capture["text"] = messages[0]["content"]
-        return {"text": "Overall positive. Key takeaways: ...", "usage": {"input_tokens": 10, "output_tokens": 20}}
+        return {
+            "text": "Overall positive. Key takeaways: ...",
+            "usage": {"input_tokens": 10, "output_tokens": 20},
+        }
 
     monkeypatch.setattr(ai_tasks, "complete", _fake)
 
@@ -136,7 +139,7 @@ def test_analyze_endpoint_returns_202(tenant_a, as_role, monkeypatch):
     _submit(student, fid, field, "ok")
     r = director.post(f"{FORMS}{fid}/analyze/", {}, format="json")
     assert r.status_code == 202, r.content
-    assert r.json()["request_id"]
+    assert r.json()["data"]["request_id"]
 
 
 def test_analyze_rejects_a_form_with_no_responses(tenant_a, as_role):
@@ -145,7 +148,7 @@ def test_analyze_rejects_a_form_with_no_responses(tenant_a, as_role):
     fid, _field = _published_form(director)
     r = director.post(f"{FORMS}{fid}/analyze/", {}, format="json")
     assert r.status_code == 422
-    assert r.json()["error"]["code"] == "no_responses"
+    assert r.json()["code"] == "no_responses"
 
 
 def test_responder_cannot_analyze(tenant_a, as_role, monkeypatch):

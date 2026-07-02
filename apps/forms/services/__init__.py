@@ -1,8 +1,9 @@
 """Forms engine services (F3-3): build → publish → submit → summarize.
 
-All writes are keyword-only and `@transaction.atomic`; submission validates every
-answer against its field's type/options so a malformed response is a clean 400,
-never a 500 or a junk row.
+Domain functions live here (imported by the layered service in ``services/v1`` AND by
+celery `run_form_analysis` -> `form_summary`). All writes are keyword-only and
+`@transaction.atomic`; submission validates every answer against its field's
+type/options so a malformed response is a clean 400, never a 500 or a junk row.
 """
 
 from __future__ import annotations
@@ -277,9 +278,7 @@ def request_form_analysis(*, form: Form, requested_by=None):
     from core.utils import current_schema
 
     if not form.responses.exists():
-        raise UnprocessableEntity(
-            _("This form has no responses to analyze yet."), code="no_responses"
-        )
+        raise UnprocessableEntity(_("This form has no responses to analyze yet."), code="no_responses")
     prompt = active_prompt(AIFeature.FORM_ANALYSIS)
     ai_request = check_and_reserve_budget(
         feature=AIFeature.FORM_ANALYSIS,
