@@ -50,23 +50,23 @@ def test_schedule_invite_and_rsvp(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     created = s["manager"].post(MEET, _meeting_body(s), format="json")
     assert created.status_code == 201, created.content
-    mid = created.json()["id"]
-    assert created.json()["status"] == "scheduled"
-    assert len(created.json()["attendees"]) == 1
-    assert created.json()["attendees"][0]["response"] == "invited"
+    mid = created.json()["data"]["id"]
+    assert created.json()["data"]["status"] == "scheduled"
+    assert len(created.json()["data"]["attendees"]) == 1
+    assert created.json()["data"]["attendees"][0]["response"] == "invited"
 
     # the invited teacher accepts
     resp = s["t1c"].post(f"{MEET}{mid}/respond/", {"response": "accepted"}, format="json")
     assert resp.status_code == 200
-    assert resp.json()["attendees"][0]["response"] == "accepted"
+    assert resp.json()["data"]["attendees"][0]["response"] == "accepted"
 
 
 def test_manager_cancels(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
-    mid = s["manager"].post(MEET, _meeting_body(s), format="json").json()["id"]
+    mid = s["manager"].post(MEET, _meeting_body(s), format="json").json()["data"]["id"]
     cancelled = s["manager"].post(f"{MEET}{mid}/cancel/", {}, format="json")
     assert cancelled.status_code == 200
-    assert cancelled.json()["status"] == "cancelled"
+    assert cancelled.json()["data"]["status"] == "cancelled"
     # a cancelled meeting can't be cancelled again
     assert s["manager"].post(f"{MEET}{mid}/cancel/", {}, format="json").status_code == 422
 
@@ -79,27 +79,27 @@ def test_cannot_schedule_for_another_branch(tenant_a, user_in, as_user):
         other = BranchFactory.create()
     cross = s["manager"].post(MEET, _meeting_body(s, branch=other.id), format="json")
     assert cross.status_code == 403
-    assert cross.json()["error"]["code"] == "branch_out_of_scope"
+    assert cross.json()["code"] == "branch_out_of_scope"
     # a non-director must name a branch (no centre-wide)
     wide = s["manager"].post(MEET, _meeting_body(s, branch=None), format="json")
     assert wide.status_code == 403
-    assert wide.json()["error"]["code"] == "branch_required"
+    assert wide.json()["code"] == "branch_required"
 
 
 def test_invitee_sees_meeting_others_dont(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
-    mid = s["manager"].post(MEET, _meeting_body(s), format="json").json()["id"]
+    mid = s["manager"].post(MEET, _meeting_body(s), format="json").json()["data"]["id"]
     # the invited teacher sees it; the uninvited teacher does not
-    assert s["t1c"].get(MEET).json()["count"] == 1
-    assert s["t2c"].get(MEET).json()["count"] == 0
+    assert s["t1c"].get(MEET).json()["pagination"]["total"] == 1
+    assert s["t2c"].get(MEET).json()["pagination"]["total"] == 0
     # ...and it shows on the invitee's upcoming list
-    upcoming = s["t1c"].get(f"{MEET}upcoming/").json()
+    upcoming = s["t1c"].get(f"{MEET}upcoming/").json()["data"]
     assert [m["id"] for m in upcoming] == [mid]
 
 
 def test_non_invitee_cannot_rsvp(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
-    mid = s["manager"].post(MEET, _meeting_body(s), format="json").json()["id"]
+    mid = s["manager"].post(MEET, _meeting_body(s), format="json").json()["data"]["id"]
     # t2 wasn't invited -> the meeting isn't in their scope -> 404
     assert s["t2c"].post(f"{MEET}{mid}/respond/", {"response": "accepted"}, format="json").status_code == 404
 
@@ -125,7 +125,7 @@ def test_manager_invitee_can_rsvp_a_centre_wide_meeting(tenant_a, user_in, as_us
             "attendees": [hod_user.id],
         },
         format="json",
-    ).json()["id"]
+    ).json()["data"]["id"]
     hod = as_user(tenant_a, hod_user)
     # the HOD is an invitee (a meeting:write holder) — they must be able to open AND RSVP
     # it even though it has no branch, not just see it in /upcoming/
@@ -135,9 +135,18 @@ def test_manager_invitee_can_rsvp_a_centre_wide_meeting(tenant_a, user_in, as_us
 
 def test_invitee_cannot_cancel(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
-    mid = s["manager"].post(MEET, _meeting_body(s), format="json").json()["id"]
+    mid = s["manager"].post(MEET, _meeting_body(s), format="json").json()["data"]["id"]
     # t1 is an in-scope invitee (sees the meeting) but holds no meeting:write -> can't cancel
     assert s["t1c"].post(f"{MEET}{mid}/cancel/", {}, format="json").status_code == 403
+
+
+def test_invalid_datetime_is_400_not_500(tenant_a, user_in, as_user):
+    """A well-formed-but-invalid datetime (parse_datetime RAISES ValueError, not None)
+    must be a clean 400, never a 500."""
+    s = _setup(tenant_a, user_in, as_user)
+    r = s["manager"].post(MEET, _meeting_body(s, starts_at="2026-02-30T10:00:00"), format="json")
+    assert r.status_code == 400
+    assert "starts_at" in r.json()["errors"]
 
 
 def test_student_cannot_be_invited(tenant_a, user_in, as_user):
