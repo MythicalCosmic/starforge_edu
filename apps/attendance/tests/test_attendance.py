@@ -284,7 +284,7 @@ def test_correction_window_expired_teacher_403_director_ok(tenant_a, user_in, as
         director_client = as_user(tenant_a, director_user)
         resp_t = teacher_client.post(f"/api/v1/attendance/lessons/{lesson_id}/mark/", body, format="json")
         assert resp_t.status_code == 403
-        assert resp_t.json()["error"]["code"] == "correction_window_expired"
+        assert resp_t.json()["code"] == "correction_window_expired"
 
         resp_d = director_client.post(f"/api/v1/attendance/lessons/{lesson_id}/mark/", body, format="json")
         assert resp_d.status_code == 200
@@ -451,7 +451,7 @@ def test_dashboard_query_budget(tenant_a, user_in, as_user, django_assert_max_nu
     # +1 for billing paywall middleware subscription check
     with django_assert_max_num_queries(7):  # +1: A-2 per-request permission-override load
         resp = client.get(f"/api/v1/attendance/cohorts/{cohort_id}/dashboard/")
-    body = resp.json()
+    body = resp.json()["data"]
     assert resp.status_code == 200
     assert len(body["students"]) == 30
     assert body["rate"] == 100.0
@@ -469,7 +469,7 @@ def test_dashboard_bad_date_returns_400_not_500(tenant_a, user_in, as_user):
     client = as_user(tenant_a, director)
     resp = client.get(f"/api/v1/attendance/cohorts/{cohort_id}/dashboard/?date_from=garbage")
     assert resp.status_code == 400
-    assert resp.json()["error"]["code"] == "invalid_query_param"
+    assert resp.json()["code"] == "invalid_query_param"
 
     # A well-formed ISO datetime still works.
     ok = client.get(f"/api/v1/attendance/cohorts/{cohort_id}/dashboard/?date_from=2026-06-01T00:00:00Z")
@@ -521,16 +521,16 @@ def test_records_list_scoping_student_parent_teacher(tenant_a, user_in, as_user)
 
     # Student sees only their own record.
     student_body = as_user(tenant_a, student_user).get("/api/v1/attendance/records/").json()
-    assert {r["student"] for r in student_body["results"]} == {my_student_id}
+    assert {r["student"] for r in student_body["data"]} == {my_student_id}
 
     # Parent sees only the linked child's record.
     parent_body = as_user(tenant_a, parent_user).get("/api/v1/attendance/records/").json()
-    assert {r["student"] for r in parent_body["results"]} == {my_student_id}
+    assert {r["student"] for r in parent_body["data"]} == {my_student_id}
 
     # Teacher sees only records on lessons they teach (2 records), not the foreign one.
     teacher_body = as_user(tenant_a, teacher_user).get("/api/v1/attendance/records/").json()
-    assert teacher_body["count"] == 2
-    assert all(r["lesson"] != foreign_lesson_id for r in teacher_body["results"])
+    assert teacher_body["pagination"]["total"] == 2
+    assert all(r["lesson"] != foreign_lesson_id for r in teacher_body["data"])
 
 
 def test_csv_export_shape(tenant_a, user_in, as_user):
@@ -567,7 +567,7 @@ def test_records_list_cross_tenant_isolated(tenant_a, tenant_b, user_in, as_user
 
     director_b = user_in(tenant_b, roles=["director"])
     body = as_user(tenant_b, director_b).get("/api/v1/attendance/records/").json()
-    assert body["count"] == 0  # tenant_a's record is invisible from tenant_b
+    assert body["pagination"]["total"] == 0  # tenant_a's record is invisible from tenant_b
 
 
 def test_mark_cross_tenant_lesson_404(tenant_a, tenant_b, user_in, as_user):
@@ -603,8 +603,8 @@ def test_records_list_query_budget(tenant_a, user_in, as_user, django_assert_max
     client = as_user(tenant_a, director)
     with django_assert_max_num_queries(9):  # +1: A-2 per-request permission-override load
         body = client.get("/api/v1/attendance/records/").json()
-    assert set(body) == {"count", "next", "previous", "results"}
-    assert body["count"] == 5
+    assert set(body) == {"success", "data", "pagination"}
+    assert body["pagination"]["total"] == 5
 
 
 # --------------------------------------------------------------------------- #
@@ -660,9 +660,7 @@ def test_auto_mark_absent_includes_a_student_moved_after_the_lesson(tenant_a):
     with schema_context(tenant_a.schema_name):
         branch = BranchFactory()
         teacher = TeacherProfileFactory(branch=branch)
-        lesson = _make_lesson(
-            branch=branch, teacher=teacher, starts_at=timezone.now() - timedelta(hours=2)
-        )
+        lesson = _make_lesson(branch=branch, teacher=teacher, starts_at=timezone.now() - timedelta(hours=2))
         (student,) = _enroll(lesson.cohort, branch=branch)  # never marked -> a no-show
         move_student(student=student, to_cohort=CohortFactory(branch=branch))
         assert auto_mark_absent() == 1

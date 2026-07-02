@@ -4,6 +4,12 @@
 threshold, correction window); `auto_mark_absent` is the beat-task body that
 back-fills `absent` no-shows. Both are emit-only — nothing here imports an
 sms/email/push adapter (D3-C wires guardian dispatch off `student_marked_absent`).
+
+These domain functions are preserved verbatim and re-exported from this package:
+`auto_mark_absent` is imported by the celery beat task
+(`celery_tasks/attendance_tasks.py`) and `mark_attendance` by the tests. The
+layered service (services/v1/attendance_service.py) wraps `mark_attendance` after
+resolving the entry student ids.
 """
 
 from __future__ import annotations

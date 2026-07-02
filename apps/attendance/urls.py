@@ -1,25 +1,19 @@
 from django.urls import path
-from rest_framework.routers import DefaultRouter
 
-from .views import (
-    AttendanceExportView,
-    AttendanceRecordViewSet,
-    AttendanceSummaryView,
-    CohortDashboardView,
-    MarkAttendanceView,
+from apps.attendance.views.v1.attendance_views import (
+    dashboard_view,
+    export_view,
+    mark_view,
+    record_detail_view,
+    records_collection_view,
+    summary_view,
 )
 
-router = DefaultRouter()
-router.register("records", AttendanceRecordViewSet, basename="attendance-record")
-
 urlpatterns = [
-    path("lessons/<int:lesson_id>/mark/", MarkAttendanceView.as_view(), name="attendance-mark"),
-    path("summary/", AttendanceSummaryView.as_view(), name="attendance-summary"),
-    path(
-        "cohorts/<int:cohort_id>/dashboard/",
-        CohortDashboardView.as_view(),
-        name="attendance-dashboard",
-    ),
-    path("export/", AttendanceExportView.as_view(), name="attendance-export"),
-    *router.urls,
+    path("records/", records_collection_view, name="attendance-record-list"),
+    path("records/<int:pk>/", record_detail_view, name="attendance-record-detail"),
+    path("lessons/<int:lesson_id>/mark/", mark_view, name="attendance-mark"),
+    path("summary/", summary_view, name="attendance-summary"),
+    path("cohorts/<int:cohort_id>/dashboard/", dashboard_view, name="attendance-dashboard"),
+    path("export/", export_view, name="attendance-export"),
 ]
