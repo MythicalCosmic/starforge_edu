@@ -1,5 +1,10 @@
-"""SMS campaign services (F10-1): build a campaign against a student segment (freezing
-the recipient list + phones), then send it once via the Eskiz client."""
+"""SMS campaign services (F10-1/2): build a campaign against a student segment (freezing
+the recipient list + phones), then send it once via the Eskiz client; reusable templates.
+
+Domain functions live here (imported by the layered services in ``services/v1`` AND
+externally: tests use ``_resolve_phone``/``request_template_generation``, and celery
+``run_template_generation`` writes back via ``apply_generated_template``).
+"""
 
 from __future__ import annotations
 

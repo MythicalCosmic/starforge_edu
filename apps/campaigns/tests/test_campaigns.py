@@ -39,6 +39,18 @@ def _branch(tenant):
         return BranchFactory.create()
 
 
+def _create(client, **body):
+    return client.post(CAMPAIGNS, {"name": "x", "message": "hi", **body}, format="json").json()["data"]
+
+
+def _send(client, cid):
+    return client.post(f"{CAMPAIGNS}{cid}/send/", {}, format="json")
+
+
+def _recipients(client, cid):
+    return client.get(f"{CAMPAIGNS}{cid}/recipients/").json()["data"]
+
+
 def test_create_and_send_campaign_texts_recipients(tenant_a, user_in, as_user, sms_outbox):
     branch = _branch(tenant_a)
     with schema_context(tenant_a.schema_name):
@@ -50,19 +62,19 @@ def test_create_and_send_campaign_texts_recipients(tenant_a, user_in, as_user, s
         CAMPAIGNS, {"name": "Reminder", "message": "Class resumes Monday", "branch": branch.id}, format="json"
     )
     assert created.status_code == 201, created.content
-    cid = created.json()["id"]
-    assert created.json()["status"] == "draft"
-    assert created.json()["total"] == 3
+    data = created.json()["data"]
+    cid = data["id"]
+    assert data["status"] == "draft"
+    assert data["total"] == 3
 
-    sent = client.post(f"{CAMPAIGNS}{cid}/send/", {}, format="json")
+    sent = _send(client, cid)
     assert sent.status_code == 200, sent.content
-    assert sent.json()["status"] == "sent"
-    assert sent.json()["sent_count"] == 3
+    assert sent.json()["data"]["status"] == "sent"
+    assert sent.json()["data"]["sent_count"] == 3
 
     assert len(sms_outbox) == 3
     assert all(m["text"] == "Class resumes Monday" for m in sms_outbox)
-    recipients = client.get(f"{CAMPAIGNS}{cid}/recipients/").json()
-    assert {r["status"] for r in recipients} == {"sent"}
+    assert {r["status"] for r in _recipients(client, cid)} == {"sent"}
 
 
 def test_send_is_idempotent(tenant_a, user_in, as_user, sms_outbox):
@@ -70,14 +82,12 @@ def test_send_is_idempotent(tenant_a, user_in, as_user, sms_outbox):
     with schema_context(tenant_a.schema_name):
         _student(branch)
     client = as_user(tenant_a, user_in(tenant_a, roles=[Role.REGISTRAR], branch=branch))
-    cid = client.post(CAMPAIGNS, {"name": "x", "message": "hi", "branch": branch.id}, format="json").json()[
-        "id"
-    ]
+    cid = _create(client, branch=branch.id)["id"]
 
-    assert client.post(f"{CAMPAIGNS}{cid}/send/", {}, format="json").status_code == 200
-    again = client.post(f"{CAMPAIGNS}{cid}/send/", {}, format="json")
+    assert _send(client, cid).status_code == 200
+    again = _send(client, cid)
     assert again.status_code == 422
-    assert again.json()["error"]["code"] == "campaign_already_sent"
+    assert again.json()["code"] == "campaign_already_sent"
     assert len(sms_outbox) == 1  # not re-blasted
 
 
@@ -87,11 +97,9 @@ def test_recipient_without_phone_is_skipped(tenant_a, user_in, as_user, sms_outb
         _student(branch, with_phone=True)
         _student(branch, with_phone=False)  # no guardian, no own phone
     client = as_user(tenant_a, user_in(tenant_a, roles=[Role.REGISTRAR], branch=branch))
-    cid = client.post(CAMPAIGNS, {"name": "x", "message": "hi", "branch": branch.id}, format="json").json()[
-        "id"
-    ]
+    cid = _create(client, branch=branch.id)["id"]
 
-    sent = client.post(f"{CAMPAIGNS}{cid}/send/", {}, format="json").json()
+    sent = _send(client, cid).json()["data"]
     assert sent["total"] == 2
     assert sent["sent_count"] == 1
     assert sent["skipped_count"] == 1
@@ -108,12 +116,8 @@ def test_segment_filters_the_audience(tenant_a, user_in, as_user):
         _student(branch, status=StudentProfile.Status.WITHDRAWN)
     client = as_user(tenant_a, user_in(tenant_a, roles=[Role.REGISTRAR], branch=branch))
 
-    body = client.post(
-        CAMPAIGNS,
-        {"name": "Active only", "message": "hi", "branch": branch.id, "segment": {"status": "active"}},
-        format="json",
-    ).json()
-    assert body["total"] == 2  # the withdrawn student is excluded
+    data = _create(client, name="Active only", branch=branch.id, segment={"status": "active"})
+    assert data["total"] == 2  # the withdrawn student is excluded
 
 
 def test_campaign_branch_scope(tenant_a, user_in, as_user):
@@ -124,11 +128,11 @@ def test_campaign_branch_scope(tenant_a, user_in, as_user):
     # another branch -> 403
     cross = client.post(CAMPAIGNS, {"name": "x", "message": "hi", "branch": other.id}, format="json")
     assert cross.status_code == 403
-    assert cross.json()["error"]["code"] == "branch_out_of_scope"
+    assert cross.json()["code"] == "branch_out_of_scope"
     # centre-wide (no branch) is director-only
     wide = client.post(CAMPAIGNS, {"name": "x", "message": "hi"}, format="json")
     assert wide.status_code == 403
-    assert wide.json()["error"]["code"] == "branch_required"
+    assert wide.json()["code"] == "branch_required"
 
 
 class _RaisingClient:
@@ -141,16 +145,14 @@ def test_failed_send_is_recorded(tenant_a, user_in, as_user, monkeypatch):
     with schema_context(tenant_a.schema_name):
         _student(branch)
     client = as_user(tenant_a, user_in(tenant_a, roles=[Role.REGISTRAR], branch=branch))
-    cid = client.post(CAMPAIGNS, {"name": "x", "message": "hi", "branch": branch.id}, format="json").json()[
-        "id"
-    ]
+    cid = _create(client, branch=branch.id)["id"]
 
     monkeypatch.setattr("apps.campaigns.services.get_sms_client", lambda: _RaisingClient())
-    body = client.post(f"{CAMPAIGNS}{cid}/send/", {}, format="json").json()
+    body = _send(client, cid).json()["data"]
     assert body["status"] == "failed"
     assert body["sent_count"] == 0
     assert body["failed_count"] == 1
-    recip = client.get(f"{CAMPAIGNS}{cid}/recipients/").json()[0]
+    recip = _recipients(client, cid)[0]
     assert recip["status"] == "failed"
     assert recip["error"]  # the failure reason is captured for the audit trail
 
@@ -161,9 +163,7 @@ def test_send_resumes_a_stuck_sending_campaign(tenant_a, user_in, as_user, sms_o
         _student(branch)
         _student(branch)
     client = as_user(tenant_a, user_in(tenant_a, roles=[Role.REGISTRAR], branch=branch))
-    cid = client.post(CAMPAIGNS, {"name": "x", "message": "hi", "branch": branch.id}, format="json").json()[
-        "id"
-    ]
+    cid = _create(client, branch=branch.id)["id"]
 
     # simulate a crash mid-send: campaign stuck SENDING, one recipient already delivered
     with schema_context(tenant_a.schema_name):
@@ -176,7 +176,7 @@ def test_send_resumes_a_stuck_sending_campaign(tenant_a, user_in, as_user, sms_o
         done.status = CampaignRecipient.Status.SENT
         done.save(update_fields=["status"])
 
-    body = client.post(f"{CAMPAIGNS}{cid}/send/", {}, format="json").json()
+    body = _send(client, cid).json()["data"]
     assert body["status"] == "sent"
     assert body["sent_count"] == 2  # finalized from the rows
     assert len(sms_outbox) == 1  # only the still-pending recipient was actually texted
@@ -193,11 +193,9 @@ def test_siblings_sharing_a_guardian_are_texted_once(tenant_a, user_in, as_user,
             student = StudentProfileFactory.create(branch=branch)
             GuardianFactory.create(parent=parent, student=student, is_primary=True)
     client = as_user(tenant_a, user_in(tenant_a, roles=[Role.REGISTRAR], branch=branch))
-    cid = client.post(CAMPAIGNS, {"name": "x", "message": "hi", "branch": branch.id}, format="json").json()[
-        "id"
-    ]
+    cid = _create(client, branch=branch.id)["id"]
 
-    body = client.post(f"{CAMPAIGNS}{cid}/send/", {}, format="json").json()
+    body = _send(client, cid).json()["data"]
     assert body["total"] == 2
     assert body["sent_count"] == 2  # both children are covered...
     assert len(sms_outbox) == 1  # ...by a single SMS to the shared phone
@@ -212,7 +210,7 @@ def test_segment_cohort_must_not_be_a_bool(tenant_a, user_in, as_user):
         format="json",
     )
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "segment_cohort_invalid"
+    assert r.json()["code"] == "segment_cohort_invalid"
 
 
 def test_cannot_touch_another_branchs_campaign(tenant_a, user_in, as_user):
@@ -221,9 +219,7 @@ def test_cannot_touch_another_branchs_campaign(tenant_a, user_in, as_user):
     with schema_context(tenant_a.schema_name):
         _student(other)
     other_reg = as_user(tenant_a, user_in(tenant_a, roles=[Role.REGISTRAR], branch=other))
-    cid = other_reg.post(CAMPAIGNS, {"name": "x", "message": "hi", "branch": other.id}, format="json").json()[
-        "id"
-    ]
+    cid = _create(other_reg, branch=other.id)["id"]
 
     home_reg = as_user(tenant_a, user_in(tenant_a, roles=[Role.REGISTRAR], branch=home))
     assert home_reg.get(f"{CAMPAIGNS}{cid}/").status_code == 404
@@ -238,7 +234,7 @@ def test_director_can_run_a_centre_wide_campaign(tenant_a, as_role):
         _student(b1)
         _student(b2)
     director, _ = as_role(Role.DIRECTOR)
-    body = director.post(CAMPAIGNS, {"name": "All families", "message": "hi"}, format="json").json()
+    body = director.post(CAMPAIGNS, {"name": "All families", "message": "hi"}, format="json").json()["data"]
     assert body["total"] == 2  # no branch -> spans every branch's students
 
 

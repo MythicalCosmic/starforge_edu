@@ -50,10 +50,14 @@ def _staff(tenant, user_in, as_user):
 
 def test_create_template(tenant_a, user_in, as_user):
     _, client = _staff(tenant_a, user_in, as_user)
-    r = client.post(TEMPLATES, {"name": "Lesson reminder", "category": "reminder", "purpose": "remind about class"}, format="json")
+    r = client.post(
+        TEMPLATES,
+        {"name": "Lesson reminder", "category": "reminder", "purpose": "remind about class"},
+        format="json",
+    )
     assert r.status_code == 201, r.content
-    assert r.json()["name"] == "Lesson reminder"
-    assert r.json()["body"] == ""
+    assert r.json()["data"]["name"] == "Lesson reminder"
+    assert r.json()["data"]["body"] == ""
 
 
 def test_ai_generation_fills_the_template_body(tenant_a, user_in, as_user, monkeypatch):
@@ -62,7 +66,9 @@ def test_ai_generation_fills_the_template_body(tenant_a, user_in, as_user, monke
     _, client = _staff(tenant_a, user_in, as_user)
     _seed_template_ai(tenant_a)
     _mock_complete(monkeypatch, "Dear guardian, your child has a class tomorrow at 10am.")
-    tid = client.post(TEMPLATES, {"name": "Reminder", "purpose": "class tomorrow"}, format="json").json()["id"]
+    tid = client.post(TEMPLATES, {"name": "Reminder", "purpose": "class tomorrow"}, format="json").json()[
+        "data"
+    ]["id"]
 
     with schema_context(tenant_a.schema_name):
         from apps.ai.models import AIRequest
@@ -82,21 +88,21 @@ def test_ai_generation_fills_the_template_body(tenant_a, user_in, as_user, monke
 
 def test_edit_a_template(tenant_a, user_in, as_user):
     _, client = _staff(tenant_a, user_in, as_user)
-    tid = client.post(TEMPLATES, {"name": "t"}, format="json").json()["id"]
+    tid = client.post(TEMPLATES, {"name": "t"}, format="json").json()["data"]["id"]
     r = client.patch(f"{TEMPLATES}{tid}/", {"body": "Edited body", "category": "payment"}, format="json")
     assert r.status_code == 200
-    assert r.json()["body"] == "Edited body"
-    assert r.json()["category"] == "payment"
+    assert r.json()["data"]["body"] == "Edited body"
+    assert r.json()["data"]["category"] == "payment"
 
 
 def test_compose_a_campaign_from_a_template(tenant_a, user_in, as_user):
     branch, client = _staff(tenant_a, user_in, as_user)
-    tid = client.post(TEMPLATES, {"name": "Reminder"}, format="json").json()["id"]
+    tid = client.post(TEMPLATES, {"name": "Reminder"}, format="json").json()["data"]["id"]
     client.patch(f"{TEMPLATES}{tid}/", {"body": "Hello from the template"}, format="json")
     # create a campaign with the template (no explicit message)
     r = client.post(CAMPAIGNS, {"name": "Blast", "template": tid, "branch": branch.id}, format="json")
     assert r.status_code == 201, r.content
-    assert r.json()["message"] == "Hello from the template"
+    assert r.json()["data"]["message"] == "Hello from the template"
 
 
 def test_campaign_needs_a_message_or_a_template(tenant_a, user_in, as_user):
@@ -109,7 +115,7 @@ def test_cannot_supply_both_a_message_and_a_template(tenant_a, user_in, as_user)
     """Exactly one source of text — supplying both is rejected (not silently dropping
     the typed message in favour of the template)."""
     branch, client = _staff(tenant_a, user_in, as_user)
-    tid = client.post(TEMPLATES, {"name": "t"}, format="json").json()["id"]
+    tid = client.post(TEMPLATES, {"name": "t"}, format="json").json()["data"]["id"]
     client.patch(f"{TEMPLATES}{tid}/", {"body": "template text"}, format="json")
     r = client.post(
         CAMPAIGNS,
@@ -121,7 +127,7 @@ def test_cannot_supply_both_a_message_and_a_template(tenant_a, user_in, as_user)
 
 def test_a_template_with_no_body_cannot_be_used(tenant_a, user_in, as_user):
     branch, client = _staff(tenant_a, user_in, as_user)
-    tid = client.post(TEMPLATES, {"name": "empty"}, format="json").json()["id"]  # body empty
+    tid = client.post(TEMPLATES, {"name": "empty"}, format="json").json()["data"]["id"]  # body empty
     r = client.post(CAMPAIGNS, {"name": "Blast", "template": tid, "branch": branch.id}, format="json")
     assert r.status_code == 400
 
