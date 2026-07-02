@@ -18,13 +18,20 @@ def _recipient_branch(recipient):
 
 @transaction.atomic
 def create_reward_type(
-    *, creator, name: str, is_cash: bool = False, default_amount_uzs=None, description: str = ""
+    *,
+    creator,
+    name: str,
+    is_cash: bool = False,
+    default_amount_uzs=None,
+    description: str = "",
+    is_active: bool = True,
 ) -> RewardType:
     return RewardType.objects.create(
         name=name,
         is_cash=is_cash,
         default_amount_uzs=default_amount_uzs,
         description=description,
+        is_active=is_active,
         created_by=creator,
     )
 
