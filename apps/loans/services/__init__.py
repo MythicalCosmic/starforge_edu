@@ -1,5 +1,10 @@
 """Staff-loan services (F21-1): raise a loan request on the A-1 engine, and record
-repayments against a disbursed loan (money IN -> immutable LedgerEntry)."""
+repayments against a disbursed loan (money IN -> immutable LedgerEntry).
+
+Preserved verbatim; the layered service (services/v1/loan_service.py) wraps these and
+the presenter imports `repaid_total`. `request_loan` / `record_repayment` are the write
+paths; `repaid_total` / `outstanding_for` compute the balance.
+"""
 
 from __future__ import annotations
 

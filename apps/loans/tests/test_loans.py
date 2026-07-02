@@ -27,9 +27,10 @@ def _disbursed_loan(tenant, *, teacher, director, cashier, method_id, amount="10
     """Drive a loan all the way to DISBURSED and return its id."""
     loan = teacher.post(LOANS, {"title": "Advance", "amount_uzs": amount}, format="json")
     assert loan.status_code == 201, loan.content
-    lid = loan.json()["id"]
-    assert loan.json()["status"] == "pending"
-    assert loan.json()["outstanding_uzs"] is None  # nothing owed until money goes out
+    body = loan.json()["data"]
+    lid = body["id"]
+    assert body["status"] == "pending"
+    assert body["outstanding_uzs"] is None  # nothing owed until money goes out
     assert director.post(f"{REQ}{lid}/approve/", {"note": "ok"}, format="json").status_code == 200
     dis = cashier.post(f"{REQ}{lid}/disburse/", {"payment_method": method_id}, format="json")
     assert dis.status_code == 200, dis.content
@@ -46,7 +47,7 @@ def test_loan_lifecycle_request_disburse_repay_settle(tenant_a, as_role):
     lid = _disbursed_loan(tenant_a, teacher=teacher, director=director, cashier=cashier, method_id=method_id)
 
     # disbursed → fully outstanding
-    loan = director.get(f"{LOANS}{lid}/").json()
+    loan = director.get(f"{LOANS}{lid}/").json()["data"]
     assert loan["outstanding_uzs"] == "1000000.00"
     assert loan["repaid_uzs"] == "0.00"
     assert loan["settled"] is False
@@ -56,26 +57,26 @@ def test_loan_lifecycle_request_disburse_repay_settle(tenant_a, as_role):
         f"{LOANS}{lid}/repay/", {"amount_uzs": "400000.00", "payment_method": method_id}, format="json"
     )
     assert r1.status_code == 201, r1.content
-    assert r1.json()["outstanding_uzs"] == "600000.00"
-    assert r1.json()["settled"] is False
+    assert r1.json()["data"]["outstanding_uzs"] == "600000.00"
+    assert r1.json()["data"]["settled"] is False
 
     # settling repayment
     r2 = cashier.post(
         f"{LOANS}{lid}/repay/", {"amount_uzs": "600000.00", "payment_method": method_id}, format="json"
     )
     assert r2.status_code == 201
-    assert r2.json()["outstanding_uzs"] == "0.00"
-    assert r2.json()["settled"] is True
+    assert r2.json()["data"]["outstanding_uzs"] == "0.00"
+    assert r2.json()["data"]["settled"] is True
 
     # a settled loan takes no more money
     over = cashier.post(
         f"{LOANS}{lid}/repay/", {"amount_uzs": "1.00", "payment_method": method_id}, format="json"
     )
     assert over.status_code == 422
-    assert over.json()["error"]["code"] == "loan_already_settled"
+    assert over.json()["code"] == "loan_already_settled"
 
     # two repayments recorded, each with its own money-IN ledger row
-    assert len(cashier.get(f"{LOANS}{lid}/repayments/").json()) == 2
+    assert len(cashier.get(f"{LOANS}{lid}/repayments/").json()["data"]) == 2
     entries = cashier.get(LEDGER).json()["results"]
     assert sum(1 for e in entries if e["entry_type"] == "loan" and e["direction"] == "out") == 1
     ins = [e for e in entries if e["entry_type"] == "loan_repayment" and e["direction"] == "in"]
@@ -88,14 +89,16 @@ def test_cannot_repay_before_disbursed(tenant_a, as_role):
     cashier, _ = as_role(Role.CASHIER)
     method_id = _payment_method(tenant_a)
 
-    lid = teacher.post(LOANS, {"title": "Advance", "amount_uzs": "500000.00"}, format="json").json()["id"]
+    lid = teacher.post(LOANS, {"title": "Advance", "amount_uzs": "500000.00"}, format="json").json()["data"][
+        "id"
+    ]
     # approved but NOT yet disbursed → there is no money out to repay
     director.post(f"{REQ}{lid}/approve/", {}, format="json")
     r = cashier.post(
         f"{LOANS}{lid}/repay/", {"amount_uzs": "1.00", "payment_method": method_id}, format="json"
     )
     assert r.status_code == 422
-    assert r.json()["error"]["code"] == "loan_not_disbursed"
+    assert r.json()["code"] == "loan_not_disbursed"
 
 
 def test_repayment_cannot_exceed_outstanding(tenant_a, as_role):
@@ -111,7 +114,7 @@ def test_repayment_cannot_exceed_outstanding(tenant_a, as_role):
         f"{LOANS}{lid}/repay/", {"amount_uzs": "1500.00", "payment_method": method_id}, format="json"
     )
     assert r.status_code == 422
-    assert r.json()["error"]["code"] == "loan_repayment_exceeds"
+    assert r.json()["code"] == "loan_repayment_exceeds"
 
 
 def test_loan_request_validates_amount_and_borrower(tenant_a, as_role):
@@ -136,10 +139,12 @@ def test_loan_request_validates_amount_and_borrower(tenant_a, as_role):
 def test_requester_cannot_approve_own_loan(tenant_a, as_role):
     """Maker-checker: even a director who raised a loan cannot sign it off."""
     director, _ = as_role(Role.DIRECTOR)
-    lid = director.post(LOANS, {"title": "Self advance", "amount_uzs": "100.00"}, format="json").json()["id"]
+    lid = director.post(LOANS, {"title": "Self advance", "amount_uzs": "100.00"}, format="json").json()[
+        "data"
+    ]["id"]
     r = director.post(f"{REQ}{lid}/approve/", {}, format="json")
     assert r.status_code == 403
-    assert r.json()["error"]["code"] == "self_approval"
+    assert r.json()["error"]["code"] == "self_approval"  # /approvals/ is still DRF
 
 
 def test_borrower_sees_only_own_loans(tenant_a, as_role, user_in, as_user):
@@ -147,8 +152,8 @@ def test_borrower_sees_only_own_loans(tenant_a, as_role, user_in, as_user):
     other = as_user(tenant_a, user_in(tenant_a, roles=[Role.TEACHER]))
     teacher.post(LOANS, {"title": "Mine", "amount_uzs": "100.00"}, format="json")
 
-    assert teacher.get(LOANS).json()["count"] == 1  # borrower sees own
-    assert other.get(LOANS).json()["count"] == 0  # another borrower sees none of it
+    assert teacher.get(LOANS).json()["pagination"]["total"] == 1  # borrower sees own
+    assert other.get(LOANS).json()["pagination"]["total"] == 0  # another borrower sees none of it
 
 
 def test_repay_requires_collect_permission(tenant_a, as_role):
@@ -179,13 +184,13 @@ def test_manager_raises_loan_for_another_staff_borrower(tenant_a, as_role, user_
 
     lid = manager.post(
         LOANS, {"title": "Advance for B", "amount_uzs": "1000.00", "borrower": b_user.id}, format="json"
-    ).json()["id"]
+    ).json()["data"]["id"]
 
     # the named borrower sees the loan (payload__borrower_id scope), so does the
     # keyer; an unrelated teacher sees nothing
-    assert any(row["id"] == lid for row in b_client.get(LOANS).json()["results"])
-    assert any(row["id"] == lid for row in manager.get(LOANS).json()["results"])
-    assert other.get(LOANS).json()["count"] == 0
+    assert any(row["id"] == lid for row in b_client.get(LOANS).json()["data"])
+    assert any(row["id"] == lid for row in manager.get(LOANS).json()["data"])
+    assert other.get(LOANS).json()["pagination"]["total"] == 0
 
     director.post(f"{REQ}{lid}/approve/", {}, format="json")
     cashier.post(f"{REQ}{lid}/disburse/", {"payment_method": method_id}, format="json")
@@ -211,7 +216,7 @@ def test_borrower_cannot_approve_or_disburse_own_loan(tenant_a, as_role, user_in
 
     lid = manager.post(
         LOANS, {"title": "Advance", "amount_uzs": "100.00", "borrower": borrower_user.id}, format="json"
-    ).json()["id"]
+    ).json()["data"]["id"]
     # the borrower cannot approve their own loan
     bad_approve = borrower.post(f"{REQ}{lid}/approve/", {}, format="json")
     assert bad_approve.status_code == 403
@@ -245,7 +250,7 @@ def test_repay_with_invalid_payment_method(tenant_a, as_role):
     lid = _disbursed_loan(tenant_a, teacher=teacher, director=director, cashier=cashier, method_id=method_id)
     r = cashier.post(f"{LOANS}{lid}/repay/", {"amount_uzs": "1.00", "payment_method": 999999}, format="json")
     assert r.status_code == 422
-    assert r.json()["error"]["code"] == "payment_method_invalid"
+    assert r.json()["code"] == "payment_method_invalid"
 
 
 def test_second_repayment_cannot_exceed_remaining(tenant_a, as_role):
@@ -274,7 +279,7 @@ def test_second_repayment_cannot_exceed_remaining(tenant_a, as_role):
         f"{LOANS}{lid}/repay/", {"amount_uzs": "400000.00", "payment_method": method_id}, format="json"
     )
     assert over.status_code == 422
-    assert over.json()["error"]["code"] == "loan_repayment_exceeds"
+    assert over.json()["code"] == "loan_repayment_exceeds"
 
 
 def test_role_without_loan_is_denied(tenant_a, as_role):
