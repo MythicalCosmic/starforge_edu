@@ -1,6 +1,8 @@
 """Assignments write services (TASKS §12, TD-13).
 
-Attachment uploads are presigned (never proxied); submissions compute their late
+Domain functions live here (imported by the layered services in ``services/v1`` AND
+externally: ``submit`` by apps.ai tests, ``emit_due_soon_reminders`` by the celery beat
+task). Attachment uploads are presigned (never proxied); submissions compute their late
 flag + attempt number from `CenterSettings` knobs; grading validates the rubric.
 Emit-only — no sms/email/push/anthropic import anywhere in this app (D3-C
 notifications + D4-A AI feedback consume the signals).

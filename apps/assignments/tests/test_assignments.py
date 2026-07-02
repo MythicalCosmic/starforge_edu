@@ -261,7 +261,7 @@ def test_rubric_sum_cap_rejected_at_create(tenant_a, user_in, as_user):
         format="json",
     )
     assert resp.status_code == 422
-    assert resp.json()["error"]["code"] == "rubric_exceeds_max_score"
+    assert resp.json()["code"] == "rubric_exceeds_max_score"
 
 
 def test_grade_score_out_of_range(tenant_a):
@@ -274,6 +274,48 @@ def test_grade_score_out_of_range(tenant_a):
         with pytest.raises(UnprocessableEntity) as exc:
             services.grade_submission(submission=sub, score=Decimal("101"))
         assert exc.value.code == "score_out_of_range"
+
+
+def test_grade_rejects_malformed_rubric_scores_400_not_500(tenant_a, user_in, as_user):
+    """A rubric_scores element that isn't an object with a string criterion must be a
+    clean 400 (the old ListField(child=DictField())), never a 500 (a non-dict -> the
+    domain fn's rs.get() AttributeError; an unhashable criterion -> TypeError)."""
+    teacher_user = user_in(tenant_a, roles=["teacher"])
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        teacher_profile = TeacherProfileFactory(user=teacher_user, branch=branch)
+        cohort = CohortFactory(branch=branch, primary_teacher=teacher_profile)
+        assignment: Any = AssignmentFactory(
+            cohort=cohort, status=Assignment.Status.PUBLISHED, max_score=Decimal("100")
+        )
+        sub = services.submit(assignment=assignment, student=_member(cohort, branch))
+        sub_id = sub.id
+
+    client = as_user(tenant_a, teacher_user)
+    for bad in (["foo"], [123], [{"criterion": [1, 2]}]):
+        r = client.post(
+            f"/api/v1/assignments/submissions/{sub_id}/grade/",
+            {"score": "50", "rubric_scores": bad},
+            format="json",
+        )
+        assert r.status_code == 400, (bad, r.status_code, r.content)
+
+
+def test_patch_max_score_null_is_400_not_conflict(tenant_a, user_in, as_user):
+    """PATCH max_score: null must 400 (the model column is NOT NULL) — the old serializer
+    rejected it as a validation error, not a 409/500."""
+    teacher_user = user_in(tenant_a, roles=["teacher"])
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        teacher_profile = TeacherProfileFactory(user=teacher_user, branch=branch)
+        cohort = CohortFactory(branch=branch, primary_teacher=teacher_profile)
+        assignment: Any = AssignmentFactory(cohort=cohort, status=Assignment.Status.DRAFT)
+        aid = assignment.id
+
+    r = as_user(tenant_a, teacher_user).patch(
+        f"/api/v1/assignments/{aid}/", {"max_score": None}, format="json"
+    )
+    assert r.status_code == 400
 
 
 # --------------------------------------------------------------------------- #
@@ -413,7 +455,7 @@ def test_draft_invisible_to_students(tenant_a, user_in, as_user):
 
     client = as_user(tenant_a, student_user)
     body = client.get("/api/v1/assignments/").json()
-    assert {a["id"] for a in body["results"]} == {published_id}
+    assert {a["id"] for a in body["data"]} == {published_id}
     assert client.get(f"/api/v1/assignments/{draft_id}/").status_code == 404
 
 
@@ -448,7 +490,7 @@ def test_student_submits_own_cohort_201(tenant_a, user_in, as_user):
         f"/api/v1/assignments/{assignment_id}/submissions/", {"text": "my answer"}, format="json"
     )
     assert resp.status_code == 201
-    body = resp.json()
+    body = resp.json()["data"]
     assert body["attempt_number"] == 1
     assert body["status"] == "submitted"
 
@@ -486,7 +528,7 @@ def test_teacher_cannot_create_assignment_in_non_taught_cohort(tenant_a, user_in
 
     ok = client.post("/api/v1/assignments/", {**base, "cohort": own_id}, format="json")
     assert ok.status_code == 201
-    assert ok.json()["cohort"] == own_id
+    assert ok.json()["data"]["cohort"] == own_id
 
 
 def test_teacher_cannot_repoint_assignment_to_non_taught_cohort(tenant_a, user_in, as_user):
@@ -523,7 +565,7 @@ def test_assignments_cross_tenant_isolated(tenant_a, tenant_b, user_in, as_user)
 
     director_b = user_in(tenant_b, roles=["director"])
     body = as_user(tenant_b, director_b).get("/api/v1/assignments/").json()
-    assert body["count"] == 0
+    assert body["pagination"]["total"] == 0
 
 
 # D2-D review: the Lane-D cross-tenant suite covered only the /assignments/ list.
@@ -558,7 +600,7 @@ def test_assignment_action_endpoints_cross_tenant_rejected(
     resp = getattr(client_b, method)(url, {}, format="json")
 
     assert resp.status_code == 401
-    assert resp.json()["error"]["code"] == "authentication_failed"
+    assert resp.json()["code"] == "authentication_failed"
 
 
 def test_assignments_list_query_budget(tenant_a, user_in, as_user, django_assert_max_num_queries):
@@ -572,8 +614,8 @@ def test_assignments_list_query_budget(tenant_a, user_in, as_user, django_assert
     client = as_user(tenant_a, director)
     with django_assert_max_num_queries(9):  # +1: A-2 per-request permission-override load
         body = client.get("/api/v1/assignments/").json()
-    assert set(body) == {"count", "next", "previous", "results"}
-    assert body["count"] == 5
+    assert set(body) == {"success", "data", "pagination"}
+    assert body["pagination"]["total"] == 5
 
 
 def test_submissions_list_query_budget(tenant_a, user_in, as_user, django_assert_max_num_queries):
@@ -592,7 +634,7 @@ def test_submissions_list_query_budget(tenant_a, user_in, as_user, django_assert
     with django_assert_max_num_queries(9):  # +1: A-2 per-request permission-override load
         resp = client.get(f"/api/v1/assignments/{assignment_id}/submissions/")
     assert resp.status_code == 200
-    assert len(resp.json()) == 5
+    assert len(resp.json()["data"]) == 5
 
 
 def test_scoped_assignments_helper(tenant_a, user_in):
