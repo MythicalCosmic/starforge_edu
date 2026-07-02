@@ -1,4 +1,10 @@
-"""Achievement services (F15-2)."""
+"""Achievement services (F15-2).
+
+Domain functions live here (imported by the layered service in ``services/v1``).
+They are kept as module-level functions — the transactional core of the feature — so
+the select-for-update decision path and the grant guards are exercised directly by
+the ``next_meeting_for``-style callers and the service layer alike.
+"""
 
 from __future__ import annotations
 

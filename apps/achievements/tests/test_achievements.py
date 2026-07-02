@@ -15,7 +15,7 @@ ACH = "/api/v1/achievements/"
 
 
 def _rows(body):
-    return body["results"] if isinstance(body, dict) and "results" in body else body
+    return body["data"] if isinstance(body, dict) and "data" in body else body
 
 
 def _teacher_in_branch(tenant, user_in, as_user, branch):
@@ -32,8 +32,8 @@ def test_global_create_grant_and_student_wall(tenant_a, user_in, as_user, as_rol
 
     created = director.post(ACH, {"name": "Star Student", "scope": "global", "emoji": "⭐"}, format="json")
     assert created.status_code == 201, created.content
-    assert created.json()["status"] == "active"  # a manager's global is live immediately
-    aid = created.json()["id"]
+    assert created.json()["data"]["status"] == "active"  # a manager's global is live immediately
+    aid = created.json()["data"]["id"]
 
     grant = director.post(f"{ACH}{aid}/grant/", {"student": student.id, "note": "Great term"}, format="json")
     assert grant.status_code == 201, grant.content
@@ -57,24 +57,43 @@ def test_teacher_group_active_and_global_request_approval(tenant_a, user_in, as_
 
     group = teacher.post(ACH, {"name": "Best Homework", "scope": "group", "cohort": cohort.id}, format="json")
     assert group.status_code == 201, group.content
-    assert group.json()["status"] == "active"
+    assert group.json()["data"]["status"] == "active"
 
     glob = teacher.post(ACH, {"name": "Center Champion", "scope": "global"}, format="json")
     assert glob.status_code == 201
-    assert glob.json()["status"] == "pending"  # a teacher's global awaits a manager
-    gid = glob.json()["id"]
+    assert glob.json()["data"]["status"] == "pending"  # a teacher's global awaits a manager
+    gid = glob.json()["data"]["id"]
 
     assert teacher.post(f"{ACH}{gid}/approve/", {}, format="json").status_code == 403  # can't self-approve
     approved = director.post(f"{ACH}{gid}/approve/", {}, format="json")
     assert approved.status_code == 200
-    assert approved.json()["status"] == "active"
+    assert approved.json()["data"]["status"] == "active"
+
+
+def test_hod_can_approve_teacher_global_request(tenant_a, user_in, as_user):
+    from apps.org.tests.factories import BranchFactory
+
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory.create()
+    teacher = _teacher_in_branch(tenant_a, user_in, as_user, branch)
+    hod = as_user(tenant_a, user_in(tenant_a, roles=[Role.HEAD_OF_DEPT], branch=branch))
+
+    # a teacher requests a centre-wide (global) achievement -> pending
+    gid = teacher.post(ACH, {"name": "Kindness", "scope": "global"}, format="json").json()["data"]["id"]
+    # a HOD (not the director) holds achievements:approve — they must SEE the pending
+    # request in their queue AND be able to approve it (the teacher->manager flow).
+    listed = {r["id"] for r in _rows(hod.get(f"{ACH}?status=pending").json())}
+    assert gid in listed
+    approved = hod.post(f"{ACH}{gid}/approve/", {}, format="json")
+    assert approved.status_code == 200
+    assert approved.json()["data"]["status"] == "active"
 
 
 def test_group_achievement_requires_a_cohort(tenant_a, as_role):
     teacher_client, _t = as_role(Role.TEACHER)
     r = teacher_client.post(ACH, {"name": "x", "scope": "group"}, format="json")
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "cohort_required"
+    assert r.json()["code"] == "cohort_required"
 
 
 def test_cross_branch_group_create_blocked(tenant_a, user_in, as_user):
@@ -89,7 +108,7 @@ def test_cross_branch_group_create_blocked(tenant_a, user_in, as_user):
     # a teacher can't pin a group achievement to another branch's cohort
     r = teacher_a.post(ACH, {"name": "x", "scope": "group", "cohort": cohort_b.id}, format="json")
     assert r.status_code == 403
-    assert r.json()["error"]["code"] == "cross_branch"
+    assert r.json()["code"] == "cross_branch"
 
 
 def test_grant_guards(tenant_a, user_in, as_user, as_role):
@@ -106,23 +125,23 @@ def test_grant_guards(tenant_a, user_in, as_user, as_role):
     teacher = _teacher_in_branch(tenant_a, user_in, as_user, branch)
 
     # a pending achievement cannot be granted
-    pending_id = teacher.post(ACH, {"name": "P", "scope": "global"}, format="json").json()["id"]
+    pending_id = teacher.post(ACH, {"name": "P", "scope": "global"}, format="json").json()["data"]["id"]
     not_active = director.post(f"{ACH}{pending_id}/grant/", {"student": member.id}, format="json")
     assert not_active.status_code == 422
-    assert not_active.json()["error"]["code"] == "achievement_not_active"
+    assert not_active.json()["code"] == "achievement_not_active"
 
     grp_id = teacher.post(ACH, {"name": "G", "scope": "group", "cohort": cohort.id}, format="json").json()[
-        "id"
-    ]
+        "data"
+    ]["id"]
     # a group achievement can't be granted to a non-member
     wrong = director.post(f"{ACH}{grp_id}/grant/", {"student": outsider.id}, format="json")
     assert wrong.status_code == 422
-    assert wrong.json()["error"]["code"] == "student_not_in_group"
+    assert wrong.json()["code"] == "student_not_in_group"
     # to a member -> ok; a second time -> 409
     assert director.post(f"{ACH}{grp_id}/grant/", {"student": member.id}, format="json").status_code == 201
     dup = director.post(f"{ACH}{grp_id}/grant/", {"student": member.id}, format="json")
     assert dup.status_code == 409
-    assert dup.json()["error"]["code"] == "already_granted"
+    assert dup.json()["code"] == "already_granted"
 
 
 def test_reject_flow_then_not_grantable(tenant_a, user_in, as_user, as_role):
@@ -133,16 +152,16 @@ def test_reject_flow_then_not_grantable(tenant_a, user_in, as_user, as_role):
     with schema_context(tenant_a.schema_name):
         student = StudentProfileFactory.create()
 
-    gid = teacher_client.post(ACH, {"name": "Maybe", "scope": "global"}, format="json").json()["id"]
+    gid = teacher_client.post(ACH, {"name": "Maybe", "scope": "global"}, format="json").json()["data"]["id"]
     rejected = director.post(f"{ACH}{gid}/reject/", {}, format="json")
     assert rejected.status_code == 200
-    assert rejected.json()["status"] == "rejected"
+    assert rejected.json()["data"]["status"] == "rejected"
     # re-deciding a non-pending achievement is rejected
     assert director.post(f"{ACH}{gid}/approve/", {}, format="json").status_code == 422
     # a rejected achievement cannot be granted
     g = director.post(f"{ACH}{gid}/grant/", {"student": student.id}, format="json")
     assert g.status_code == 422
-    assert g.json()["error"]["code"] == "achievement_not_active"
+    assert g.json()["code"] == "achievement_not_active"
 
 
 def test_grants_action_is_staff_only(tenant_a, user_in, as_user, as_role):
@@ -153,7 +172,7 @@ def test_grants_action_is_staff_only(tenant_a, user_in, as_user, as_role):
     parent_user = user_in(tenant_a, roles=[Role.PARENT])
     with schema_context(tenant_a.schema_name):
         student = StudentProfileFactory.create(user=student_user)
-    aid = director.post(ACH, {"name": "Public Badge", "scope": "global"}, format="json").json()["id"]
+    aid = director.post(ACH, {"name": "Public Badge", "scope": "global"}, format="json").json()["data"]["id"]
     director.post(f"{ACH}{aid}/grant/", {"student": student.id}, format="json")
 
     # a student / parent must NOT enumerate who earned an achievement
@@ -172,7 +191,7 @@ def test_parent_sees_childs_wall(tenant_a, user_in, as_user, as_role):
     with schema_context(tenant_a.schema_name):
         child = StudentProfileFactory.create()
         GuardianFactory.create(parent=ParentProfileFactory.create(user=parent_user), student=child)
-    aid = director.post(ACH, {"name": "Reader", "scope": "global"}, format="json").json()["id"]
+    aid = director.post(ACH, {"name": "Reader", "scope": "global"}, format="json").json()["data"]["id"]
     director.post(f"{ACH}{aid}/grant/", {"student": child.id}, format="json")
 
     rows = _rows(as_user(tenant_a, parent_user).get(f"{ACH}mine/").json())
@@ -196,3 +215,12 @@ def test_student_sees_only_active_and_cannot_create(tenant_a, as_role):
 def test_role_without_achievements_is_denied(tenant_a, as_role):
     cashier_client, _ = as_role(Role.CASHIER)  # cashier holds no achievements permission
     assert cashier_client.get(ACH).status_code == 403
+
+
+def test_whitespace_only_name_is_rejected(tenant_a, as_role):
+    """A blank/whitespace name must be a 400 (mirrors the old serializer's
+    trim_whitespace/allow_blank=False), not a 201 with a junk name stored."""
+    director, _ = as_role(Role.DIRECTOR)
+    r = director.post(ACH, {"name": "   ", "scope": "global"}, format="json")
+    assert r.status_code == 400
+    assert "name" in r.json()["errors"]
