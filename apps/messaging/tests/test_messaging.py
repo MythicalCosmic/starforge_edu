@@ -14,7 +14,14 @@ THREADS = "/api/v1/messaging/threads/"
 
 
 def _rows(body):
-    return body["results"] if isinstance(body, dict) and "results" in body else body
+    # Layered endpoints return {success, data, pagination}; a still-DRF endpoint returns
+    # {count, next, previous, results}; some actions returned a bare list.
+    if isinstance(body, dict):
+        if "data" in body:
+            return body["data"]
+        if "results" in body:
+            return body["results"]
+    return body
 
 
 def test_create_thread_and_exchange_messages(tenant_a, as_role):
@@ -27,7 +34,7 @@ def test_create_thread_and_exchange_messages(tenant_a, as_role):
         format="json",
     )
     assert created.status_code == 201, created.content
-    tid = created.json()["id"]
+    tid = created.json()["data"]["id"]
 
     # the student sees the thread
     assert any(t["id"] == tid for t in _rows(student_client.get(THREADS).json()))
@@ -48,7 +55,7 @@ def test_non_participant_cannot_access_thread(tenant_a, as_role):
 
     tid = teacher_client.post(
         THREADS, {"participant_ids": [student.id], "first_body": "hi"}, format="json"
-    ).json()["id"]
+    ).json()["data"]["id"]
 
     # an outsider can neither read nor post in a thread they're not part of
     assert outsider_client.get(f"{THREADS}{tid}/").status_code == 404
@@ -64,7 +71,7 @@ def test_student_cannot_message_another_student(tenant_a, as_role):
         THREADS, {"participant_ids": [other_student.id], "first_body": "hey"}, format="json"
     )
     assert r.status_code == 403
-    assert r.json()["error"]["code"] == "non_staff_recipient"
+    assert r.json()["code"] == "non_staff_recipient"
 
 
 def test_student_can_message_a_teacher(tenant_a, as_role):
@@ -81,7 +88,7 @@ def test_unread_count_tracks_reads(tenant_a, as_role):
     student_client, student = as_role(Role.STUDENT)
     tid = teacher_client.post(
         THREADS, {"participant_ids": [student.id], "first_body": "m1"}, format="json"
-    ).json()["id"]
+    ).json()["data"]["id"]
 
     def student_unread():
         return next(t["unread_count"] for t in _rows(student_client.get(THREADS).json()) if t["id"] == tid)
@@ -106,7 +113,7 @@ def test_empty_message_rejected(tenant_a, as_role):
     _sc, student = as_role(Role.STUDENT)
     tid = teacher_client.post(
         THREADS, {"participant_ids": [student.id], "first_body": "hi"}, format="json"
-    ).json()["id"]
+    ).json()["data"]["id"]
     assert teacher_client.post(f"{THREADS}{tid}/messages/", {"body": "   "}, format="json").status_code == 400
 
 
@@ -115,7 +122,7 @@ def test_thread_needs_another_participant(tenant_a, as_role):
     # a thread with only yourself is rejected
     r = teacher_client.post(THREADS, {"participant_ids": [teacher.id], "first_body": "note"}, format="json")
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "thread_needs_participant"
+    assert r.json()["code"] == "thread_needs_participant"
 
 
 def test_role_without_messaging_is_denied(tenant_a, as_role):
@@ -140,7 +147,7 @@ def test_staff_cannot_open_a_two_student_thread(tenant_a, as_role):
         THREADS, {"participant_ids": [s1.id, s2.id], "first_body": "group"}, format="json"
     )
     assert r.status_code == 403
-    assert r.json()["error"]["code"] == "non_staff_recipient"
+    assert r.json()["code"] == "non_staff_recipient"
 
 
 def test_teacher_parent_student_thread_allowed(tenant_a, as_role):
@@ -161,7 +168,7 @@ def test_revoking_messaging_write_makes_a_role_read_only(tenant_a, as_role):
     _sc, student = as_role(Role.STUDENT)
     tid = teacher_client.post(
         THREADS, {"participant_ids": [student.id], "first_body": "hi"}, format="json"
-    ).json()["id"]
+    ).json()["data"]["id"]
 
     with schema_context(tenant_a.schema_name):
         set_override(role=Role.TEACHER, permission="messaging:write", effect="revoke")
@@ -180,7 +187,7 @@ def test_membershipless_participant_rejected(tenant_a, as_role):
         orphan = UserFactory.create()  # active user, but no RoleMembership in this center
     r = teacher_client.post(THREADS, {"participant_ids": [orphan.id], "first_body": "hi"}, format="json")
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "unknown_participant"
+    assert r.json()["code"] == "unknown_participant"
 
 
 def test_attachment_only_message_allowed(tenant_a, as_role):
@@ -192,7 +199,7 @@ def test_attachment_only_message_allowed(tenant_a, as_role):
         format="json",
     )
     assert created.status_code == 201, created.content
-    msgs = _rows(teacher_client.get(f"{THREADS}{created.json()['id']}/messages/").json())
+    msgs = _rows(teacher_client.get(f"{THREADS}{created.json()['data']['id']}/messages/").json())
     assert len(msgs) == 1
     assert msgs[0]["attachments"] == ["s3://uploads/photo.jpg"]
     assert msgs[0]["body"] == ""
@@ -203,7 +210,7 @@ def test_unread_excludes_your_own_messages(tenant_a, as_role):
     student_client, student = as_role(Role.STUDENT)
     tid = teacher_client.post(
         THREADS, {"participant_ids": [student.id], "first_body": "hi"}, format="json"
-    ).json()["id"]
+    ).json()["data"]["id"]
     student_client.post(f"{THREADS}{tid}/read/", {}, format="json")
     student_client.post(f"{THREADS}{tid}/messages/", {"body": "my reply"}, format="json")
     rows = _rows(student_client.get(THREADS).json())

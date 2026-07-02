@@ -1,4 +1,10 @@
-"""Messaging services (F4-4)."""
+"""Messaging services (F4-4).
+
+Preserved verbatim; the layered service (services/v1/thread_service.py) wraps
+`create_thread` / `post_message` / `mark_read` after the view validates the body and
+resolves participants. `post_message` fans out realtime notifications via
+apps.notifications.dispatch (pointers only, never the body).
+"""
 
 from __future__ import annotations
 
