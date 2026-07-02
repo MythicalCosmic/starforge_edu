@@ -1,5 +1,10 @@
 """Procurement services (#15): assemble an itemised purchase order and raise it on
-the A-1 engine as a `kind="procurement"` request totalling the line items."""
+the A-1 engine as a `kind="procurement"` request totalling the line items.
+
+`create_purchase_order` is preserved verbatim; the layered service
+(services/v1/purchase_order_service.py) wraps it after the view has validated the line
+items and resolved/scoped the branch.
+"""
 
 from __future__ import annotations
 

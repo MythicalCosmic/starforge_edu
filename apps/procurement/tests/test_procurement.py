@@ -38,7 +38,7 @@ def test_create_po_then_approve_disburse_writes_ledger(tenant_a, as_role):
         PO, {"title": "Classroom supplies", "supplier": "Acme Co", "items": ITEMS}, format="json"
     )
     assert created.status_code == 201, created.content
-    body = created.json()
+    body = created.json()["data"]
     assert body["status"] == "pending"
     assert body["amount_uzs"] == "6000.00"  # totalled from the line items
     assert len(body["items"]) == 2
@@ -75,7 +75,7 @@ def test_po_total_must_be_positive(tenant_a, as_role):
         format="json",
     )
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "po_total_positive"
+    assert r.json()["code"] == "po_total_positive"
 
 
 def test_requester_sees_own_po_handler_sees_all(tenant_a, as_role):
@@ -84,9 +84,9 @@ def test_requester_sees_own_po_handler_sees_all(tenant_a, as_role):
     director, _ = as_role(Role.DIRECTOR)
     registrar_a.post(PO, {"title": "Mine", "supplier": "Acme", "items": ITEMS}, format="json")
 
-    assert registrar_a.get(PO).json()["count"] == 1  # requester sees own
-    assert registrar_b.get(PO).json()["count"] == 0  # another requester sees none of it
-    assert director.get(PO).json()["count"] == 1  # handler sees all
+    assert registrar_a.get(PO).json()["pagination"]["total"] == 1  # requester sees own
+    assert registrar_b.get(PO).json()["pagination"]["total"] == 0  # another requester sees none of it
+    assert director.get(PO).json()["pagination"]["total"] == 1  # handler sees all
 
 
 def test_po_total_too_large_is_rejected(tenant_a, as_role):
@@ -102,7 +102,7 @@ def test_po_total_too_large_is_rejected(tenant_a, as_role):
         format="json",
     )
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "po_total_too_large"
+    assert r.json()["code"] == "po_total_too_large"
 
 
 def test_negative_unit_price_rejected(tenant_a, as_role):
@@ -130,7 +130,7 @@ def test_cannot_raise_po_for_another_branch(tenant_a, as_role):
         PO, {"title": "x", "supplier": "Acme", "branch": other_branch.id, "items": ITEMS}, format="json"
     )
     assert r.status_code == 403
-    assert r.json()["error"]["code"] == "branch_out_of_scope"
+    assert r.json()["code"] == "branch_out_of_scope"
 
 
 def test_disburse_cannot_override_supplier_or_direction(tenant_a, as_role):
@@ -143,7 +143,7 @@ def test_disburse_cannot_override_supplier_or_direction(tenant_a, as_role):
 
     rid = registrar.post(
         PO, {"title": "Supplies", "supplier": "Acme Co", "items": ITEMS}, format="json"
-    ).json()["request"]
+    ).json()["data"]["request"]
     director.post(f"{REQ}{rid}/approve/", {}, format="json")
     # the cashier tries to misname the payee and flip the direction
     cashier.post(
@@ -165,7 +165,9 @@ def test_fractional_line_totals_reconcile_to_amount(tenant_a, as_role):
         {"description": "a", "quantity": "1.5", "unit_price_uzs": "333.33"},
         {"description": "b", "quantity": "1.5", "unit_price_uzs": "333.33"},
     ]  # each line 499.995 → 500.00; total 1000.00
-    body = registrar.post(PO, {"title": "Frac", "supplier": "Acme", "items": items}, format="json").json()
+    body = registrar.post(PO, {"title": "Frac", "supplier": "Acme", "items": items}, format="json").json()[
+        "data"
+    ]
     assert [i["line_total_uzs"] for i in body["items"]] == ["500.00", "500.00"]
     assert body["amount_uzs"] == "1000.00"  # equals the sum of the shown line totals
 

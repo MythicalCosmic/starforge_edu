@@ -1,8 +1,11 @@
-from rest_framework.routers import DefaultRouter
+from django.urls import path
 
-from apps.procurement.views import PurchaseOrderViewSet
+from apps.procurement.views.v1.purchase_order_views import (
+    purchase_order_detail_view,
+    purchase_orders_collection_view,
+)
 
-router = DefaultRouter()
-router.register("", PurchaseOrderViewSet, basename="procurement")
-
-urlpatterns = router.urls
+urlpatterns = [
+    path("", purchase_orders_collection_view, name="procurement-list"),
+    path("<int:pk>/", purchase_order_detail_view, name="procurement-detail"),
+]
