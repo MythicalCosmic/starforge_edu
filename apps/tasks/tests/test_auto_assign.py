@@ -33,7 +33,9 @@ def _staff_in(tenant, user_in, branch, dept, *, role=Role.SUPPORT):
 
 def _open_tasks(director, dept, n, **extra):
     return [
-        director.post(TASKS, {"title": f"t{i}", "department": dept.id, **extra}, format="json").json()["id"]
+        director.post(TASKS, {"title": f"t{i}", "department": dept.id, **extra}, format="json").json()[
+            "data"
+        ]["id"]
         for i in range(n)
     ]
 
@@ -51,7 +53,7 @@ def test_fair_split_balances_across_staff(tenant_a, as_role, user_in):
 
     r = director.post(AUTO, {"task_ids": task_ids, "department": dept.id, "mode": "fair"}, format="json")
     assert r.status_code == 200, r.content
-    body = r.json()
+    body = r.json()["data"]
     assert body["assigned"] == 4
     counts: dict[int, int] = {}
     for a in body["assignments"]:
@@ -75,7 +77,7 @@ def test_fair_split_respects_existing_load(tenant_a, as_role, user_in):
 
     body = director.post(
         AUTO, {"task_ids": new_ids, "department": dept.id, "mode": "fair"}, format="json"
-    ).json()
+    ).json()["data"]
     # both new tasks go to the least-loaded `free` (0 < 3)
     assert {a["assignee"] for a in body["assignments"]} == {free.id}
 
@@ -95,7 +97,7 @@ def test_fair_split_rebalances_an_overloaded_persons_pile(tenant_a, as_role, use
 
     body = director.post(
         AUTO, {"task_ids": task_ids, "department": dept.id, "mode": "fair"}, format="json"
-    ).json()
+    ).json()["data"]
     counts: dict[int, int] = {}
     for x in body["assignments"]:
         counts[x["assignee"]] = counts.get(x["assignee"], 0) + 1
@@ -119,7 +121,7 @@ def test_fair_split_never_assigns_to_a_student_member(tenant_a, as_role, user_in
 
     body = director.post(
         AUTO, {"task_ids": task_ids, "department": dept.id, "mode": "fair"}, format="json"
-    ).json()
+    ).json()["data"]
     assert {x["assignee"] for x in body["assignments"]} == {staff.id}  # all to staff, never the student
 
 
@@ -133,7 +135,9 @@ def test_free_mode_unassigns(tenant_a, as_role, user_in):
     s1 = _staff_in(tenant_a, user_in, branch, dept)
     (tid,) = _open_tasks(director, dept, 1, assignee=s1.id)
 
-    body = director.post(AUTO, {"task_ids": [tid], "department": dept.id, "mode": "free"}, format="json").json()
+    body = director.post(
+        AUTO, {"task_ids": [tid], "department": dept.id, "mode": "free"}, format="json"
+    ).json()["data"]
     assert body["freed"] == 1
     with schema_context(tenant_a.schema_name):
         from apps.tasks.models import Task
@@ -151,7 +155,7 @@ def test_no_open_tasks_in_department(tenant_a, as_role, user_in):
     _staff_in(tenant_a, user_in, branch, dept)
     r = director.post(AUTO, {"task_ids": [999999], "department": dept.id}, format="json")
     assert r.status_code == 422
-    assert r.json()["error"]["code"] == "no_open_tasks"
+    assert r.json()["code"] == "no_open_tasks"
 
 
 def test_no_eligible_staff_in_empty_department(tenant_a, as_role):
@@ -164,7 +168,7 @@ def test_no_eligible_staff_in_empty_department(tenant_a, as_role):
     task_ids = _open_tasks(director, dept, 1)
     r = director.post(AUTO, {"task_ids": task_ids, "department": dept.id, "mode": "fair"}, format="json")
     assert r.status_code == 422
-    assert r.json()["error"]["code"] == "no_eligible_staff"
+    assert r.json()["code"] == "no_eligible_staff"
 
 
 def test_hierarchy_gate_excludes_higher_grade_staff(tenant_a, as_role, user_in, as_user):
@@ -185,7 +189,7 @@ def test_hierarchy_gate_excludes_higher_grade_staff(tenant_a, as_role, user_in, 
     task_ids = _open_tasks(director, dept, 1)
     r = teacher.post(AUTO, {"task_ids": task_ids, "department": dept.id, "mode": "fair"}, format="json")
     assert r.status_code == 422
-    assert r.json()["error"]["code"] == "no_eligible_staff"
+    assert r.json()["code"] == "no_eligible_staff"
 
 
 def test_student_cannot_auto_assign(tenant_a, as_role):
@@ -197,6 +201,4 @@ def test_student_cannot_auto_assign(tenant_a, as_role):
     dept = _dept(tenant_a, branch)
     task_ids = _open_tasks(director, dept, 1)
     student, _ = as_role(Role.STUDENT)  # no tasks:write
-    assert student.post(
-        AUTO, {"task_ids": task_ids, "department": dept.id}, format="json"
-    ).status_code == 403
+    assert student.post(AUTO, {"task_ids": task_ids, "department": dept.id}, format="json").status_code == 403

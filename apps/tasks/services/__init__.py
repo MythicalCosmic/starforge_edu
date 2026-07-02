@@ -1,4 +1,9 @@
-"""Tasks + hierarchy services (F5-2/3)."""
+"""Tasks + hierarchy services (F5-2/3).
+
+Domain functions live here (imported by the layered services in ``services/v1``). They
+hold the transactional core: the hierarchy gate (``can_assign``/``user_grade``), the
+status lifecycle, and the fair auto-split.
+"""
 
 from __future__ import annotations
 
@@ -146,9 +151,7 @@ def auto_split_tasks(*, task_ids, department, actor, actor_roles: set[str], mode
         )
     )
     if not tasks:
-        raise UnprocessableEntity(
-            _("No open tasks in that department to distribute."), code="no_open_tasks"
-        )
+        raise UnprocessableEntity(_("No open tasks in that department to distribute."), code="no_open_tasks")
 
     if mode == "free":
         freed = 0
@@ -170,7 +173,9 @@ def auto_split_tasks(*, task_ids, department, actor, actor_roles: set[str], mode
     ).select_related("user"):
         staff_by_id.setdefault(membership.user_id, membership.user)
     eligible = [
-        user for user in staff_by_id.values() if can_assign(actor=actor, actor_roles=actor_roles, target_user=user)
+        user
+        for user in staff_by_id.values()
+        if can_assign(actor=actor, actor_roles=actor_roles, target_user=user)
     ]
     if not eligible:
         raise UnprocessableEntity(

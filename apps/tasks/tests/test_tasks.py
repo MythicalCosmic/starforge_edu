@@ -15,7 +15,7 @@ GRADES = "/api/v1/tasks/grades/"
 
 
 def _rows(body):
-    return body["results"] if isinstance(body, dict) and "results" in body else body
+    return body["data"] if isinstance(body, dict) and "data" in body else body
 
 
 def test_hierarchy_gated_assignment(tenant_a, as_role):
@@ -33,7 +33,7 @@ def test_hierarchy_gated_assignment(tenant_a, as_role):
     # registrar (grade 1) may NOT task the teacher (grade 2)
     blocked = registrar_client.post(TASKS, {"title": "grade these", "assignee": teacher.id}, format="json")
     assert blocked.status_code == 403
-    assert blocked.json()["error"]["code"] == "cannot_assign_grade"
+    assert blocked.json()["code"] == "cannot_assign_grade"
 
 
 def test_director_bypasses_hierarchy(tenant_a, as_role):
@@ -47,23 +47,23 @@ def test_director_bypasses_hierarchy(tenant_a, as_role):
 
 def test_task_status_lifecycle(tenant_a, as_role):
     director, _ = as_role(Role.DIRECTOR)
-    tid = director.post(TASKS, {"title": "x"}, format="json").json()["id"]
+    tid = director.post(TASKS, {"title": "x"}, format="json").json()["data"]["id"]
 
     def transition(s):
         return director.post(f"{TASKS}{tid}/transition/", {"status": s}, format="json")
 
-    assert transition("in_progress").json()["status"] == "in_progress"
+    assert transition("in_progress").json()["data"]["status"] == "in_progress"
     done = transition("done")
-    assert done.json()["status"] == "done"
-    assert done.json()["completed_at"] is not None
+    assert done.json()["data"]["status"] == "done"
+    assert done.json()["data"]["completed_at"] is not None
 
     bad = transition("in_progress")  # done -> in_progress is not allowed
     assert bad.status_code == 422
-    assert bad.json()["error"]["code"] == "invalid_transition"
+    assert bad.json()["code"] == "invalid_transition"
 
     reopened = transition("open")  # done -> open (reopen) clears completion
-    assert reopened.json()["status"] == "open"
-    assert reopened.json()["completed_at"] is None
+    assert reopened.json()["data"]["status"] == "open"
+    assert reopened.json()["data"]["completed_at"] is None
 
 
 def test_assignee_sees_and_transitions_own_task(tenant_a, as_role):
@@ -125,6 +125,19 @@ def test_only_senior_can_edit_hierarchy(tenant_a, as_role):
     assert director.post(GRADES, {"role": "teacher", "level": 2}, format="json").status_code == 400
 
 
+def test_grade_list_orders_by_level_then_role(tenant_a, as_role):
+    """The hierarchy list keeps the model's ("-level", "role") order — equal-level
+    grades fall back to a deterministic role tiebreak (not DB-arbitrary)."""
+    director, _ = as_role(Role.DIRECTOR)
+    director.post(GRADES, {"role": "teacher", "level": 1}, format="json")
+    director.post(GRADES, {"role": "registrar", "level": 1}, format="json")
+    director.post(GRADES, {"role": "head_of_dept", "level": 5}, format="json")
+    rows = _rows(director.get(GRADES).json())
+    order = [(r["level"], r["role"]) for r in rows]
+    # level desc, then role asc among equals (registrar before teacher)
+    assert order == [(5, "head_of_dept"), (1, "registrar"), (1, "teacher")]
+
+
 def test_students_have_no_task_access(tenant_a, as_role):
     student, _ = as_role(Role.STUDENT)
     assert student.get(TASKS).status_code == 403
@@ -140,11 +153,11 @@ def test_reassign_is_hierarchy_gated(tenant_a, as_role):
     director.post(GRADES, {"role": "registrar", "level": 1}, format="json")
     registrar_client, _r = as_role(Role.REGISTRAR)
     _tc, teacher = as_role(Role.TEACHER)
-    tid = registrar_client.post(TASKS, {"title": "x"}, format="json").json()["id"]
+    tid = registrar_client.post(TASKS, {"title": "x"}, format="json").json()["data"]["id"]
     # the gate applies on reassign too, not just create
     up = registrar_client.post(f"{TASKS}{tid}/assign/", {"assignee": teacher.id}, format="json")
     assert up.status_code == 403
-    assert up.json()["error"]["code"] == "cannot_assign_grade"
+    assert up.json()["code"] == "cannot_assign_grade"
 
 
 def test_ungraded_target_fails_closed_when_hierarchy_configured(tenant_a, as_role):
@@ -155,7 +168,7 @@ def test_ungraded_target_fails_closed_when_hierarchy_configured(tenant_a, as_rol
     # a graded teacher may not task an UNPLACED role (can't exploit a forgotten grade)
     blocked = teacher_client.post(TASKS, {"title": "x", "assignee": support.id}, format="json")
     assert blocked.status_code == 403
-    assert blocked.json()["error"]["code"] == "cannot_assign_grade"
+    assert blocked.json()["code"] == "cannot_assign_grade"
     # the director (assign_any) still can
     assert director.post(TASKS, {"title": "y", "assignee": support.id}, format="json").status_code == 201
 
@@ -171,11 +184,11 @@ def test_cross_branch_task_creation_blocked(tenant_a, user_in, as_user):
 
     cross = teacher_a.post(TASKS, {"title": "x", "branch": branch_b.id}, format="json")
     assert cross.status_code == 403
-    assert cross.json()["error"]["code"] == "cross_branch"
+    assert cross.json()["code"] == "cross_branch"
 
     cross_dept = teacher_a.post(TASKS, {"title": "x", "department": dept_b.id}, format="json")
     assert cross_dept.status_code == 403
-    assert cross_dept.json()["error"]["code"] == "cross_branch_dept"
+    assert cross_dept.json()["code"] == "cross_branch_dept"
 
 
 def test_cannot_assign_a_non_staff_user(tenant_a, as_role):
@@ -188,7 +201,7 @@ def test_cannot_assign_a_non_staff_user(tenant_a, as_role):
 
 def test_transition_of_unseen_task_is_404(tenant_a, as_role):
     director, _ = as_role(Role.DIRECTOR)
-    tid = director.post(TASKS, {"title": "secret"}, format="json").json()["id"]
+    tid = director.post(TASKS, {"title": "secret"}, format="json").json()["data"]["id"]
     worker_client, _w = as_role(Role.SUPPORT)  # not assignee/creator/dept/branch
     r = worker_client.post(f"{TASKS}{tid}/transition/", {"status": "in_progress"}, format="json")
     assert r.status_code == 404
@@ -196,11 +209,11 @@ def test_transition_of_unseen_task_is_404(tenant_a, as_role):
 
 def test_done_can_be_cancelled_and_same_status_is_noop(tenant_a, as_role):
     director, _ = as_role(Role.DIRECTOR)
-    tid = director.post(TASKS, {"title": "x"}, format="json").json()["id"]
+    tid = director.post(TASKS, {"title": "x"}, format="json").json()["data"]["id"]
     director.post(f"{TASKS}{tid}/transition/", {"status": "done"}, format="json")
     cancelled = director.post(f"{TASKS}{tid}/transition/", {"status": "cancelled"}, format="json")
     assert cancelled.status_code == 200
-    assert cancelled.json()["status"] == "cancelled"
+    assert cancelled.json()["data"]["status"] == "cancelled"
     # repeating the same status is a no-op, not a 422
     noop = director.post(f"{TASKS}{tid}/transition/", {"status": "cancelled"}, format="json")
     assert noop.status_code == 200
@@ -214,7 +227,7 @@ def test_manager_cannot_see_other_branch_tasks(tenant_a, user_in, as_user):
         branch_b = BranchFactory.create()
     mgr_a = as_user(tenant_a, user_in(tenant_a, roles=[Role.TEACHER], branch=branch_a))
     mgr_b = as_user(tenant_a, user_in(tenant_a, roles=[Role.TEACHER], branch=branch_b))
-    tid = mgr_b.post(TASKS, {"title": "b task"}, format="json").json()["id"]
+    tid = mgr_b.post(TASKS, {"title": "b task"}, format="json").json()["data"]["id"]
     # branch-A manager neither sees nor can fetch branch-B's task
     assert mgr_a.get(f"{TASKS}{tid}/").status_code == 404
     assert _rows(mgr_a.get(TASKS).json()) == []
