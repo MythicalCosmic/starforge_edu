@@ -99,6 +99,87 @@ def paginate(
     return list(queryset[start : start + size]), total, page, size
 
 
+def cursor_paginate(
+    request: HttpRequest, queryset: QuerySet, *, page_size: int = 50, max_page_size: int = MAX_PAGE_SIZE
+) -> tuple[list[Any], str | None, str | None]:
+    """Keyset cursor pagination for an append-only timeline ordered ``(-created_at, -id)``.
+
+    Stable under concurrent head-inserts (unlike offset pagination) — what an audit /
+    activity feed needs: a ``?cursor`` walks the timeline by the (created_at, id) of the
+    edge row, so newer rows inserted at the head between page reads never shift a page.
+    Pure Django (no DRF): the opaque cursor is ``base64("<dir>|<iso>|<id>")``.
+
+    ``queryset`` MUST already be ordered ``(-created_at, -id)``. Returns
+    ``(rows, next_link, previous_link)`` — the links are absolute URLs (or ``None``)
+    carrying the ``?cursor`` and preserving the request's other query params (filters).
+    """
+    size = min(_positive_int(request.GET.get("page_size"), page_size), max_page_size)
+    direction, ts, obj_id = "f", None, None
+    token = request.GET.get("cursor")
+    if token:
+        direction, ts, obj_id = _decode_cursor(token)
+
+    if direction == "b":
+        # Walk backwards (towards NEWER rows): fetch ascending past the cursor, then
+        # re-present newest-first so the page reads in the timeline's native order.
+        rows = list(
+            queryset.filter(Q(created_at__gt=ts) | Q(created_at=ts, id__gt=obj_id)).order_by(
+                "created_at", "id"
+            )[: size + 1]
+        )
+        has_more = len(rows) > size
+        rows = rows[:size]
+        rows.reverse()
+        has_next, has_previous = True, has_more
+    else:
+        qs = queryset
+        if ts is not None:  # forward from a cursor -> strictly OLDER rows
+            qs = qs.filter(Q(created_at__lt=ts) | Q(created_at=ts, id__lt=obj_id))
+        rows = list(qs[: size + 1])
+        has_more = len(rows) > size
+        rows = rows[:size]
+        # A forward cursor means newer rows exist (the page we came from) -> has_previous.
+        has_next, has_previous = has_more, ts is not None
+
+    next_link = _cursor_link(request, "f", rows[-1]) if (rows and has_next) else None
+    previous_link = _cursor_link(request, "b", rows[0]) if (rows and has_previous) else None
+    return rows, next_link, previous_link
+
+
+def _cursor_link(request: HttpRequest, direction: str, row: Any) -> str:
+    from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+
+    token = _encode_cursor(direction, row.created_at, row.id)
+    parts = urlparse(request.build_absolute_uri())
+    query = parse_qs(parts.query)
+    query["cursor"] = [token]
+    return urlunparse(parts._replace(query=urlencode(query, doseq=True)))
+
+
+def _encode_cursor(direction: str, created_at: Any, obj_id: int) -> str:
+    import base64
+
+    raw = f"{direction}|{created_at.isoformat()}|{obj_id}"
+    return base64.urlsafe_b64encode(raw.encode()).decode()
+
+
+def _decode_cursor(token: str) -> tuple[str, Any, int]:
+    import base64
+    import binascii
+
+    from django.utils.dateparse import parse_datetime
+
+    try:
+        raw = base64.urlsafe_b64decode(token.encode()).decode()
+        direction, iso, raw_id = raw.split("|")
+        created_at = parse_datetime(iso)
+        if direction not in ("f", "b") or created_at is None:
+            raise ValueError
+        return direction, created_at, int(raw_id)
+    except (ValueError, binascii.Error, UnicodeDecodeError) as exc:
+        raise _bad_filter("cursor") from exc
+
+
 def _positive_int(raw: str | None, fallback: int) -> int:
     try:
         value = int(raw)  # type: ignore[arg-type]

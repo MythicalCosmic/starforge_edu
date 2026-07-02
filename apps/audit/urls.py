@@ -1,19 +1,21 @@
-"""Audit URLConf (D3-D-4, D3-D-7).
+"""Audit routes — plain function views (off DRF). Mounted at /api/v1/audit/.
 
-`export/` is declared BEFORE the router so it is never shadowed by the `{pk}`
-detail route. The router yields GET-only `audit/` (list) + `audit/{id}/`
-(retrieve); all write verbs 405 (read-only viewset).
+``export/`` is declared before the ``<int:pk>`` detail route (harmless with an int
+converter, but explicit). The trail is read-only: every write verb answers 405.
 """
 
+from __future__ import annotations
+
 from django.urls import path
-from rest_framework.routers import DefaultRouter
 
-from apps.audit.views import AuditExportView, AuditLogViewSet
-
-router = DefaultRouter()
-router.register(r"", AuditLogViewSet, basename="audit")
+from apps.audit.views.v1.audit_views import (
+    audit_collection_view,
+    audit_detail_view,
+    audit_export_view,
+)
 
 urlpatterns = [
-    path("export/", AuditExportView.as_view(), name="audit-export"),
-    *router.urls,
+    path("export/", audit_export_view, name="audit-export"),
+    path("", audit_collection_view, name="audit-collection"),
+    path("<int:pk>/", audit_detail_view, name="audit-detail"),
 ]

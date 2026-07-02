@@ -16,13 +16,15 @@ from collections.abc import Callable
 from functools import wraps
 from typing import Any
 
-from django.http import HttpRequest, HttpResponse
+from django.http import HttpRequest, HttpResponseBase
 
 from core.session_auth import SessionAuthentication
 
 _authenticator = SessionAuthentication()
 
-ViewFunc = Callable[..., HttpResponse]
+# HttpResponseBase (not HttpResponse) so a layered view may return a
+# StreamingHttpResponse / FileResponse (e.g. the audit CSV export) as well.
+ViewFunc = Callable[..., HttpResponseBase]
 
 
 def require_auth(view_func: ViewFunc) -> ViewFunc:
@@ -33,7 +35,7 @@ def require_auth(view_func: ViewFunc) -> ViewFunc:
     their own codes. The domain error is rendered as JSON by core.middleware."""
 
     @wraps(view_func)
-    def wrapper(request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+    def wrapper(request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponseBase:
         from core.exceptions import AuthenticationException
 
         result = _authenticator.authenticate(request)
@@ -103,7 +105,7 @@ def require_perm(*codes: str) -> Callable[[ViewFunc], ViewFunc]:
 
     def decorator(view_func: ViewFunc) -> ViewFunc:
         @wraps(view_func)
-        def wrapper(request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        def wrapper(request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponseBase:
             check_perm(request, *codes)
             return view_func(request, *args, **kwargs)
 

@@ -365,7 +365,7 @@ class TestAuditAPIAppendOnly:
     def test_list_denied_roles(self, as_role, role):
         resp = as_role(role)[0].get(AUDIT_URL)
         assert resp.status_code == 403
-        assert resp.json()["error"]["code"] == "forbidden"
+        assert resp.json()["code"] == "forbidden"
 
     def test_anonymous_denied(self, tenant_a, client_for):
         assert client_for(tenant_a).get(AUDIT_URL).status_code == 401
@@ -390,7 +390,7 @@ class TestAuditAPIAppendOnly:
         client_b.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
         resp = client_b.get(AUDIT_URL)
         assert resp.status_code == 401
-        assert resp.json()["error"]["code"] == "authentication_failed"
+        assert resp.json()["code"] == "authentication_failed"
 
     def test_tenant_isolation_rows_not_leaked(self, tenant_a, tenant_b, as_role):
         with schema_context(tenant_a.schema_name):
@@ -400,6 +400,16 @@ class TestAuditAPIAppendOnly:
         client_b, _ = as_role(Role.DIRECTOR, tenant_b)
         body = client_b.get(AUDIT_URL + "?resource_type=secret.A").json()
         assert body["results"] == []
+
+    @pytest.mark.parametrize("url", [AUDIT_URL, EXPORT_URL])
+    @pytest.mark.parametrize("param", ["ts_from", "ts_to"])
+    def test_out_of_range_ts_param_is_400_not_500(self, tenant_a, as_role, url, param):
+        """A regex-valid but impossible datetime (parse_datetime RAISES ValueError,
+        not None) must be a clean 400, never a 500 — on both the list and the export."""
+        client, _ = as_role(Role.DIRECTOR, tenant_a)
+        resp = client.get(f"{url}?{param}=2026-02-30T00:00:00")
+        assert resp.status_code == 400
+        assert resp.json()["code"] == "validation_error"
 
     def test_filters_by_action_and_resource(self, tenant_a, as_role):
         client, _ = as_role(Role.DIRECTOR, tenant_a)
@@ -466,7 +476,7 @@ class TestAuditExport:
         assert after == before + 1
 
     def test_export_over_cap_400(self, tenant_a, as_role, monkeypatch):
-        import apps.audit.views as views
+        import apps.audit.views.v1.audit_views as views
 
         monkeypatch.setattr(views, "MAX_EXPORT_ROWS", 1)
         client, _ = as_role(Role.DIRECTOR, tenant_a)
@@ -475,7 +485,7 @@ class TestAuditExport:
             AuditLogFactory(resource_id="b")
         resp = client.get(EXPORT_URL)
         assert resp.status_code == 400
-        assert resp.json()["error"]["code"] == "validation_error"
+        assert resp.json()["code"] == "validation_error"
 
     def test_export_denied_for_non_audit_role(self, tenant_a, as_role):
         client, _ = as_role(Role.TEACHER, tenant_a)

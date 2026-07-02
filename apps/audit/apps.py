@@ -14,3 +14,13 @@ class AuditConfig(AppConfig):
         from apps.audit.receivers import connect_audit_receivers
 
         connect_audit_receivers()
+
+        # Layered read-side DI (the API list / retrieve / export).
+        from apps.audit.interfaces.repositories import IAuditRepository
+        from apps.audit.interfaces.services import IAuditService
+        from apps.audit.repositories.audit_repository import AuditRepository
+        from apps.audit.services.v1.audit_service import AuditService
+        from core.container import container
+
+        container.register(IAuditRepository, AuditRepository)
+        container.register(IAuditService, AuditService)

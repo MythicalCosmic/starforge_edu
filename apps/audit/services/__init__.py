@@ -3,6 +3,8 @@
 `audit_log()` is the single chokepoint for every audit row — both the model
 receivers (`apps.audit.receivers`) and non-model events (auth flows, exports,
 billing subscription changes in `schema_context`, D4-E impersonation) call it.
+It is imported across the codebase (auth / billing / printing / tenancy / celery),
+so it lives here in the domain module (the layered read facade is in `services/v1`).
 
 Masking: any field whose name is in `MASKED_FIELDS` is stored as `"***"` in the
 `before`/`after` snapshots. This covers the TD-9 sensitive set:
