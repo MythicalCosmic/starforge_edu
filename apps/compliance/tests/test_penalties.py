@@ -34,17 +34,17 @@ def test_issue_then_waive_penalty(tenant_a, user_in, as_user):
         PEN, {"student": s["student"].id, "points": 5, "reason": "repeatedly late"}, format="json"
     )
     assert issued.status_code == 201, issued.content
-    pid = issued.json()["id"]
-    assert issued.json()["status"] == "active"
-    assert issued.json()["points"] == 5
+    pid = issued.json()["data"]["id"]
+    assert issued.json()["data"]["status"] == "active"
+    assert issued.json()["data"]["points"] == 5
 
     # the teacher who issued holds penalty:write but NOT penalty:waive (SoD)
     assert s["teacher"].post(f"{PEN}{pid}/waive/", {}, format="json").status_code == 403
     # a manager waives it (with a reason)
     waived = s["manager"].post(f"{PEN}{pid}/waive/", {"reason": "first offence"}, format="json")
     assert waived.status_code == 200
-    assert waived.json()["status"] == "waived"
-    assert waived.json()["waive_reason"] == "first offence"
+    assert waived.json()["data"]["status"] == "waived"
+    assert waived.json()["data"]["waive_reason"] == "first offence"
     # a waived penalty can't be waived again
     assert s["manager"].post(f"{PEN}{pid}/waive/", {}, format="json").status_code == 422
 
@@ -59,7 +59,7 @@ def test_cannot_penalise_another_branchs_student(tenant_a, user_in, as_user):
         other_student = StudentProfileFactory.create(branch=other_branch)
     r = s["teacher"].post(PEN, {"student": other_student.id, "points": 3, "reason": "x"}, format="json")
     assert r.status_code == 403
-    assert r.json()["error"]["code"] == "branch_out_of_scope"
+    assert r.json()["code"] == "branch_out_of_scope"
 
 
 def test_student_sees_only_own_penalties(tenant_a, user_in, as_user):
@@ -74,8 +74,8 @@ def test_student_sees_only_own_penalties(tenant_a, user_in, as_user):
     s["teacher"].post(PEN, {"student": s["student"].id, "points": 9, "reason": "other kid"}, format="json")
 
     body = as_user(tenant_a, student_user).get(PEN).json()
-    assert body["count"] == 1  # only their own demerit, not the other student's
-    assert body["results"][0]["student"] == subject.id
+    assert body["pagination"]["total"] == 1  # only their own demerit, not the other student's
+    assert body["data"][0]["student"] == subject.id
 
 
 def test_guardian_sees_only_their_childs_penalties(tenant_a, user_in, as_user):
@@ -93,8 +93,8 @@ def test_guardian_sees_only_their_childs_penalties(tenant_a, user_in, as_user):
     s["teacher"].post(PEN, {"student": other_child.id, "points": 7, "reason": "someone else"}, format="json")
 
     body = as_user(tenant_a, parent_user).get(PEN).json()
-    assert body["count"] == 1  # ONLY their child's record, not the other student's
-    assert body["results"][0]["student"] == s["student"].id
+    assert body["pagination"]["total"] == 1  # ONLY their child's record, not the other student's
+    assert body["data"][0]["student"] == s["student"].id
 
 
 def test_staff_list_is_branch_scoped(tenant_a, user_in, as_user):
@@ -112,8 +112,8 @@ def test_staff_list_is_branch_scoped(tenant_a, user_in, as_user):
         Penalty.objects.create(student=other_student, points=9, reason="elsewhere", branch=other_branch)
 
     body = s["teacher"].get(PEN).json()
-    assert body["count"] == 1  # the teacher sees only their own branch's penalties
-    assert body["results"][0]["branch"] == s["branch"].id
+    assert body["pagination"]["total"] == 1  # the teacher sees only their own branch's penalties
+    assert body["data"][0]["branch"] == s["branch"].id
 
 
 def test_penalty_can_cite_an_active_rule_only(tenant_a, user_in, as_user):
@@ -128,7 +128,7 @@ def test_penalty_can_cite_an_active_rule_only(tenant_a, user_in, as_user):
         PEN, {"student": s["student"].id, "points": 2, "reason": "phone", "rule": active.id}, format="json"
     )
     assert cited.status_code == 201
-    assert cited.json()["rule"] == active.id  # the breached rule is linked
+    assert cited.json()["data"]["rule"] == active.id  # the breached rule is linked
     bad = s["teacher"].post(
         PEN, {"student": s["student"].id, "points": 2, "reason": "x", "rule": inactive.id}, format="json"
     )
@@ -151,7 +151,7 @@ def test_a_read_only_role_cannot_issue_a_penalty(tenant_a, as_role, user_in, as_
     s = _setup(tenant_a, user_in, as_user)
     cashier, _ = as_role(Role.CASHIER)  # penalty:read (own record) but no penalty:write
     assert cashier.get(PEN).status_code == 200  # reads their own (none) — not a leak
-    assert cashier.get(PEN).json()["results"] == []
+    assert cashier.get(PEN).json()["data"] == []
     assert (
         cashier.post(PEN, {"student": s["student"].id, "points": 1, "reason": "x"}, format="json").status_code
         == 403

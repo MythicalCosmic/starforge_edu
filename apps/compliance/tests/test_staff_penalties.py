@@ -45,7 +45,7 @@ def test_manager_disciplines_a_staff_member(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     r = _discipline(s)
     assert r.status_code == 201, r.content
-    body = r.json()
+    body = r.json()["data"]
     assert body["staff"] == s["target_u"].id
     assert body["student"] is None
     assert body["points"] == 3
@@ -55,7 +55,9 @@ def test_manager_disciplines_a_staff_member(tenant_a, user_in, as_user):
 def test_a_peer_teacher_cannot_discipline_staff(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     r = s["teacher"].post(
-        STAFF, {"staff": s["target_u"].id, "branch": s["branch"].id, "points": 2, "reason": "x"}, format="json"
+        STAFF,
+        {"staff": s["target_u"].id, "branch": s["branch"].id, "points": 2, "reason": "x"},
+        format="json",
     )
     assert r.status_code == 403  # penalty:write does not grant penalty:staff
 
@@ -64,7 +66,7 @@ def test_cannot_penalise_yourself(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     r = _discipline(s, staff=s["hod_u"].id)
     assert r.status_code == 422
-    assert r.json()["error"]["code"] == "self_penalty"
+    assert r.json()["code"] == "self_penalty"
 
 
 def test_subject_must_be_an_active_staff_member(tenant_a, user_in, as_user):
@@ -72,7 +74,7 @@ def test_subject_must_be_an_active_staff_member(tenant_a, user_in, as_user):
     student_u = user_in(tenant_a, roles=[Role.STUDENT], branch=s["branch"])  # not staff
     r = _discipline(s, staff=student_u.id)
     assert r.status_code == 422
-    assert r.json()["error"]["code"] == "not_staff"
+    assert r.json()["code"] == "not_staff"
 
 
 def test_branch_scope_is_enforced(tenant_a, user_in, as_user):
@@ -83,39 +85,39 @@ def test_branch_scope_is_enforced(tenant_a, user_in, as_user):
         other = BranchFactory.create()
     r = _discipline(s, branch=other.id)  # HOD's branch is `branch`, not `other`
     assert r.status_code == 403
-    assert r.json()["error"]["code"] == "branch_out_of_scope"
+    assert r.json()["code"] == "branch_out_of_scope"
 
 
 def test_peer_teacher_cannot_see_a_staff_penalty(tenant_a, user_in, as_user):
     """HR privacy: a teacher (penalty:write) sees their branch's STUDENT demerits but
     NOT a colleague's disciplinary record."""
     s = _setup(tenant_a, user_in, as_user)
-    pid = _discipline(s).json()["id"]
-    listed = s["teacher"].get(PEN).json()["results"]
+    pid = _discipline(s).json()["data"]["id"]
+    listed = s["teacher"].get(PEN).json()["data"]
     assert pid not in [p["id"] for p in listed]
 
 
 def test_the_subject_sees_their_own_staff_penalty(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
-    pid = _discipline(s).json()["id"]
-    listed = s["target"].get(PEN).json()["results"]  # target_u is the subject
+    pid = _discipline(s).json()["data"]["id"]
+    listed = s["target"].get(PEN).json()["data"]  # target_u is the subject
     assert pid in [p["id"] for p in listed]
 
 
 def test_a_manager_sees_branch_staff_penalties(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
-    pid = _discipline(s).json()["id"]
-    listed = s["manager"].get(PEN).json()["results"]
+    pid = _discipline(s).json()["data"]["id"]
+    listed = s["manager"].get(PEN).json()["data"]
     assert pid in [p["id"] for p in listed]
 
 
 def test_a_staff_penalty_can_be_waived(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
-    pid = _discipline(s).json()["id"]
+    pid = _discipline(s).json()["data"]["id"]
     w = s["manager"].post(f"{PEN}{pid}/waive/", {"reason": "appeal upheld"}, format="json")
     assert w.status_code == 200
-    assert w.json()["status"] == "waived"
-    assert w.json()["waive_reason"] == "appeal upheld"
+    assert w.json()["data"]["status"] == "waived"
+    assert w.json()["data"]["waive_reason"] == "appeal upheld"
 
 
 def test_a_non_teacher_staff_subject_can_see_their_own_record(tenant_a, user_in, as_user):
@@ -123,8 +125,8 @@ def test_a_non_teacher_staff_subject_can_see_their_own_record(tenant_a, user_in,
     subject can always read the record filed against them (transparency invariant)."""
     s = _setup(tenant_a, user_in, as_user)
     accountant_u = user_in(tenant_a, roles=[Role.ACCOUNTANT], branch=s["branch"])
-    pid = _discipline(s, staff=accountant_u.id).json()["id"]
-    listed = as_user(tenant_a, accountant_u).get(PEN).json()["results"]
+    pid = _discipline(s, staff=accountant_u.id).json()["data"]["id"]
+    listed = as_user(tenant_a, accountant_u).get(PEN).json()["data"]
     assert pid in [p["id"] for p in listed]
 
 
@@ -139,7 +141,7 @@ def test_cannot_discipline_a_staff_member_from_another_branch(tenant_a, user_in,
     outsider = user_in(tenant_a, roles=[Role.TEACHER], branch=other)  # works only in `other`
     r = _discipline(s, staff=outsider.id)  # filed under s["branch"], where they don't work
     assert r.status_code == 422
-    assert r.json()["error"]["code"] == "not_staff"
+    assert r.json()["code"] == "not_staff"
 
 
 def test_staff_penalty_does_not_escalate(tenant_a, user_in, as_user):
@@ -152,5 +154,5 @@ def test_staff_penalty_does_not_escalate(tenant_a, user_in, as_user):
         cs = CenterSettings.load()
         cs.penalty_escalation_threshold = 1  # would escalate any student penalty
         cs.save()
-    body = _discipline(s, points=99).json()
+    body = _discipline(s, points=99).json()["data"]
     assert body["escalated"] is False
