@@ -50,7 +50,7 @@ def test_top_up_credits_the_wallet(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     r = _topup(s, "50000")
     assert r.status_code == 201, r.content
-    body = r.json()
+    body = r.json()["data"]
     assert body["kind"] == "topup"
     assert body["amount_uzs"] == "50000.00"
     assert body["balance_after_uzs"] == "50000.00"
@@ -61,8 +61,8 @@ def test_spend_debits_the_wallet(tenant_a, user_in, as_user):
     _topup(s, "50000")
     r = _spend(s, "12000")
     assert r.status_code == 201, r.content
-    assert r.json()["kind"] == "spend"
-    assert r.json()["balance_after_uzs"] == "38000.00"
+    assert r.json()["data"]["kind"] == "spend"
+    assert r.json()["data"]["balance_after_uzs"] == "38000.00"
 
 
 def test_cannot_overdraw(tenant_a, user_in, as_user):
@@ -70,7 +70,7 @@ def test_cannot_overdraw(tenant_a, user_in, as_user):
     _topup(s, "5000")
     r = _spend(s, "9000")
     assert r.status_code == 422
-    assert r.json()["error"]["code"] == "insufficient_funds"
+    assert r.json()["code"] == "insufficient_funds"
 
 
 def test_balance_is_the_running_ledger_total(tenant_a, user_in, as_user):
@@ -78,7 +78,7 @@ def test_balance_is_the_running_ledger_total(tenant_a, user_in, as_user):
     _topup(s, "100000")
     _spend(s, "30000")
     _topup(s, "5000")
-    detail = s["cashier"].get(f"/api/v1/cards/wallets/{s['student'].id}/").json()
+    detail = s["cashier"].get(f"/api/v1/cards/wallets/{s['student'].id}/").json()["data"]
     assert detail["wallet"]["balance_uzs"] == "75000.00"
     assert len(detail["transactions"]) == 3  # append-only ledger
 
@@ -86,7 +86,7 @@ def test_balance_is_the_running_ledger_total(tenant_a, user_in, as_user):
 def test_student_reads_their_own_wallet(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     _topup(s, "20000")
-    body = s["student_c"].get(ME).json()
+    body = s["student_c"].get(ME).json()["data"]
     assert body["wallet"]["balance_uzs"] == "20000.00"
     assert body["wallet"]["student"] == s["student"].id
 
@@ -112,7 +112,7 @@ def test_top_up_is_branch_scoped(tenant_a, user_in, as_user):
         outsider = StudentProfileFactory.create(branch=other_branch)
     r = _topup(s, "1000", sid=outsider.id)
     assert r.status_code == 403
-    assert r.json()["error"]["code"] == "branch_out_of_scope"
+    assert r.json()["code"] == "branch_out_of_scope"
 
 
 def test_a_role_without_wallet_write_cannot_top_up(tenant_a, user_in, as_user):
@@ -137,4 +137,4 @@ def test_a_topup_that_would_overflow_the_balance_is_a_clean_422(tenant_a, user_i
     assert _topup(s, big).status_code == 201
     r = _topup(s, big)  # would push the balance to 1.8e16 -> overflow the column
     assert r.status_code == 422
-    assert r.json()["error"]["code"] == "balance_overflow"
+    assert r.json()["code"] == "balance_overflow"

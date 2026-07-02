@@ -1,26 +1,28 @@
 from django.urls import path
-from rest_framework.routers import DefaultRouter
 
-from apps.cards.views import (
-    CardScanView,
-    CardTypeViewSet,
-    CardViewSet,
-    StudentWalletView,
-    WalletMeView,
-    WalletSpendView,
-    WalletTopUpView,
+from apps.cards.views.v1.card_views import (
+    card_detail_view,
+    card_revoke_view,
+    card_scan_view,
+    card_type_detail_view,
+    card_types_collection_view,
+    cards_collection_view,
+    student_wallet_view,
+    wallet_me_view,
+    wallet_spend_view,
+    wallet_topup_view,
 )
 
-router = DefaultRouter()
-router.register("types", CardTypeViewSet, basename="card-type")
-router.register("", CardViewSet, basename="card")
-
 urlpatterns = [
-    # Specific paths before the catch-all "" card route (and "me" before "<student_id>").
-    path("scan/", CardScanView.as_view(), name="card-scan"),
-    path("wallets/me/", WalletMeView.as_view(), name="wallet-me"),
-    path("wallets/<int:student_id>/", StudentWalletView.as_view(), name="wallet-detail"),
-    path("wallets/<int:student_id>/topup/", WalletTopUpView.as_view(), name="wallet-topup"),
-    path("wallets/<int:student_id>/spend/", WalletSpendView.as_view(), name="wallet-spend"),
-    *router.urls,
+    # Specific prefixes before the bare "" / "<pk>/" card routes.
+    path("types/", card_types_collection_view, name="card-type-list"),
+    path("types/<int:pk>/", card_type_detail_view, name="card-type-detail"),
+    path("scan/", card_scan_view, name="card-scan"),
+    path("wallets/me/", wallet_me_view, name="wallet-me"),
+    path("wallets/<int:student_id>/", student_wallet_view, name="wallet-detail"),
+    path("wallets/<int:student_id>/topup/", wallet_topup_view, name="wallet-topup"),
+    path("wallets/<int:student_id>/spend/", wallet_spend_view, name="wallet-spend"),
+    path("", cards_collection_view, name="card-list"),
+    path("<int:pk>/", card_detail_view, name="card-detail"),
+    path("<int:pk>/revoke/", card_revoke_view, name="card-revoke"),
 ]

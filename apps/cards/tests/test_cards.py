@@ -40,7 +40,7 @@ def _setup(tenant, user_in, as_user):
 
 
 def _card_type(s, name="Student ID"):
-    return s["registrar"].post(TYPES, {"name": name}, format="json").json()["id"]
+    return s["registrar"].post(TYPES, {"name": name}, format="json").json()["data"]["id"]
 
 
 def _issue(s, **over):
@@ -53,14 +53,14 @@ def test_create_card_type(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     r = s["registrar"].post(TYPES, {"name": "Access pass"}, format="json")
     assert r.status_code == 201, r.content
-    assert r.json()["is_active"] is True
+    assert r.json()["data"]["is_active"] is True
 
 
 def test_issue_a_card(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     r = _issue(s)
     assert r.status_code == 201, r.content
-    body = r.json()
+    body = r.json()["data"]
     assert body["is_active"] is True
     assert body["student"] == s["student"].id
     assert len(body["code"]) > 10  # a real scan code was generated
@@ -68,21 +68,21 @@ def test_issue_a_card(tenant_a, user_in, as_user):
 
 def test_scan_a_valid_card_checks_the_student_in(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
-    code = _issue(s).json()["code"]
+    code = _issue(s).json()["data"]["code"]
     r = s["security"].post(SCAN, {"code": code}, format="json")
     assert r.status_code == 200, r.content
-    body = r.json()
+    body = r.json()["data"]
     assert body["valid"] is True
     assert body["student"] == s["student"].id
 
 
 def test_scan_a_revoked_card_is_invalid(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
-    card = _issue(s).json()
+    card = _issue(s).json()["data"]
     rev = s["registrar"].post(f"{CARDS}{card['id']}/revoke/", {"reason": "lost"}, format="json")
     assert rev.status_code == 200
-    assert rev.json()["is_active"] is False
-    body = s["security"].post(SCAN, {"code": card["code"]}, format="json").json()
+    assert rev.json()["data"]["is_active"] is False
+    body = s["security"].post(SCAN, {"code": card["code"]}, format="json").json()["data"]
     assert body["valid"] is False  # logged, but rejected at the door
 
 
@@ -90,16 +90,16 @@ def test_scan_an_unknown_code_is_404(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     r = s["security"].post(SCAN, {"code": "no-such-code"}, format="json")
     assert r.status_code == 404
-    assert r.json()["error"]["code"] == "card_not_found"
+    assert r.json()["code"] == "card_not_found"
 
 
 def test_a_card_cannot_be_revoked_twice(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
-    cid = _issue(s).json()["id"]
+    cid = _issue(s).json()["data"]["id"]
     s["registrar"].post(f"{CARDS}{cid}/revoke/", {}, format="json")
     again = s["registrar"].post(f"{CARDS}{cid}/revoke/", {}, format="json")
     assert again.status_code == 422
-    assert again.json()["error"]["code"] == "card_not_active"
+    assert again.json()["code"] == "card_not_active"
 
 
 def test_cannot_issue_with_a_retired_card_type(tenant_a, user_in, as_user):
@@ -121,19 +121,19 @@ def test_cannot_issue_to_a_student_in_another_branch(tenant_a, user_in, as_user)
         outsider = StudentProfileFactory.create(branch=other)
     r = _issue(s, student=outsider.id)
     assert r.status_code == 403
-    assert r.json()["error"]["code"] == "branch_out_of_scope"
+    assert r.json()["code"] == "branch_out_of_scope"
 
 
 def test_student_sees_only_their_own_card(tenant_a, user_in, as_user):
     from apps.students.tests.factories import StudentProfileFactory
 
     s = _setup(tenant_a, user_in, as_user)
-    my_card = _issue(s).json()["id"]
+    my_card = _issue(s).json()["data"]["id"]
     with schema_context(tenant_a.schema_name):
         other_student = StudentProfileFactory.create(branch=s["branch"])
-    other_card = _issue(s, student=other_student.id).json()["id"]
+    other_card = _issue(s, student=other_student.id).json()["data"]["id"]
 
-    ids = [c["id"] for c in s["student_c"].get(CARDS).json()["results"]]
+    ids = [c["id"] for c in s["student_c"].get(CARDS).json()["data"]]
     assert my_card in ids
     assert other_card not in ids
 
@@ -142,12 +142,15 @@ def test_security_can_scan_but_not_issue(tenant_a, user_in, as_user):
     """Door staff scan (card:scan) but do not issue cards (card:write)."""
     s = _setup(tenant_a, user_in, as_user)
     tid = _card_type(s)
-    assert s["security"].post(CARDS, {"student": s["student"].id, "card_type": tid}, format="json").status_code == 403
+    assert (
+        s["security"].post(CARDS, {"student": s["student"].id, "card_type": tid}, format="json").status_code
+        == 403
+    )
 
 
 def test_a_role_without_card_scan_cannot_scan(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
-    code = _issue(s).json()["code"]
+    code = _issue(s).json()["data"]["code"]
     assert s["teacher"].post(SCAN, {"code": code}, format="json").status_code == 403
 
 
@@ -155,8 +158,8 @@ def test_security_can_read_branch_cards(tenant_a, user_in, as_user):
     """Door staff (SECURITY: card:read/scan, no card:write) can look up cards in their
     branch — their granted card:read must not be inert."""
     s = _setup(tenant_a, user_in, as_user)
-    cid = _issue(s).json()["id"]
-    listed = s["security"].get(CARDS).json()["results"]
+    cid = _issue(s).json()["data"]["id"]
+    listed = s["security"].get(CARDS).json()["data"]
     assert cid in [c["id"] for c in listed]
 
 
@@ -164,7 +167,7 @@ def test_revoke_with_junk_reason_is_a_clean_400_not_500(tenant_a, user_in, as_us
     """The revoke body is validated — an over-long reason (or a non-dict body) is a clean
     400, never an unhandled 500 from a raw value hitting the column / .get()."""
     s = _setup(tenant_a, user_in, as_user)
-    cid = _issue(s).json()["id"]
+    cid = _issue(s).json()["data"]["id"]
     too_long = s["registrar"].post(f"{CARDS}{cid}/revoke/", {"reason": "x" * 300}, format="json")
     assert too_long.status_code == 400
     # a non-dict JSON body must not 500 either

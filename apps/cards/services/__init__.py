@@ -71,11 +71,7 @@ def scan_card(*, code: str, scanned_by=None) -> dict:
     """Scan a card code to check a student in. An unknown code is a clean 404; a known
     code is ALWAYS logged (even a revoked card — the audit trail of an attempted entry),
     and the result reports whether the card was valid + who it belongs to."""
-    card = (
-        Card.objects.select_related("student__user", "card_type")
-        .filter(code=(code or "").strip())
-        .first()
-    )
+    card = Card.objects.select_related("student__user", "card_type").filter(code=(code or "").strip()).first()
     if card is None:
         raise NotFoundException(_("No card matches that code."), code="card_not_found")
     valid = card.is_active

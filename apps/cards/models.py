@@ -82,9 +82,7 @@ class Wallet(models.Model):
     `WalletTransaction`s; it is mutated only under a row lock so two concurrent spends
     can't overdraw it. A CheckConstraint backstops the never-negative invariant."""
 
-    student = models.OneToOneField(
-        "students.StudentProfile", on_delete=models.PROTECT, related_name="wallet"
-    )
+    student = models.OneToOneField("students.StudentProfile", on_delete=models.PROTECT, related_name="wallet")
     balance_uzs = models.DecimalField(max_digits=18, decimal_places=2, default=Decimal("0"))
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
