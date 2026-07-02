@@ -1,4 +1,10 @@
-"""Access-config write services (A-2)."""
+"""Access-config write services (A-2).
+
+``set_override`` / ``clear_override`` are the programmatic upsert/delete API (imported
+by other apps' flows + tests); the CRUD service in ``services/v1`` handles the HTTP
+endpoints. Both go through standard ORM writes — the override map is read live per
+request (no cross-request cache), so a change takes effect on the very next request.
+"""
 
 from __future__ import annotations
 
@@ -11,8 +17,7 @@ from core.exceptions import ValidationException
 def set_override(
     *, role: str, permission: str, effect: str, actor=None, note: str = ""
 ) -> RolePermissionOverride:
-    """Create or update the override for (role, permission). The model's save()
-    invalidates the per-tenant permission cache on commit."""
+    """Create or update the override for (role, permission)."""
     if permission == "*:*":
         # Mirror the serializer + DB CheckConstraint at the service layer so every
         # programmatic caller is covered (the wildcard protects director authority).

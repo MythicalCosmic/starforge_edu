@@ -88,7 +88,7 @@ def test_effective_roles_endpoint_reflects_overrides(tenant_a, as_role):
         set_override(role=Role.TEACHER, permission="finance:read", effect="grant")
         set_override(role=Role.HEAD_OF_DEPT, permission="students:read", effect="revoke")
 
-    body = director.get("/api/v1/access/roles/").json()
+    body = director.get("/api/v1/access/roles/").json()["data"]
     assert "finance:read" in body["roles"]["teacher"]["granted"]
     assert "students:read" in body["roles"]["head_of_dept"]["revoked"]
     assert "*:*" in body["roles"]["director"]["granted"]
@@ -102,7 +102,7 @@ def test_only_privileged_role_can_manage_overrides(tenant_a, as_role):
     director, _ = as_role(Role.DIRECTOR)
     resp = director.post(OVERRIDES, payload, format="json")
     assert resp.status_code == 201, resp.content
-    assert resp.json()["created_by"] is not None  # stamped
+    assert resp.json()["data"]["created_by"] is not None  # stamped
 
 
 def test_non_privileged_role_cannot_read_access_views(tenant_a, as_role):
@@ -120,7 +120,7 @@ def test_duplicate_override_rejected(tenant_a, as_role):
 
 def test_permission_catalog(tenant_a, as_role):
     director, _ = as_role(Role.DIRECTOR)
-    body = director.get("/api/v1/access/permissions/").json()
+    body = director.get("/api/v1/access/permissions/").json()["data"]
     assert "students:read" in body["permissions"]
     assert "approvals:disburse" in body["permissions"]
 
