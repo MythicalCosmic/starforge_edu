@@ -9,6 +9,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from django.core.exceptions import FieldError
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import models
 from django.db.models import Q, QuerySet
 from django.http import HttpRequest
@@ -58,11 +59,12 @@ def apply_filters(
                 continue  # unparseable boolean — ignore the filter rather than 500
         elif "\x00" in raw:
             raise _bad_filter(field)  # NUL bytes crash psycopg at bind time
-        # A non-numeric value for an int/FK-typed field raises ValueError at query-build
-        # time; turn that into a clean 400 instead of a leaked 500.
+        # A bad value for a typed field raises at query-build time — ValueError for an
+        # int/FK, Django's ValidationError for a date/datetime/uuid — turn either into a
+        # clean 400 instead of a leaked 500.
         try:
             queryset = queryset.filter(**{field: value})
-        except (ValueError, FieldError, ValidationException):
+        except (ValueError, FieldError, ValidationException, DjangoValidationError):
             raise _bad_filter(field) from None
 
     term = request.GET.get("search")

@@ -54,6 +54,19 @@ def test_feed_returns_only_own_rows(tenant_a, user_in, as_user):
     assert set(body) == {"results", "next", "previous"}  # cursor pagination shape
 
 
+def test_feed_event_type_filter(tenant_a, user_in, as_user):
+    """The feed preserves the old filterset_fields=("event_type","read_at") — ?event_type
+    scopes the caller's own feed (a lost filter would silently return everything)."""
+    user = user_in(tenant_a, roles=[Role.PARENT])
+    _make_notif(tenant_a, user, event_type=EventType.ATTENDANCE_ABSENT, title="absent")
+    _make_notif(tenant_a, user, event_type=EventType.ASSIGNMENTS_CREATED, title="assign")
+    client = as_user(tenant_a, user)
+    rows = client.get(f"{FEED_URL}?event_type={EventType.ATTENDANCE_ABSENT}").json()["results"]
+    assert {r["title"] for r in rows} == {"absent"}
+    # a garbage read_at is a clean 400, not a 500
+    assert client.get(f"{FEED_URL}?read_at=garbage").status_code == 400
+
+
 def test_feed_anonymous_denied(tenant_a, client_for):
     assert client_for(tenant_a).get(FEED_URL).status_code == 401
 
@@ -73,9 +86,9 @@ def test_unread_count_and_read_all(tenant_a, user_in, as_user):
     _make_notif(tenant_a, user)
     client = as_user(tenant_a, user)
 
-    assert client.get(UNREAD_URL).json()["count"] == 2
-    assert client.post(READ_ALL_URL).json()["updated"] == 2
-    assert client.get(UNREAD_URL).json()["count"] == 0
+    assert client.get(UNREAD_URL).json()["data"]["count"] == 2
+    assert client.post(READ_ALL_URL).json()["data"]["updated"] == 2
+    assert client.get(UNREAD_URL).json()["data"]["count"] == 0
 
 
 def test_read_one_only_affects_own_unread(tenant_a, user_in, as_user):
@@ -84,7 +97,7 @@ def test_read_one_only_affects_own_unread(tenant_a, user_in, as_user):
     client = as_user(tenant_a, user)
     resp = client.post(f"{FEED_URL}{notif.pk}/read/")
     assert resp.status_code == 200
-    assert resp.json()["read"] is True
+    assert resp.json()["data"]["read"] is True
     with schema_context(tenant_a.schema_name):
         notif.refresh_from_db()
         assert notif.read_at is not None
@@ -113,9 +126,9 @@ def test_preferences_bulk_upsert_roundtrip(tenant_a, user_in, as_user):
     }
     resp = client.put(PREFS_URL, payload, format="json")
     assert resp.status_code == 200
-    assert resp.json()[0]["enabled"] is False
+    assert resp.json()["data"][0]["enabled"] is False
     # GET reflects it
-    got = client.get(PREFS_URL).json()
+    got = client.get(PREFS_URL).json()["data"]
     assert any(r["channel"] == "sms" and r["enabled"] is False for r in got)
 
 
@@ -146,7 +159,7 @@ def test_template_create_parent_denied(tenant_a, as_role):
         format="json",
     )
     assert resp.status_code == 403
-    assert resp.json()["error"]["code"] == "forbidden"
+    assert resp.json()["code"] == "forbidden"
 
 
 def test_template_list_director_ok(tenant_a, as_role):
@@ -171,7 +184,7 @@ def test_announce_cohort_director_ok(tenant_a, as_role):
         format="json",
     )
     assert resp.status_code == 202
-    data = resp.json()
+    data = resp.json()["data"]
     assert data["recipients"] == 2
     with schema_context(tenant_a.schema_name):
         # one Notification per member, deduped per (announcement, user)
@@ -182,6 +195,13 @@ def test_announce_cohort_parent_denied(tenant_a, as_role):
     client, _ = as_role(Role.PARENT, tenant_a)
     resp = client.post(ANNOUNCE_URL, {"cohort": 1, "title": "x", "body": "y"}, format="json")
     assert resp.status_code == 403
+
+
+def test_announce_blank_title_rejected(tenant_a, as_role):
+    """A whitespace-only title/body is a 400 (DRF CharField trims + rejects blank)."""
+    client, _ = as_role(Role.DIRECTOR, tenant_a)
+    resp = client.post(ANNOUNCE_URL, {"cohort": 1, "title": "   ", "body": "   "}, format="json")
+    assert resp.status_code == 400
 
 
 # ---------------------------------------------------------------------------
