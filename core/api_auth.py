@@ -81,6 +81,22 @@ def check_perm(request: HttpRequest, *codes: str) -> None:
         )
 
 
+def deny_read_only_token(request: HttpRequest) -> None:
+    """403 ``read_only_token`` if the caller holds a read-only impersonation session.
+
+    For authenticated WRITE views that have no permission code to run ``check_perm``
+    against (logout, password change) — the DRF stack blanket-denied writes under a
+    read-only token via ``DenyWriteForReadOnlyToken``; a plain view that only
+    ``@require_auth``s must reinstate that deny explicitly or an impersonating admin
+    could force-logout or change a password from a read-only session."""
+    from core.exceptions import PermissionException
+    from core.permissions import is_read_only_token
+
+    req: Any = request
+    if is_read_only_token(req):
+        raise PermissionException(code="read_only_token")
+
+
 def require_perm(*codes: str) -> Callable[[ViewFunc], ViewFunc]:
     """Decorator form of ``check_perm`` for a single-perm view. Wraps a ``@require_auth``
     view (it reads ``request.user`` / resolved roles)."""

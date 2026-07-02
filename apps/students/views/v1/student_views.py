@@ -151,6 +151,9 @@ def students_import_view(request: HttpRequest) -> HttpResponse:
             "File is required.", code="validation_error", fields={"file": ["This field is required."]}
         )
     branch_id = int_field(request.POST, "branch", required=True)
+    # Same create-scope as the single-student POST: a branch-scoped role must not
+    # mass-create students into a branch outside its memberships.
+    assert_branch_id_in_scope(request, branch_id)
     result = _service().import_csv(file_obj=file_obj, branch_id=branch_id)  # type: ignore[arg-type]
     return created(result)
 

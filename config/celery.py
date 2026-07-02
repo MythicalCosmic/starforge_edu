@@ -10,7 +10,9 @@ import os
 
 from tenant_schemas_celery.app import CeleryApp
 
-os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings.development")
+# Fail-safe default (matches wsgi.py): assume production when unset. Dev + Docker
+# set DJANGO_SETTINGS_MODULE explicitly.
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings.production")
 
 # SchemaHeaderTask lets `.delay(..., _schema_name="acme")` work correctly: it
 # lifts the kwarg into task headers, where tenant-schemas-celery reads it to

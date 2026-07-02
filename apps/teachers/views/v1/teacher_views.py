@@ -9,7 +9,6 @@ write asserts the object is in the caller's branches, create asserts the target 
 from __future__ import annotations
 
 from datetime import date
-from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from django.http import HttpRequest, HttpResponse
@@ -17,11 +16,12 @@ from django.views.decorators.csrf import csrf_exempt
 
 from apps.teachers.dto.teacher_dto import TeacherCreateDTO
 from apps.teachers.interfaces.teacher_service import ITeacherService
+from apps.teachers.models import TeacherProfile
 from apps.teachers.presenters import teacher_to_dict
 from core.api_auth import check_perm, require_auth
 from core.container import container
 from core.exceptions import NotFoundException, ValidationException
-from core.http import bool_field, int_field, read_json, str_field
+from core.http import bool_field, decimal_field, int_field, read_json, str_field
 from core.listing import apply_filters, paginate
 from core.permissions import get_user_roles
 from core.responses import created, error, no_content, paginated, success, validation_error
@@ -63,7 +63,10 @@ def teacher_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method in ("GET", "HEAD"):
         return success(teacher_to_dict(teacher))
     if request.method in ("PUT", "PATCH"):
-        updated = _service().update(teacher, _changes(read_json(request)))
+        changes = _changes(read_json(request))
+        if "branch" in changes:  # reassignment must land in a branch the caller can reach
+            assert_branch_id_in_scope(request, changes["branch"])
+        updated = _service().update(teacher, changes)
         return success(teacher_to_dict(updated))
     if request.method == "DELETE":
         _service().delete(teacher)
@@ -76,7 +79,7 @@ def teacher_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
 def teacher_dashboard_view(request: HttpRequest) -> HttpResponse:
     if request.method != "GET":
         return error("Method not allowed.", code="method_not_allowed", status=405)
-    return success(_service().dashboard(request.user, get_user_roles(request)))  # type: ignore[arg-type]
+    return success(_service().dashboard(request.user, get_user_roles(request)))
 
 
 # --- helpers ---------------------------------------------------------------
@@ -113,8 +116,8 @@ def _create(request: HttpRequest) -> HttpResponse:
         hire_date=_date(body, "hire_date"),
         subjects=_list_field(body, "subjects"),
         qualifications=str_field(body, "qualifications"),
-        salary_type=str_field(body, "salary_type", default="monthly"),
-        rate=_decimal(body, "rate"),
+        salary_type=_salary_type(body),
+        rate=decimal_field(body, "rate", max_digits=12),
         is_substitute=bool_field(body, "is_substitute"),
     )
     return created(teacher_to_dict(_service().create(dto)))
@@ -134,9 +137,9 @@ def _changes(body: dict[str, Any]) -> dict[str, Any]:
     if "qualifications" in body:
         changes["qualifications"] = str_field(body, "qualifications")
     if "salary_type" in body:
-        changes["salary_type"] = str_field(body, "salary_type", default="monthly")
+        changes["salary_type"] = _salary_type(body)
     if "rate" in body:
-        changes["rate"] = _decimal(body, "rate")
+        changes["rate"] = decimal_field(body, "rate", max_digits=12)
     if "is_substitute" in body:
         changes["is_substitute"] = bool_field(body, "is_substitute")
     return changes
@@ -154,16 +157,15 @@ def _date(body: dict[str, Any], name: str) -> date | None:
         ) from None
 
 
-def _decimal(body: dict[str, Any], name: str) -> Decimal | None:
-    raw = body.get(name)
-    if raw in (None, ""):
-        return None
-    try:
-        return Decimal(str(raw))
-    except (InvalidOperation, ValueError):
+def _salary_type(body: dict[str, Any]) -> str:
+    value = str_field(body, "salary_type", default="monthly")
+    if value not in TeacherProfile.SalaryType.values:
         raise ValidationException(
-            "Invalid number.", code="validation_error", fields={name: ["Must be a number."]}
-        ) from None
+            "Invalid salary_type.",
+            code="validation_error",
+            fields={"salary_type": ["Not a valid choice."]},
+        )
+    return value
 
 
 def _list_field(body: dict[str, Any], name: str) -> list:

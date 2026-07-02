@@ -1,0 +1,71 @@
+"""Blanket /api/ rate limit (core.middleware.ApiRateLimitMiddleware).
+
+The migrated plain FBVs bypass DRF dispatch, so DRF's UserRateThrottle /
+AnonRateThrottle no longer cover them — this middleware restores the blanket
+caps for BOTH view styles. Buckets: per Bearer token (hashed) at the user rate,
+per client IP at the anon rate. The autouse ``_clear_cache`` fixture resets the
+buckets around every test.
+"""
+
+from __future__ import annotations
+
+import pytest
+from django.test import override_settings
+
+from core.middleware import _parse_rate
+from core.permissions import Role
+
+pytestmark = pytest.mark.django_db
+
+URL = "/api/v1/students/"  # a migrated (plain-view) endpoint
+
+
+def test_parse_rate_formats():
+    assert _parse_rate("1000/min") == (1000, 60)
+    assert _parse_rate("60/minute") == (60, 60)
+    assert _parse_rate("5/sec") == (5, 1)
+    assert _parse_rate("100/hour") == (100, 3600)
+    assert _parse_rate("2/day") == (2, 86400)
+
+
+@override_settings(API_RATELIMIT_ANON="3/min")
+def test_anon_flood_is_throttled_with_envelope(tenant_a, client_for):
+    client = client_for(tenant_a)
+    for _ in range(3):
+        assert client.get(URL).status_code == 401  # unauthenticated but under the cap
+    resp = client.get(URL)
+    assert resp.status_code == 429
+    body = resp.json()
+    assert body["success"] is False
+    assert body["code"] == "throttled"
+    assert resp["Retry-After"]
+
+
+@override_settings(API_RATELIMIT_USER="2/min")
+def test_authenticated_flood_is_throttled_per_token(tenant_a, as_role):
+    client, _ = as_role(Role.DIRECTOR)
+    assert client.get(URL).status_code == 200
+    assert client.get(URL).status_code == 200
+    assert client.get(URL).status_code == 429  # third request over the 2/min cap
+
+    # A DIFFERENT user's token is a separate bucket — not collateral damage.
+    other, _ = as_role(Role.TEACHER)
+    assert other.get(URL).status_code == 200
+
+
+@override_settings(API_RATELIMIT_ANON="1/min")
+def test_non_api_paths_are_not_limited(tenant_a, client_for):
+    client = client_for(tenant_a)
+    assert client.get(URL).status_code == 401  # consumes the single anon slot
+    # /healthz is outside /api/ — never throttled (ops probes must always answer).
+    for _ in range(3):
+        assert client.get("/healthz/live").status_code == 200
+
+
+@override_settings(API_RATELIMIT_ANON="1/min")
+def test_options_preflight_is_exempt(tenant_a, client_for):
+    client = client_for(tenant_a)
+    assert client.get(URL).status_code == 401  # consumes the single anon slot
+    # CORS preflights must never be throttled (DRF's view-level throttles never saw
+    # them either) — they'd otherwise starve a browser SPA of its real requests.
+    assert client.options(URL).status_code != 429

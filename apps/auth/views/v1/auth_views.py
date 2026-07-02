@@ -20,7 +20,7 @@ from apps.auth.dto.auth_dto import (
     SessionContextDTO,
 )
 from apps.auth.interfaces.auth_service import IAuthService
-from core.api_auth import require_auth
+from core.api_auth import deny_read_only_token, require_auth
 from core.container import container
 from core.http import read_json, str_field
 from core.ratelimit import check_rate, ratelimit
@@ -48,8 +48,13 @@ def login_view(request: HttpRequest) -> HttpResponse:
     if not username or not password:
         return validation_error({"username": ["required"], "password": ["required"]})
     # Per-username cap (in addition to the per-IP decorator) — both 401s and successes
-    # count, so credential stuffing one account is bounded.
-    check_rate(scope="login_user", key=username.strip().lower(), limit=5, window=60)
+    # count, so credential stuffing one account is bounded. Keyed by tenant schema so a
+    # flood of "admin" on one center never locks "admin" out on another.
+    from core.utils import current_schema
+
+    check_rate(
+        scope="login_user", key=f"{current_schema()}:{username.strip().lower()}", limit=5, window=60
+    )
     dto = LoginDTO(
         username=username,
         password=password,
@@ -63,6 +68,7 @@ def login_view(request: HttpRequest) -> HttpResponse:
 @require_POST
 @require_auth
 def logout_view(request: HttpRequest) -> HttpResponse:
+    deny_read_only_token(request)  # an impersonation session must not force-logout
     _service().logout(request.user)  # type: ignore[arg-type]
     return no_content()
 
@@ -71,6 +77,7 @@ def logout_view(request: HttpRequest) -> HttpResponse:
 @require_POST
 @require_auth
 def password_change_view(request: HttpRequest) -> HttpResponse:
+    deny_read_only_token(request)  # an impersonation session must not change the password
     body = read_json(request)
     dto = ChangePasswordDTO(
         old_password=str_field(body, "old_password"),

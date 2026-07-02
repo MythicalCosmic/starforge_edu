@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.validators import validate_email
 from django.db.models import F
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
@@ -12,6 +14,8 @@ from django.utils.translation import gettext_lazy as _
 from apps.users.models import Device
 from core.exceptions import ValidationException
 from core.validators import normalize_phone
+
+_NAME_MAX = 150  # User first/last/middle_name column length
 
 if TYPE_CHECKING:
     from apps.users.models import User
@@ -32,9 +36,28 @@ def resolve_or_create_user(
     if phone:
         lookup = {"phone": normalize_phone(phone)}
     elif email:
-        lookup = {"email": email.lower().strip()}
+        # This email becomes the account's unique login identifier — validate its
+        # format and length up front rather than persisting junk (or 500ing on a
+        # >254-char value that overflows the column).
+        email = email.lower().strip()
+        try:
+            validate_email(email)
+        except DjangoValidationError:
+            raise ValidationException(
+                _("Enter a valid email address."),
+                code="validation_error",
+                fields={"email": ["Enter a valid email address."]},
+            ) from None
+        lookup = {"email": email}
     else:
         raise ValidationException(_("phone or email is required."), code="identifier_required")
+    for field, value in (("first_name", first_name), ("last_name", last_name), ("middle_name", middle_name)):
+        if len(value) > _NAME_MAX:
+            raise ValidationException(
+                _("Name is too long."),
+                code="validation_error",
+                fields={field: [f"Must be at most {_NAME_MAX} characters."]},
+            )
     user = User.objects.filter(**lookup).first()
     if user is None:
         user = User.objects.create(
@@ -80,6 +103,9 @@ def register_device(
     a stable `device_id` and a `platform`."""
     if not device_id or not platform:
         return None
+    # Truncate to the column bounds (device_id 128, platform 16) so a long client
+    # value never 500s mid-login — mirrors core.session_auth.create_session.
+    device_id, platform = device_id[:128], platform[:16]
     defaults: dict[str, object] = {
         "platform": platform,
         "user_agent": user_agent,

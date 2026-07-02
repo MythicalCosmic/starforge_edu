@@ -4,6 +4,7 @@ the way DTOs are built from it. Bad JSON / non-object bodies are a clean 400."""
 from __future__ import annotations
 
 import json
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from django.http import HttpRequest
@@ -34,13 +35,21 @@ def _bad(name: str, msg: str) -> ValidationException:
     )
 
 
-def str_field(data: dict[str, Any], name: str, *, default: str = "") -> str:
-    """A string field, coerced from None to ``default``; a non-string is a 400."""
+def str_field(data: dict[str, Any], name: str, *, default: str = "", max_length: int | None = None) -> str:
+    """A string field, coerced from None to ``default``; a non-string is a 400.
+
+    Rejects NUL (0x00) bytes — psycopg cannot store them and would 500 at bind time —
+    and, when ``max_length`` is given, enforces it up-front so an over-long value is a
+    clean 400 with the field name rather than a leaked DB DataError."""
     value = data.get(name, default)
     if value is None:
         return default
     if not isinstance(value, str):
         raise _bad(name, "Must be a string.")
+    if "\x00" in value:
+        raise _bad(name, "Must not contain NUL bytes.")
+    if max_length is not None and len(value) > max_length:
+        raise _bad(name, f"Must be at most {max_length} characters.")
     return value
 
 
@@ -57,6 +66,29 @@ def int_field(data: dict[str, Any], name: str, *, required: bool = False, defaul
         return int(value)
     except (TypeError, ValueError):
         raise _bad(name, "Must be an integer.") from None
+
+
+def decimal_field(
+    data: dict[str, Any], name: str, *, max_digits: int | None = None, decimal_places: int = 2
+) -> Decimal | None:
+    """A Decimal field (accepts a number or numeric string), or None when absent/blank.
+
+    Rejects NaN/Infinity (``Decimal("NaN")`` parses fine but silently corrupts a money
+    column) and, when ``max_digits`` is given, any value whose integer part would
+    overflow the column's precision (a leaked DataError 500 otherwise). Extra decimal
+    places beyond ``decimal_places`` are left for the DB to round, matching DRF."""
+    raw = data.get(name)
+    if raw in (None, ""):
+        return None
+    try:
+        value = Decimal(str(raw))
+    except (InvalidOperation, ValueError):
+        raise _bad(name, "Must be a number.") from None
+    if not value.is_finite():
+        raise _bad(name, "Must be a finite number.")
+    if max_digits is not None and abs(value) >= Decimal(10) ** (max_digits - decimal_places):
+        raise _bad(name, "Number is too large.")
+    return value
 
 
 def bool_field(data: dict[str, Any], name: str, *, default: bool = False) -> bool:

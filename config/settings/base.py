@@ -187,6 +187,9 @@ MIDDLEWARE = [
     # Liveness/readiness probes answer on ANY Host header and must bypass tenant
     # resolution, so this sits before TenantMainMiddleware (D1-LA-8).
     "core.middleware.HealthCheckMiddleware",
+    # Blanket /api/ rate cap for BOTH view styles (plain FBVs bypass DRF's
+    # throttles). Before tenant resolution so a flood never costs a schema lookup.
+    "core.middleware.ApiRateLimitMiddleware",
     "django_tenants.middleware.main.TenantMainMiddleware",
     # CORS must wrap the short-circuit responses below (402 paywall / 503 inactive)
     # so a browser SPA on an allowed origin can read the real envelope instead of a
@@ -286,8 +289,8 @@ REST_FRAMEWORK = {
         "rest_framework.throttling.UserRateThrottle",
     ],
     "DEFAULT_THROTTLE_RATES": {
-        "anon": "60/min",
-        "user": "1000/min",
+        "anon": "60/min",  # keep in sync with API_RATELIMIT_ANON below
+        "user": "1000/min",  # keep in sync with API_RATELIMIT_USER below
         "login_user": "5/min",
         "login_ip": "10/min",
         "otp_phone": "3/min",
@@ -307,6 +310,12 @@ REST_FRAMEWORK = {
 }
 
 NUM_PROXIES = env("NUM_PROXIES")
+
+# Blanket /api/ rate caps enforced by core.middleware.ApiRateLimitMiddleware for
+# BOTH view styles (DRF's throttles above only see DRF views). DRF-format strings;
+# a Bearer-carrying request buckets per token at USER, anything else per IP at ANON.
+API_RATELIMIT_USER = env.str("API_RATELIMIT_USER", default="1000/min")
+API_RATELIMIT_ANON = env.str("API_RATELIMIT_ANON", default="60/min")
 
 SIMPLE_JWT = {
     # Request auth is custom session auth (core.session_auth), NOT JWT. simplejwt

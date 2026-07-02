@@ -73,7 +73,10 @@ def cohort_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
         # `cohort_archived`, never a field-validation error (parity with the old view).
         if cohort.is_archived:
             raise ValidationException("Cohort is archived.", code="cohort_archived")
-        updated = _service().update(cohort, _changes(read_json(request)))
+        changes = _changes(read_json(request))
+        if "branch" in changes:  # reassignment must land in a branch the caller can reach
+            assert_branch_id_in_scope(request, changes["branch"])
+        updated = _service().update(cohort, changes)
         return success(cohort_to_dict(updated))
     if request.method == "DELETE":
         _service().delete(cohort)

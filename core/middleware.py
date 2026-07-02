@@ -1,20 +1,25 @@
 """Project middleware.
 
-Three concerns, ordered in `config.settings.base.MIDDLEWARE`:
+Concerns, ordered in `config.settings.base.MIDDLEWARE`:
 
 1. `RequestIDMiddleware` (outermost) — correlation id on every request/response.
-2. `HealthCheckMiddleware` (before tenant resolution) — liveness/readiness probes
+2. `JsonErrorResponseMiddleware` — every error response is JSON, project-wide.
+3. `HealthCheckMiddleware` (before tenant resolution) — liveness/readiness probes
    that answer on any Host header without a tenant.
-3. `InactiveTenantMiddleware` (after tenant resolution) — 503 on a deactivated
+4. `ApiRateLimitMiddleware` (before tenant resolution) — the blanket user/anon
+   API rate limit for BOTH view styles (plain FBVs bypass DRF's throttles).
+5. `InactiveTenantMiddleware` (after tenant resolution) — 503 on a deactivated
    Center (Lane B / D1-LB-6).
 """
 
 from __future__ import annotations
 
+import hashlib
 import re
 import uuid
 from collections.abc import Callable
 
+from django.conf import settings
 from django.db import connection
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django_tenants.utils import get_public_schema_name
@@ -117,6 +122,69 @@ class InactiveTenantMiddleware:
 
 
 # ---------------------------------------------------------------------------
+# Blanket API rate limit — both view styles (TD: keep 100k-user headroom sane)
+# ---------------------------------------------------------------------------
+
+_RATE_PERIODS = {"sec": 1, "second": 1, "min": 60, "minute": 60, "hour": 3600, "day": 86400}
+
+
+def _parse_rate(rate: str) -> tuple[int, int]:
+    """DRF-style ``"1000/min"`` -> ``(limit, window_seconds)``."""
+    num, _, period = rate.partition("/")
+    return int(num), _RATE_PERIODS[period.strip().rstrip("s") or "min"]
+
+
+class ApiRateLimitMiddleware:
+    """Blanket request-rate cap for every ``/api/`` route, mirroring the DRF
+    ``UserRateThrottle``/``AnonRateThrottle`` pair the migrated plain views no
+    longer pass through (they bypass DRF dispatch entirely).
+
+    A request carrying a Bearer token is bucketed per TOKEN (hashed — raw session
+    keys never become cache keys) at the ``user`` rate; anything else per client
+    IP at the stricter ``anon`` rate. Sits before tenant resolution so a flood is
+    rejected before it costs a schema lookup. OPTIONS preflights are exempt (CORS
+    preflights never reached DRF's view-level throttles either). Endpoint-specific
+    limits (login, bulk-import, OTP) still apply on top — the tighter bound wins.
+
+    Rates come from ``settings.API_RATELIMIT_USER`` / ``API_RATELIMIT_ANON``
+    (DRF-format strings, read lazily so ``override_settings`` works in tests).
+    """
+
+    def __init__(self, get_response: GetResponse) -> None:
+        self.get_response = get_response
+
+    def __call__(self, request: HttpRequest) -> HttpResponse:
+        if request.method != "OPTIONS" and request.path.startswith("/api/"):
+            from core.exceptions import ThrottledException
+            from core.ratelimit import check_rate
+            from core.utils import client_ip
+
+            auth = request.META.get("HTTP_AUTHORIZATION", "")
+            if auth[:7].lower() == "bearer " and auth[7:].strip():
+                # Hash the opaque session key: per-user bucketing without ever
+                # writing the credential into a cache key.
+                ident = hashlib.sha256(auth[7:].strip().encode()).hexdigest()[:32]
+                rate = getattr(settings, "API_RATELIMIT_USER", "1000/min")
+                scope = "api_user"
+            else:
+                ident = client_ip(request) or "anon"
+                rate = getattr(settings, "API_RATELIMIT_ANON", "60/min")
+                scope = "api_anon"
+            limit, window = _parse_rate(rate)
+            try:
+                check_rate(scope=scope, key=ident, limit=limit, window=window)
+            except ThrottledException as exc:
+                # Middleware-raised exceptions skip process_exception — render the
+                # envelope directly (same shape the views produce).
+                response = JsonResponse(
+                    {"success": False, "code": exc.code, "message": str(exc.detail)}, status=429
+                )
+                response["Retry-After"] = str(int(exc.wait or window))
+                return response
+        return self.get_response(request)
+
+
+# ---------------------------------------------------------------------------
 # JSON error envelope — project-wide (backend API: never serve an HTML error)
 # ---------------------------------------------------------------------------
 
@@ -195,15 +263,36 @@ class JsonErrorResponseMiddleware:
         return self._jsonify(self.get_response(request))
 
     def process_exception(self, request: HttpRequest, exc: Exception) -> HttpResponse | None:
-        """Render a domain error raised by a plain (non-DRF) view as JSON.
+        """Render a domain error raised by a plain (non-DRF) view as JSON, and as a
+        defensive last resort map a leaked DB-level exception to a clean 4xx.
 
         DRF views handle ``StarforgeError`` inside their own exception handler; the
         layered function-based views let it propagate to here, where it becomes the
-        ``{"success": false, code, message}`` envelope with the error's HTTP status."""
-        from core.exceptions import StarforgeError
+        ``{"success": false, code, message}`` envelope with the error's HTTP status.
+
+        The off-DRF views also lost DRF's serializer validation, so a value that is
+        too long / out of range / otherwise unstorable reaches the DB and raises a
+        ``DataError``/``IntegrityError``. Those are NOT ``StarforgeError`` and would
+        otherwise be a hard 500 (owner rule: bad input must never 500). Each statement
+        runs in autocommit (no ATOMIC_REQUESTS), so the connection is still usable —
+        render the honest 4xx here. Endpoint-level validation still gives better,
+        field-specific messages; this is only the safety net for anything it misses."""
+        from django.db import DataError, IntegrityError
+
+        from core.exceptions import ConflictException, StarforgeError, ValidationException
 
         if not isinstance(exc, StarforgeError):
-            return None
+            if isinstance(exc, DataError):
+                exc = ValidationException(
+                    "A field value is invalid or too large.", code="invalid_input"
+                )
+            elif isinstance(exc, IntegrityError):
+                exc = ConflictException(
+                    "The request conflicts with an existing record or a data constraint.",
+                    code="conflict",
+                )
+            else:
+                return None
         body: dict[str, object] = {"success": False, "code": exc.code, "message": str(exc.detail)}
         fields = getattr(exc, "fields", None)
         if fields:

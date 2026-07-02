@@ -72,7 +72,10 @@ def room_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
     if read:
         return success(room_to_dict(room))
     if request.method in ("PUT", "PATCH"):
-        return success(room_to_dict(_service().update(room, _changes(read_json(request)))))
+        changes = _changes(read_json(request))
+        if "branch" in changes:  # reassignment must land in a branch the caller can reach
+            assert_branch_id_in_scope(request, changes["branch"])
+        return success(room_to_dict(_service().update(room, changes)))
     if request.method == "DELETE":
         _service().delete(room)
         return no_content()

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from django.http import HttpRequest, HttpResponse
@@ -14,8 +13,8 @@ from apps.org.presenters import department_to_dict
 from apps.org.views.v1._shared import require_present, require_slug
 from core.api_auth import check_perm, require_auth
 from core.container import container
-from core.exceptions import NotFoundException, ValidationException
-from core.http import bool_field, int_field, read_json, str_field
+from core.exceptions import NotFoundException
+from core.http import bool_field, decimal_field, int_field, read_json, str_field
 from core.listing import apply_filters, paginate
 from core.responses import created, error, no_content, paginated, success
 from core.scoping import assert_branch_id_in_scope, assert_in_branch_scope, scope_to_branches
@@ -57,7 +56,7 @@ def departments_collection_view(request: HttpRequest) -> HttpResponse:
             description=str_field(body, "description"),
             is_active=bool_field(body, "is_active", default=True),
             head_id=int_field(body, "head"),
-            budget=_decimal(body, "budget"),
+            budget=decimal_field(body, "budget", max_digits=14),
         )
         return created(department_to_dict(_service().create(dto)))
     return error("Method not allowed.", code="method_not_allowed", status=405)
@@ -75,7 +74,10 @@ def department_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
     if read:
         return success(department_to_dict(dept))
     if request.method in ("PUT", "PATCH"):
-        return success(department_to_dict(_service().update(dept, _changes(read_json(request)))))
+        changes = _changes(read_json(request))
+        if "branch" in changes:  # reassignment must land in a branch the caller can reach
+            assert_branch_id_in_scope(request, changes["branch"])
+        return success(department_to_dict(_service().update(dept, changes)))
     if request.method == "DELETE":
         _service().delete(dept)
         return no_content()
@@ -94,17 +96,5 @@ def _changes(body: dict[str, Any]) -> dict[str, Any]:
     if "head" in body:
         changes["head"] = int_field(body, "head")
     if "budget" in body:
-        changes["budget"] = _decimal(body, "budget")
+        changes["budget"] = decimal_field(body, "budget", max_digits=14)
     return changes
-
-
-def _decimal(body: dict[str, Any], name: str) -> Decimal | None:
-    raw = body.get(name)
-    if raw in (None, ""):
-        return None
-    try:
-        return Decimal(str(raw))
-    except (InvalidOperation, ValueError):
-        raise ValidationException(
-            "Invalid number.", code="validation_error", fields={name: ["Must be a number."]}
-        ) from None

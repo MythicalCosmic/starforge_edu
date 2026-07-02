@@ -25,10 +25,13 @@ def _csv_with_two_bad_rows() -> str:
 
 
 @pytest.fixture
-def registrar(as_role, tenant_a):
-    client, _ = as_role(Role.REGISTRAR)
+def registrar(tenant_a, user_in, as_user):
+    # A registrar SCOPED to the target branch — import now enforces the same
+    # create-scope as the single-student POST (a branch-scoped role must import
+    # only into its own branches).
     with schema_context(tenant_a.schema_name):
         branch = BranchFactory.create()
+    client = as_user(tenant_a, user_in(tenant_a, roles=[Role.REGISTRAR], branch=branch))
     return client, branch
 
 
