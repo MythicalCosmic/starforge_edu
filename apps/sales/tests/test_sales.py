@@ -48,9 +48,9 @@ def test_record_sale_writes_money_in_ledger(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     r = s["cashier"].post(SALES, _sale_body(s), format="json")
     assert r.status_code == 201, r.content
-    assert r.json()["status"] == "completed"
-    assert r.json()["amount_uzs"] == "150000.00"  # 2 x 75000
-    assert r.json()["ledger_entry"] is not None
+    assert r.json()["data"]["status"] == "completed"
+    assert r.json()["data"]["amount_uzs"] == "150000.00"  # 2 x 75000
+    assert r.json()["data"]["ledger_entry"] is not None
 
     entries = s["cashier"].get(LEDGER).json()["results"]
     assert any(
@@ -61,12 +61,12 @@ def test_record_sale_writes_money_in_ledger(tenant_a, user_in, as_user):
 
 def test_refund_writes_compensating_out_row(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
-    sid = s["cashier"].post(SALES, _sale_body(s), format="json").json()["id"]
+    sid = s["cashier"].post(SALES, _sale_body(s), format="json").json()["data"]["id"]
 
     refunded = s["cashier"].post(f"{SALES}{sid}/refund/", {"reason": "wrong book"}, format="json")
     assert refunded.status_code == 200, refunded.content
-    assert refunded.json()["status"] == "refunded"
-    assert refunded.json()["refund_ledger_entry"] is not None
+    assert refunded.json()["data"]["status"] == "refunded"
+    assert refunded.json()["data"]["refund_ledger_entry"] is not None
     # a refunded sale can't be refunded again
     assert s["cashier"].post(f"{SALES}{sid}/refund/", {}, format="json").status_code == 422
 
@@ -84,7 +84,7 @@ def test_refund_is_branch_scoped(tenant_a, user_in, as_user, as_role):
     from apps.org.tests.factories import BranchFactory
 
     s = _setup(tenant_a, user_in, as_user)
-    sid = s["cashier"].post(SALES, _sale_body(s), format="json").json()["id"]
+    sid = s["cashier"].post(SALES, _sale_body(s), format="json").json()["data"]["id"]
     with schema_context(tenant_a.schema_name):
         other_branch = BranchFactory.create()
     other_cashier = as_user(tenant_a, user_in(tenant_a, roles=[Role.CASHIER], branch=other_branch))
@@ -119,8 +119,8 @@ def test_staff_list_is_branch_scoped(tenant_a, user_in, as_user):
         )
 
     body = s["cashier"].get(SALES).json()
-    assert body["count"] == 1  # the cashier sees only their own branch's till
-    assert body["results"][0]["branch"] == s["branch"].id
+    assert body["pagination"]["total"] == 1  # the cashier sees only their own branch's till
+    assert body["data"][0]["branch"] == s["branch"].id
 
 
 def test_cannot_sell_to_another_branchs_student(tenant_a, user_in, as_user):
@@ -133,13 +133,13 @@ def test_cannot_sell_to_another_branchs_student(tenant_a, user_in, as_user):
         other_student = StudentProfileFactory.create(branch=other_branch)
     r = s["cashier"].post(SALES, _sale_body(s, student=other_student.id), format="json")
     assert r.status_code == 403
-    assert r.json()["error"]["code"] == "branch_out_of_scope"
+    assert r.json()["code"] == "branch_out_of_scope"
 
 
 def test_refund_requires_refund_permission(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     # reception can ring up a sale (sale:write) but not refund (no sale:refund) — SoD
-    sid = s["registrar"].post(SALES, _sale_body(s), format="json").json()["id"]
+    sid = s["registrar"].post(SALES, _sale_body(s), format="json").json()["data"]["id"]
     assert s["registrar"].post(f"{SALES}{sid}/refund/", {}, format="json").status_code == 403
 
 
@@ -147,13 +147,23 @@ def test_invalid_payment_method_rejected(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     r = s["cashier"].post(SALES, _sale_body(s, payment_method=999999), format="json")
     assert r.status_code == 422
-    assert r.json()["error"]["code"] == "payment_method_invalid"
+    assert r.json()["code"] == "payment_method_invalid"
 
 
 def test_quantity_is_capped(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     # an absurd quantity is a clean 400, not a DB-overflow 500
     r = s["cashier"].post(SALES, _sale_body(s, quantity=3_000_000_000), format="json")
+    assert r.status_code == 400
+
+
+def test_sub_cent_unit_price_rejected(tenant_a, user_in, as_user):
+    s = _setup(tenant_a, user_in, as_user)
+    # >2 decimal places would be quantized to 0.01 on the NUMERIC(18,2) column while the
+    # ledgered amount is derived from the full-precision input (0.014 x qty) -> the line
+    # item would not reconcile with the immutable money-IN row. The old DecimalField 400'd
+    # this via validate_precision; the layered path must too.
+    r = s["cashier"].post(SALES, _sale_body(s, unit_price_uzs="0.014"), format="json")
     assert r.status_code == 400
 
 

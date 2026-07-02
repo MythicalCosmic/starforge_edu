@@ -75,8 +75,11 @@ def decimal_field(
 
     Rejects NaN/Infinity (``Decimal("NaN")`` parses fine but silently corrupts a money
     column) and, when ``max_digits`` is given, any value whose integer part would
-    overflow the column's precision (a leaked DataError 500 otherwise). Extra decimal
-    places beyond ``decimal_places`` are left for the DB to round, matching DRF."""
+    overflow the column's precision (a leaked DataError 500 otherwise). Also rejects a
+    value with MORE than ``decimal_places`` fractional digits (DRF's DecimalField
+    ``validate_precision`` returned 400 for this) — otherwise a sub-cent price like
+    ``"0.014"`` is silently quantized to ``0.01`` by the column while any amount derived
+    from the full-precision input diverges, producing an un-auditable money row."""
     raw = data.get(name)
     if raw in (None, ""):
         return None
@@ -86,6 +89,9 @@ def decimal_field(
         raise _bad(name, "Must be a number.") from None
     if not value.is_finite():
         raise _bad(name, "Must be a finite number.")
+    exponent = value.as_tuple().exponent
+    if isinstance(exponent, int) and -exponent > decimal_places:
+        raise _bad(name, f"Ensure that there are no more than {decimal_places} decimal places.")
     if max_digits is not None and abs(value) >= Decimal(10) ** (max_digits - decimal_places):
         raise _bad(name, "Number is too large.")
     return value

@@ -1,8 +1,13 @@
-from rest_framework.routers import DefaultRouter
+from django.urls import path
 
-from apps.sales.views import SaleViewSet
+from apps.sales.views.v1.sale_views import (
+    sale_detail_view,
+    sale_refund_view,
+    sales_collection_view,
+)
 
-router = DefaultRouter()
-router.register("", SaleViewSet, basename="sales")
-
-urlpatterns = router.urls
+urlpatterns = [
+    path("", sales_collection_view, name="sale-list"),
+    path("<int:pk>/", sale_detail_view, name="sale-detail"),
+    path("<int:pk>/refund/", sale_refund_view, name="sale-refund"),
+]

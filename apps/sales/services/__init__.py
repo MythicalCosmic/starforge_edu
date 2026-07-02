@@ -1,5 +1,9 @@
 """Sales services (#8): record a cash sale as an immutable money-IN ledger row, and
-refund it with a compensating money-OUT row (the ledger is never mutated)."""
+refund it with a compensating money-OUT row (the ledger is never mutated).
+
+These domain functions are preserved verbatim; the layered service
+(services/v1/sale_service.py) wraps them after resolving/scoping in the view.
+"""
 
 from __future__ import annotations
 
