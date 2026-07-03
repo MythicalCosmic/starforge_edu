@@ -26,7 +26,7 @@ def test_manager_creates_type_teacher_cannot(as_role):
     director, _ = as_role(Role.DIRECTOR)
     resp = director.post(URL, {"name": "Speaking Lesson", "color": "#3b82f6"}, format="json")
     assert resp.status_code == 201, resp.content
-    assert resp.json()["slug"] == "speaking-lesson"  # auto-slugged
+    assert resp.json()["data"]["slug"] == "speaking-lesson"  # auto-slugged
 
     teacher, _ = as_role(Role.TEACHER)
     assert teacher.get(URL).status_code == 200  # schedule:read can list

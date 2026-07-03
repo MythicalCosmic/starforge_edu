@@ -277,6 +277,7 @@ class JsonErrorResponseMiddleware:
         runs in autocommit (no ATOMIC_REQUESTS), so the connection is still usable —
         render the honest 4xx here. Endpoint-level validation still gives better,
         field-specific messages; this is only the safety net for anything it misses."""
+        from django.core.exceptions import ValidationError as DjangoValidationError
         from django.db import DataError, IntegrityError
 
         from core.exceptions import ConflictException, StarforgeError, ValidationException
@@ -290,6 +291,19 @@ class JsonErrorResponseMiddleware:
                 exc = ConflictException(
                     "The request conflicts with an existing record or a data constraint.",
                     code="conflict",
+                )
+            elif isinstance(exc, DjangoValidationError):
+                # A layered service that runs Model.full_clean()/validate_constraints()
+                # (e.g. a reversed date/time range violating a CheckConstraint) raises
+                # Django's ValidationError — invalid input, not a server fault. Without
+                # DRF's serializer layer it would otherwise be a hard 500. Surface the
+                # per-field messages Django collected (message_dict) when it has them.
+                try:
+                    field_errors: dict | None = dict(exc.message_dict)
+                except AttributeError:
+                    field_errors = {"non_field_errors": list(exc.messages)}
+                exc = ValidationException(
+                    "Invalid input.", code="invalid_input", fields=field_errors
                 )
             else:
                 return None

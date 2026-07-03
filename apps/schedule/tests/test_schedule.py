@@ -485,6 +485,99 @@ def test_rules_create_requires_write(tenant_a, as_role):
     assert resp.status_code == 403
 
 
+def test_rules_create_reversed_times_is_400_not_500(tenant_a, as_role):
+    """A rule whose start_time > end_time is regex-valid but violates the
+    rule_times_ordered CheckConstraint; full_clean() raises Django's ValidationError.
+    Without DRF's serializer layer that would be a hard 500 — the middleware safety
+    net must render it as a clean 400 (owner rule: bad input never 500s)."""
+    from core.permissions import Role
+
+    client, _ = as_role(Role.DIRECTOR)
+    with schema_context(tenant_a.schema_name):
+        ctx = _setup()
+    resp = client.post(
+        "/api/v1/schedule/rules/",
+        {
+            "term": ctx["term"].id,
+            "cohort": ctx["cohort"].id,
+            "teacher": ctx["teacher"].id,
+            "title": "Bad hours",
+            "rrule": "FREQ=WEEKLY;BYDAY=MO",
+            "start_date": "2026-07-06",
+            "end_date": "2026-07-31",
+            "start_time": "15:00",
+            "end_time": "14:00",
+        },
+        format="json",
+    )
+    assert resp.status_code == 400, resp.content
+
+
+def test_bulk_reschedule_huge_shift_is_400_not_500(tenant_a, as_role):
+    """An absurd shift_minutes would overflow datetime.timedelta -> raw 500. The view
+    must bound it to a clean 400 (owner rule: bad input never 500s)."""
+    from core.permissions import Role
+
+    client, _ = as_role(Role.DIRECTOR)
+    with schema_context(tenant_a.schema_name):
+        rule = _make_rule(_setup())
+    resp = client.post(
+        f"/api/v1/schedule/rules/{rule.id}/bulk-reschedule/",
+        {"shift_minutes": 10**18},
+        format="json",
+    )
+    assert resp.status_code == 400, resp.content
+
+
+def test_rule_put_omitting_is_active_preserves_it(tenant_a, as_role):
+    """A PUT that omits is_active must NOT reactivate a deactivated rule (nor
+    re-materialize its lessons) — parity with the old DRF SkipField behavior."""
+    from core.permissions import Role
+
+    client, _ = as_role(Role.DIRECTOR)
+    with schema_context(tenant_a.schema_name):
+        ctx = _setup()
+        rule = _make_rule(ctx)
+        rule.is_active = False
+        rule.save(update_fields=["is_active"])
+    resp = client.put(
+        f"/api/v1/schedule/rules/{rule.id}/",
+        {
+            "term": ctx["term"].id,
+            "cohort": ctx["cohort"].id,
+            "teacher": ctx["teacher"].id,
+            "room": ctx["room"].id,
+            "title": "Algebra",
+            "rrule": "FREQ=WEEKLY;BYDAY=MO,WE",
+            "start_date": "2026-07-06",
+            "end_date": "2026-07-31",
+            "start_time": "14:00",
+            "end_time": "15:30",
+        },
+        format="json",
+    )
+    assert resp.status_code == 200, resp.content
+    rule.refresh_from_db()
+    assert rule.is_active is False  # omitted is_active preserved, not forced True
+
+
+def test_lesson_type_patch_bool_coercion_and_null_rejection(tenant_a, as_role):
+    """PATCH coerces a string boolean (parity with create/bool_field) but rejects an
+    explicit JSON null on the NOT-NULL is_active column."""
+    from apps.schedule.models import LessonType
+    from core.permissions import Role
+
+    client, _ = as_role(Role.DIRECTOR)
+    with schema_context(tenant_a.schema_name):
+        lt = LessonType.objects.create(name="Speaking", slug="speaking", is_active=True)
+    ok = client.patch(f"/api/v1/schedule/lesson-types/{lt.id}/", {"is_active": "false"}, format="json")
+    assert ok.status_code == 200, ok.content
+    lt.refresh_from_db()
+    assert lt.is_active is False
+    bad = client.patch(f"/api/v1/schedule/lesson-types/{lt.id}/", {"is_active": None}, format="json")
+    assert bad.status_code == 400
+
+
 def _make_due_lesson(ctx, *, title="Soon"):
     now = timezone.now()
     return Lesson.objects.create(
@@ -569,4 +662,4 @@ def test_lessons_list_query_budget(tenant_a, as_role, django_assert_max_num_quer
         _make_rule(_setup())
     with django_assert_max_num_queries(9):  # +1: A-2 per-request permission-override load
         body = client.get("/api/v1/schedule/lessons/").json()
-    assert set(body) == {"count", "next", "previous", "results"}
+    assert set(body) == {"success", "data", "pagination"}
