@@ -40,7 +40,7 @@ def test_token_valid_on_own_tenant(tenant_a, user_in, as_user):
     user = user_in(tenant_a, roles=["director"])
     resp = as_user(tenant_a, user).get(URL)
     assert resp.status_code == 200
-    assert resp.json()["id"] == user.id
+    assert resp.json()["data"]["id"] == user.id  # layered envelope
 
 
 def test_anonymous_rejected(tenant_a, client_for):

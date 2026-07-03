@@ -63,7 +63,7 @@ def test_login_happy_path_registers_device(tenant_a, client_for, user_in):
     authed.credentials(HTTP_AUTHORIZATION=f"Bearer {body['data']['access']}")
     me = authed.get(ME_URL)
     assert me.status_code == 200
-    assert me.json()["username"] == user.username
+    assert me.json()["data"]["username"] == user.username  # layered envelope
 
 
 def test_login_wrong_password_401(tenant_a, client_for, user_in):
@@ -284,9 +284,9 @@ def test_logout_revokes_the_session(tenant_a, user_in, as_user):
 
     assert client.post(LOGOUT_URL).status_code == 204
 
-    resp = client.get(ME_URL)  # same key, now revoked (/me/ is still a DRF endpoint)
+    resp = client.get(ME_URL)  # same key, now revoked (/me/ is a layered endpoint)
     assert resp.status_code == 401
-    assert resp.json()["error"]["code"] == "authentication_failed"
+    assert resp.json()["code"] == "authentication_failed"
 
 
 def test_throttle_survives_non_string_identifier(tenant_a, client_for):

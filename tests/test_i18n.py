@@ -163,7 +163,7 @@ def test_accept_language_honored_on_api_error(tenant_a, client_for):
     resp = client.get("/api/v1/users/", HTTP_ACCEPT_LANGUAGE="ru")
     assert resp.status_code == 401
     # The envelope code is stable; the detail is the localized lazy string.
-    assert resp.json()["error"]["code"] == "authentication_failed"
+    assert resp.json()["code"] == "authentication_failed"  # /users/ is layered now
 
 
 # ---------------------------------------------------------------------------

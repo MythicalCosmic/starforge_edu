@@ -20,7 +20,7 @@ def test_unauthenticated_request_is_json_401(tenant_a, client_for):
     resp = client_for(tenant_a).get("/api/v1/users/me/")
     assert resp.status_code == 401
     assert resp["Content-Type"].startswith("application/json")
-    assert "error" in resp.json()
+    assert "code" in resp.json()  # /me is layered: {"success": false, "code": ...}
 
 
 def test_method_not_allowed_is_json(tenant_a, user_in, as_user):
