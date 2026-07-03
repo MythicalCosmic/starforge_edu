@@ -32,8 +32,12 @@ def _student_id(tenant) -> int:
 def _raise_fine(client, sid, *, amount="50000", reason="Repeated lateness"):
     return client.post(
         REQ,
-        {"kind": "fine", "title": "Lateness fine", "amount_uzs": amount,
-         "payload": {"student_id": sid, "reason": reason}},
+        {
+            "kind": "fine",
+            "title": "Lateness fine",
+            "amount_uzs": amount,
+            "payload": {"student_id": sid, "reason": reason},
+        },
         format="json",
     )
 
@@ -45,7 +49,7 @@ def test_approving_fine_issues_a_penalty_invoice(tenant_a, as_role):
 
     r = _raise_fine(teacher, sid, amount="75000")
     assert r.status_code == 201, r.content
-    body = r.json()
+    body = r.json()["data"]
     rid = body["id"]
     # Decision-only: the amount is folded into the payload, the request amount nulled
     # so the fine can never be paid OUT through disburse.
@@ -54,8 +58,8 @@ def test_approving_fine_issues_a_penalty_invoice(tenant_a, as_role):
 
     ap = director.post(f"{REQ}{rid}/approve/", {"note": "fair"}, format="json")
     assert ap.status_code == 200, ap.content
-    assert ap.json()["status"] == "approved"
-    invoice_id = ap.json()["payload"]["invoice_id"]
+    assert ap.json()["data"]["status"] == "approved"
+    invoice_id = ap.json()["data"]["payload"]["invoice_id"]
     assert invoice_id  # audit link stamped back
 
     with schema_context(tenant_a.schema_name):
@@ -82,12 +86,14 @@ def test_fine_ignores_a_standing_discount(tenant_a, as_role):
         from apps.finance.models import Discount
 
         Discount.objects.create(
-            student_id=sid, discount_type=Discount.DiscountType.MANUAL,
-            percent=Decimal("50"), is_active=True,
+            student_id=sid,
+            discount_type=Discount.DiscountType.MANUAL,
+            percent=Decimal("50"),
+            is_active=True,
         )
 
-    rid = _raise_fine(teacher, sid, amount="60000").json()["id"]
-    inv_id = director.post(f"{REQ}{rid}/approve/", {}, format="json").json()["payload"]["invoice_id"]
+    rid = _raise_fine(teacher, sid, amount="60000").json()["data"]["id"]
+    inv_id = director.post(f"{REQ}{rid}/approve/", {}, format="json").json()["data"]["payload"]["invoice_id"]
 
     with schema_context(tenant_a.schema_name):
         from apps.finance.models import Invoice, InvoiceLine
@@ -103,7 +109,7 @@ def test_fine_cannot_be_disbursed(tenant_a, as_role):
     teacher, _ = as_role(Role.TEACHER)
     director, _ = as_role(Role.DIRECTOR)  # director also holds approvals:disburse
     sid = _student_id(tenant_a)
-    rid = _raise_fine(teacher, sid).json()["id"]
+    rid = _raise_fine(teacher, sid).json()["data"]["id"]
     director.post(f"{REQ}{rid}/approve/", {}, format="json")
 
     with schema_context(tenant_a.schema_name):
@@ -113,7 +119,7 @@ def test_fine_cannot_be_disbursed(tenant_a, as_role):
 
     resp = director.post(f"{REQ}{rid}/disburse/", {"payment_method": pm.id}, format="json")
     assert resp.status_code == 422
-    assert resp.json()["error"]["code"] == "approval_no_amount"
+    assert resp.json()["code"] == "approval_no_amount"
 
 
 def test_fine_requires_valid_student(tenant_a, as_role):
@@ -124,17 +130,15 @@ def test_fine_requires_valid_student(tenant_a, as_role):
         format="json",
     )
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "fine_student_required"
+    assert r.json()["code"] == "fine_student_required"
 
 
 def test_fine_requires_an_amount(tenant_a, as_role):
     teacher, _ = as_role(Role.TEACHER)
     sid = _student_id(tenant_a)
-    r = teacher.post(
-        REQ, {"kind": "fine", "title": "x", "payload": {"student_id": sid}}, format="json"
-    )
+    r = teacher.post(REQ, {"kind": "fine", "title": "x", "payload": {"student_id": sid}}, format="json")
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "fine_amount_required"
+    assert r.json()["code"] == "fine_amount_required"
 
 
 def test_fine_amount_overflow_rejected_at_the_gate(tenant_a):
@@ -161,9 +165,7 @@ def test_fine_amount_nan_or_infinity_rejected_at_the_gate(tenant_a):
         sid = StudentProfileFactory.create().id
         for bad in (Decimal("NaN"), Decimal("Infinity"), Decimal("-Infinity")):
             with pytest.raises(ValidationException) as exc:
-                services.create_request(
-                    kind="fine", title="x", amount_uzs=bad, payload={"student_id": sid}
-                )
+                services.create_request(kind="fine", title="x", amount_uzs=bad, payload={"student_id": sid})
             assert exc.value.code in ("fine_amount_invalid", "fine_amount_range")
 
 
@@ -176,8 +178,10 @@ def test_fine_amount_that_rounds_up_to_overflow_rejected(tenant_a):
         sid = StudentProfileFactory.create().id
         with pytest.raises(ValidationException) as exc:
             services.create_request(
-                kind="fine", title="x",
-                amount_uzs=Decimal("9999999999999999.999"), payload={"student_id": sid},
+                kind="fine",
+                title="x",
+                amount_uzs=Decimal("9999999999999999.999"),
+                payload={"student_id": sid},
             )
         assert exc.value.code == "fine_amount_range"
 
@@ -187,11 +191,11 @@ def test_cannot_approve_own_fine(tenant_a, as_role):
     own fine — and the penalty invoice must not be issued."""
     director, _ = as_role(Role.DIRECTOR)
     sid = _student_id(tenant_a)
-    rid = _raise_fine(director, sid).json()["id"]
+    rid = _raise_fine(director, sid).json()["data"]["id"]
 
     resp = director.post(f"{REQ}{rid}/approve/", {}, format="json")
     assert resp.status_code == 403
-    assert resp.json()["error"]["code"] == "self_approval"
+    assert resp.json()["code"] == "self_approval"
 
     with schema_context(tenant_a.schema_name):
         from apps.approvals.models import ApprovalRequest
@@ -205,12 +209,12 @@ def test_rejecting_approved_fine_voids_the_invoice(tenant_a, as_role):
     teacher, _ = as_role(Role.TEACHER)
     director, _ = as_role(Role.DIRECTOR)
     sid = _student_id(tenant_a)
-    rid = _raise_fine(teacher, sid).json()["id"]
-    inv_id = director.post(f"{REQ}{rid}/approve/", {}, format="json").json()["payload"]["invoice_id"]
+    rid = _raise_fine(teacher, sid).json()["data"]["id"]
+    inv_id = director.post(f"{REQ}{rid}/approve/", {}, format="json").json()["data"]["payload"]["invoice_id"]
 
     rej = director.post(f"{REQ}{rid}/reject/", {"note": "overturned on appeal"}, format="json")
     assert rej.status_code == 200
-    assert rej.json()["status"] == "rejected"
+    assert rej.json()["data"]["status"] == "rejected"
     with schema_context(tenant_a.schema_name):
         from apps.finance.models import Invoice
 
@@ -223,8 +227,8 @@ def test_cannot_reject_a_fine_the_student_already_paid(tenant_a, as_role):
     teacher, _ = as_role(Role.TEACHER)
     director, _ = as_role(Role.DIRECTOR)
     sid = _student_id(tenant_a)
-    rid = _raise_fine(teacher, sid).json()["id"]
-    inv_id = director.post(f"{REQ}{rid}/approve/", {}, format="json").json()["payload"]["invoice_id"]
+    rid = _raise_fine(teacher, sid).json()["data"]["id"]
+    inv_id = director.post(f"{REQ}{rid}/approve/", {}, format="json").json()["data"]["payload"]["invoice_id"]
 
     with schema_context(tenant_a.schema_name):
         from apps.finance.models import PaymentAllocation
@@ -233,7 +237,7 @@ def test_cannot_reject_a_fine_the_student_already_paid(tenant_a, as_role):
 
     rej = director.post(f"{REQ}{rid}/reject/", {"note": "too late"}, format="json")
     assert rej.status_code == 409
-    assert rej.json()["error"]["code"] == "invoice_has_payments"
+    assert rej.json()["code"] == "invoice_has_payments"
     with schema_context(tenant_a.schema_name):
         from apps.approvals.models import ApprovalRequest
         from apps.finance.models import Invoice
@@ -249,7 +253,7 @@ def test_fine_student_deleted_before_approve(tenant_a, as_role):
     teacher, _ = as_role(Role.TEACHER)
     director, _ = as_role(Role.DIRECTOR)
     sid = _student_id(tenant_a)
-    rid = _raise_fine(teacher, sid).json()["id"]
+    rid = _raise_fine(teacher, sid).json()["data"]["id"]
 
     with schema_context(tenant_a.schema_name):
         from apps.students.models import StudentProfile
@@ -258,7 +262,7 @@ def test_fine_student_deleted_before_approve(tenant_a, as_role):
 
     resp = director.post(f"{REQ}{rid}/approve/", {}, format="json")
     assert resp.status_code == 422
-    assert resp.json()["error"]["code"] == "fine_student_missing"
+    assert resp.json()["code"] == "fine_student_missing"
     with schema_context(tenant_a.schema_name):
         from apps.approvals.models import ApprovalRequest
 
@@ -271,9 +275,7 @@ def _penalty(tenant, student_id, *, points=3):
 
     with schema_context(tenant.schema_name):
         student = StudentProfile.objects.get(pk=student_id)
-        return Penalty.objects.create(
-            student=student, points=points, reason="late", branch=student.branch
-        ).id
+        return Penalty.objects.create(student=student, points=points, reason="late", branch=student.branch).id
 
 
 def test_fine_can_cite_a_penalty_on_the_same_student(tenant_a, as_role):
@@ -284,12 +286,16 @@ def test_fine_can_cite_a_penalty_on_the_same_student(tenant_a, as_role):
     pid = _penalty(tenant_a, sid)
     r = teacher.post(
         REQ,
-        {"kind": "fine", "title": "x", "amount_uzs": "10000",
-         "payload": {"student_id": sid, "penalty_id": pid}},
+        {
+            "kind": "fine",
+            "title": "x",
+            "amount_uzs": "10000",
+            "payload": {"student_id": sid, "penalty_id": pid},
+        },
         format="json",
     )
     assert r.status_code == 201, r.content
-    assert r.json()["payload"]["penalty_id"] == pid  # the audit link is stored
+    assert r.json()["data"]["payload"]["penalty_id"] == pid  # the audit link is stored
 
 
 def test_fine_cannot_cite_another_students_penalty(tenant_a, as_role):
@@ -298,12 +304,16 @@ def test_fine_cannot_cite_another_students_penalty(tenant_a, as_role):
     other_pid = _penalty(tenant_a, _student_id(tenant_a))  # a penalty on a DIFFERENT student
     r = teacher.post(
         REQ,
-        {"kind": "fine", "title": "x", "amount_uzs": "10000",
-         "payload": {"student_id": sid, "penalty_id": other_pid}},
+        {
+            "kind": "fine",
+            "title": "x",
+            "amount_uzs": "10000",
+            "payload": {"student_id": sid, "penalty_id": other_pid},
+        },
         format="json",
     )
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "fine_penalty_invalid"
+    assert r.json()["code"] == "fine_penalty_invalid"
 
 
 def test_fine_with_a_nonexistent_penalty_is_rejected(tenant_a, as_role):
@@ -311,9 +321,13 @@ def test_fine_with_a_nonexistent_penalty_is_rejected(tenant_a, as_role):
     sid = _student_id(tenant_a)
     r = teacher.post(
         REQ,
-        {"kind": "fine", "title": "x", "amount_uzs": "10000",
-         "payload": {"student_id": sid, "penalty_id": 999999}},
+        {
+            "kind": "fine",
+            "title": "x",
+            "amount_uzs": "10000",
+            "payload": {"student_id": sid, "penalty_id": 999999},
+        },
         format="json",
     )
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "fine_penalty_invalid"
+    assert r.json()["code"] == "fine_penalty_invalid"

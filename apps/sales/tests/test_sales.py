@@ -52,7 +52,7 @@ def test_record_sale_writes_money_in_ledger(tenant_a, user_in, as_user):
     assert r.json()["data"]["amount_uzs"] == "150000.00"  # 2 x 75000
     assert r.json()["data"]["ledger_entry"] is not None
 
-    entries = s["cashier"].get(LEDGER).json()["results"]
+    entries = s["cashier"].get(LEDGER).json()["data"]
     assert any(
         e["entry_type"] == "book_sale" and e["direction"] == "in" and e["amount_uzs"] == "150000.00"
         for e in entries
@@ -71,7 +71,7 @@ def test_refund_writes_compensating_out_row(tenant_a, user_in, as_user):
     assert s["cashier"].post(f"{SALES}{sid}/refund/", {}, format="json").status_code == 422
 
     # the OUT row COMPENSATES the IN row (nets to zero); the original IN row is preserved
-    entries = s["cashier"].get(LEDGER).json()["results"]
+    entries = s["cashier"].get(LEDGER).json()["data"]
     ins = [e for e in entries if e["entry_type"] == "book_sale"]
     outs = [e for e in entries if e["entry_type"] == "book_sale_refund"]
     assert len(ins) == 1

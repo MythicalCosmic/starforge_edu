@@ -39,8 +39,8 @@ def test_request_approve_disburse_writes_ledger(tenant_a, as_role):
         format="json",
     )
     assert r.status_code == 201, r.content
-    rid = r.json()["id"]
-    assert r.json()["status"] == "pending"
+    rid = r.json()["data"]["id"]
+    assert r.json()["data"]["status"] == "pending"
 
     # cannot disburse before approval
     early = cashier.post(f"{REQ}{rid}/disburse/", {"payment_method": method_id}, format="json")
@@ -51,14 +51,14 @@ def test_request_approve_disburse_writes_ledger(tenant_a, as_role):
 
     ap = director.post(f"{REQ}{rid}/approve/", {"note": "ok"}, format="json")
     assert ap.status_code == 200
-    assert ap.json()["status"] == "approved"
+    assert ap.json()["data"]["status"] == "approved"
 
     dis = cashier.post(f"{REQ}{rid}/disburse/", {"payment_method": method_id}, format="json")
     assert dis.status_code == 200
-    assert dis.json()["status"] == "disbursed"
-    assert dis.json()["ledger_entry"] is not None
+    assert dis.json()["data"]["status"] == "disbursed"
+    assert dis.json()["data"]["ledger_entry"] is not None
 
-    entries = cashier.get(LEDGER).json()["results"]
+    entries = cashier.get(LEDGER).json()["data"]
     assert any(
         e["entry_type"] == "loan" and e["direction"] == "out" and e["amount_uzs"] == "500000.00"
         for e in entries
@@ -70,8 +70,31 @@ def test_requester_sees_own_handler_sees_all(tenant_a, as_role, user_in, as_user
     other = as_user(tenant_a, user_in(tenant_a, roles=[Role.TEACHER]))
     teacher.post(REQ, {"kind": "expense", "title": "Mine", "amount_uzs": "100.00"}, format="json")
 
-    assert teacher.get(REQ).json()["count"] == 1  # requester sees own
-    assert other.get(REQ).json()["count"] == 0  # another requester sees none of it
+    assert teacher.get(REQ).json()["pagination"]["total"] == 1  # requester sees own
+    assert other.get(REQ).json()["pagination"]["total"] == 0  # another requester sees none of it
+
+
+def test_create_title_with_nul_byte_is_clean_400_not_db_error(tenant_a, as_role):
+    """title must reject NUL like every other string field (psycopg cannot store
+    it) — a clean field-scoped 400, never a DB-bind error."""
+    teacher, _ = as_role(Role.TEACHER)
+    r = teacher.post(REQ, {"kind": "other", "title": "a\x00b", "amount_uzs": "10.00"}, format="json")
+    assert r.status_code == 400, r.content
+    assert r.json()["code"] == "validation_error"
+    assert "title" in r.json()["errors"]
+
+
+def test_create_accepts_long_description(tenant_a, as_role):
+    """description is an unbounded TextField (old serializer had no max_length);
+    a long body must still create (201), not 400."""
+    teacher, _ = as_role(Role.TEACHER)
+    r = teacher.post(
+        REQ,
+        {"kind": "other", "title": "x", "amount_uzs": "10.00", "description": "d" * 5000},
+        format="json",
+    )
+    assert r.status_code == 201, r.content
+    assert r.json()["data"]["description"] == "d" * 5000
 
 
 def test_decision_only_request_cannot_disburse(tenant_a, as_role):
@@ -80,10 +103,12 @@ def test_decision_only_request_cannot_disburse(tenant_a, as_role):
     cashier, _ = as_role(Role.CASHIER)
     method_id = _payment_method(tenant_a)
 
-    rid = teacher.post(REQ, {"kind": "other", "title": "Note only"}, format="json").json()["id"]
+    rid = teacher.post(REQ, {"kind": "other", "title": "Note only"}, format="json").json()["data"]["id"]
     director.post(f"{REQ}{rid}/approve/", {}, format="json")
     # an amount-less request approves fine but has nothing to disburse
-    assert cashier.post(f"{REQ}{rid}/disburse/", {"payment_method": method_id}, format="json").status_code == 422
+    assert (
+        cashier.post(f"{REQ}{rid}/disburse/", {"payment_method": method_id}, format="json").status_code == 422
+    )
 
 
 def test_student_cannot_request(tenant_a, as_role):
@@ -99,9 +124,14 @@ def test_approval_notifies_requester_and_disburser(tenant_a, as_role):
 
     rid = teacher.post(
         REQ,
-        {"kind": "loan", "title": "Advance", "amount_uzs": "100000.00", "payload": {"borrower_id": teacher_user.id}},
+        {
+            "kind": "loan",
+            "title": "Advance",
+            "amount_uzs": "100000.00",
+            "payload": {"borrower_id": teacher_user.id},
+        },
         format="json",
-    ).json()["id"]
+    ).json()["data"]["id"]
     director.post(f"{REQ}{rid}/approve/", {}, format="json")
 
     teacher_events = {n["event_type"] for n in teacher.get("/api/v1/notifications/").json()["results"]}

@@ -34,7 +34,7 @@ def _disbursed_loan(tenant, *, teacher, director, cashier, method_id, amount="10
     assert director.post(f"{REQ}{lid}/approve/", {"note": "ok"}, format="json").status_code == 200
     dis = cashier.post(f"{REQ}{lid}/disburse/", {"payment_method": method_id}, format="json")
     assert dis.status_code == 200, dis.content
-    assert dis.json()["status"] == "disbursed"
+    assert dis.json()["data"]["status"] == "disbursed"
     return lid
 
 
@@ -77,7 +77,7 @@ def test_loan_lifecycle_request_disburse_repay_settle(tenant_a, as_role):
 
     # two repayments recorded, each with its own money-IN ledger row
     assert len(cashier.get(f"{LOANS}{lid}/repayments/").json()["data"]) == 2
-    entries = cashier.get(LEDGER).json()["results"]
+    entries = cashier.get(LEDGER).json()["data"]
     assert sum(1 for e in entries if e["entry_type"] == "loan" and e["direction"] == "out") == 1
     ins = [e for e in entries if e["entry_type"] == "loan_repayment" and e["direction"] == "in"]
     assert {e["amount_uzs"] for e in ins} == {"400000.00", "600000.00"}
@@ -125,7 +125,7 @@ def test_loan_request_validates_amount_and_borrower(tenant_a, as_role):
         REQ, {"kind": "loan", "title": "x", "payload": {"borrower_id": teacher_user.id}}, format="json"
     )
     assert no_amount.status_code == 400
-    assert no_amount.json()["error"]["code"] == "loan_amount_required"
+    assert no_amount.json()["code"] == "loan_amount_required"
     # bad borrower → loan_borrower_required
     bad_borrower = teacher.post(
         REQ,
@@ -133,7 +133,7 @@ def test_loan_request_validates_amount_and_borrower(tenant_a, as_role):
         format="json",
     )
     assert bad_borrower.status_code == 400
-    assert bad_borrower.json()["error"]["code"] == "loan_borrower_required"
+    assert bad_borrower.json()["code"] == "loan_borrower_required"
 
 
 def test_requester_cannot_approve_own_loan(tenant_a, as_role):
@@ -144,7 +144,7 @@ def test_requester_cannot_approve_own_loan(tenant_a, as_role):
     ]["id"]
     r = director.post(f"{REQ}{lid}/approve/", {}, format="json")
     assert r.status_code == 403
-    assert r.json()["error"]["code"] == "self_approval"  # /approvals/ is still DRF
+    assert r.json()["code"] == "self_approval"  # /approvals/ is still DRF
 
 
 def test_borrower_sees_only_own_loans(tenant_a, as_role, user_in, as_user):
@@ -198,7 +198,7 @@ def test_manager_raises_loan_for_another_staff_borrower(tenant_a, as_role, user_
         f"{LOANS}{lid}/repay/", {"amount_uzs": "1000.00", "payment_method": method_id}, format="json"
     )
 
-    entries = cashier.get(LEDGER).json()["results"]
+    entries = cashier.get(LEDGER).json()["data"]
     out = next(e for e in entries if e["entry_type"] == "loan" and e["direction"] == "out")
     inn = next(e for e in entries if e["entry_type"] == "loan_repayment" and e["direction"] == "in")
     assert out["party_label"] == expected_label  # the borrower, not the manager who keyed it
@@ -220,12 +220,12 @@ def test_borrower_cannot_approve_or_disburse_own_loan(tenant_a, as_role, user_in
     # the borrower cannot approve their own loan
     bad_approve = borrower.post(f"{REQ}{lid}/approve/", {}, format="json")
     assert bad_approve.status_code == 403
-    assert bad_approve.json()["error"]["code"] == "loan_self_dealing"
+    assert bad_approve.json()["code"] == "loan_self_dealing"
     # someone else approves; the borrower still cannot disburse to themselves
     assert approver.post(f"{REQ}{lid}/approve/", {}, format="json").status_code == 200
     bad_disburse = borrower.post(f"{REQ}{lid}/disburse/", {"payment_method": method_id}, format="json")
     assert bad_disburse.status_code == 403
-    assert bad_disburse.json()["error"]["code"] == "loan_self_dealing"
+    assert bad_disburse.json()["code"] == "loan_self_dealing"
 
 
 def test_loan_borrower_must_be_staff(tenant_a, as_role, user_in):
@@ -238,7 +238,7 @@ def test_loan_borrower_must_be_staff(tenant_a, as_role, user_in):
         format="json",
     )
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "loan_borrower_required"
+    assert r.json()["code"] == "loan_borrower_required"
 
 
 def test_repay_with_invalid_payment_method(tenant_a, as_role):

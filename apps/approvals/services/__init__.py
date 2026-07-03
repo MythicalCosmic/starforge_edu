@@ -120,9 +120,7 @@ def _validate_discount_payload(payload: dict) -> dict:
         # NaN/Infinity construct fine but are unordered: the range comparison below
         # would raise InvalidOperation (a 500). Exclude them first (payload-reachable).
         if not pv.is_finite():
-            raise ValidationException(
-                _("percent must be a finite number."), code="discount_percent_invalid"
-            )
+            raise ValidationException(_("percent must be a finite number."), code="discount_percent_invalid")
         if not (Decimal("0") < pv <= Decimal("100")):
             raise ValidationException(_("percent must be between 0 and 100."), code="discount_percent_range")
         # Quantize to the Discount column's scale (NUMERIC(5,2)) at the gate, so the
@@ -283,9 +281,7 @@ def _validate_fine_payload(payload: dict) -> dict:
 
     raw_amount = payload.get("amount_uzs")
     if raw_amount is None:
-        raise ValidationException(
-            _("A fine request needs an amount_uzs."), code="fine_amount_required"
-        )
+        raise ValidationException(_("A fine request needs an amount_uzs."), code="fine_amount_required")
     try:
         amount = Decimal(str(raw_amount))
     except (InvalidOperation, ValueError):
@@ -415,14 +411,10 @@ def _validate_absence_deduction_payload(payload: dict) -> dict:
             _("fixed_amount_uzs must be positive."), code="absence_deduction_amount_range"
         )
     if fv >= Decimal("1e16"):
-        raise ValidationException(
-            _("fixed_amount_uzs is too large."), code="absence_deduction_amount_range"
-        )
+        raise ValidationException(_("fixed_amount_uzs is too large."), code="absence_deduction_amount_range")
     fv = fv.quantize(_TWO_PLACES)
     if fv >= Decimal("1e16"):
-        raise ValidationException(
-            _("fixed_amount_uzs is too large."), code="absence_deduction_amount_range"
-        )
+        raise ValidationException(_("fixed_amount_uzs is too large."), code="absence_deduction_amount_range")
     return {"student_id": student_id, "attendance_id": attendance_id, "fixed_amount_uzs": str(fv)}
 
 
@@ -523,9 +515,7 @@ def _apply_fine_effect(req: ApprovalRequest, actor) -> None:
         return
     student_id = p.get("student_id")
     if not student_id or not StudentProfile.objects.filter(pk=student_id).exists():
-        raise UnprocessableEntity(
-            _("The fine's student no longer exists."), code="fine_student_missing"
-        )
+        raise UnprocessableEntity(_("The fine's student no longer exists."), code="fine_student_missing")
     invoice = issue_invoice(
         student_id=student_id,
         lines=[

@@ -48,9 +48,9 @@ def test_create_po_then_approve_disburse_writes_ledger(tenant_a, as_role):
     assert director.post(f"{REQ}{rid}/approve/", {"note": "ok"}, format="json").status_code == 200
     dis = cashier.post(f"{REQ}{rid}/disburse/", {"payment_method": method_id}, format="json")
     assert dis.status_code == 200, dis.content
-    assert dis.json()["status"] == "disbursed"
+    assert dis.json()["data"]["status"] == "disbursed"
 
-    entries = cashier.get(LEDGER).json()["results"]
+    entries = cashier.get(LEDGER).json()["data"]
     paid = next(e for e in entries if e["entry_type"] == "procurement" and e["direction"] == "out")
     assert paid["amount_uzs"] == "6000.00"
     assert paid["party_label"] == "Acme Co"  # the supplier is named, not the requester
@@ -151,7 +151,7 @@ def test_disburse_cannot_override_supplier_or_direction(tenant_a, as_role):
         {"payment_method": method_id, "party_label": "Somebody Else", "direction": "in"},
         format="json",
     )
-    entries = cashier.get(LEDGER).json()["results"]
+    entries = cashier.get(LEDGER).json()["data"]
     row = next(e for e in entries if e["entry_type"] == "procurement")
     assert row["party_label"] == "Acme Co"  # the approved supplier wins
     assert row["direction"] == "out"  # money OUT is forced

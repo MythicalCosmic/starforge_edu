@@ -63,8 +63,8 @@ def test_cash_reward_routes_through_a1_to_the_ledger(tenant_a, as_role):
     assert director.post(f"{APPROVALS}{req_id}/approve/", {}, format="json").status_code == 200
     dis = cashier.post(f"{APPROVALS}{req_id}/disburse/", {"payment_method": method_id}, format="json")
     assert dis.status_code == 200
-    assert dis.json()["status"] == "disbursed"
-    entries = cashier.get("/api/v1/approvals/ledger/").json()["results"]
+    assert dis.json()["data"]["status"] == "disbursed"
+    entries = cashier.get("/api/v1/approvals/ledger/").json()["data"]
     reward_entry = next(e for e in entries if e["entry_type"] == "reward")
     assert reward_entry["amount_uzs"] == "500000.00"
     # the ledger payee is the RECIPIENT (not the HOD who granted/requested it)

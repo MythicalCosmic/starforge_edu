@@ -41,15 +41,15 @@ def test_approving_discount_request_materializes_discount(tenant_a, as_role):
         format="json",
     )
     assert r.status_code == 201, r.content
-    body = r.json()
+    body = r.json()["data"]
     rid = body["id"]
     assert body["amount_uzs"] is None  # decision-only — amount dropped
     assert body["payload"]["percent"] == "20.00"  # normalized to NUMERIC(5,2) scale
 
     ap = director.post(f"{REQ}{rid}/approve/", {"note": "earned it"}, format="json")
     assert ap.status_code == 200, ap.content
-    assert ap.json()["status"] == "approved"
-    discount_id = ap.json()["payload"]["discount_id"]
+    assert ap.json()["data"]["status"] == "approved"
+    discount_id = ap.json()["data"]["payload"]["discount_id"]
     assert discount_id  # audit link stamped back
 
     with schema_context(tenant_a.schema_name):
@@ -77,7 +77,7 @@ def test_discount_request_fixed_amount(tenant_a, as_role):
             "payload": {"student_id": sid, "fixed_amount_uzs": "150000"},
         },
         format="json",
-    ).json()["id"]
+    ).json()["data"]["id"]
     director.post(f"{REQ}{rid}/approve/", {}, format="json")
 
     with schema_context(tenant_a.schema_name):
@@ -97,7 +97,7 @@ def test_discount_request_requires_valid_student(tenant_a, as_role):
         format="json",
     )
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "discount_student_required"
+    assert r.json()["code"] == "discount_student_required"
 
 
 def test_discount_request_amount_is_xor(tenant_a, as_role):
@@ -114,13 +114,13 @@ def test_discount_request_amount_is_xor(tenant_a, as_role):
         format="json",
     )
     assert both.status_code == 400
-    assert both.json()["error"]["code"] == "discount_amount_xor"
+    assert both.json()["code"] == "discount_amount_xor"
     # neither set -> also rejected
     neither = teacher.post(
         REQ, {"kind": "discount", "title": "x", "payload": {"student_id": sid}}, format="json"
     )
     assert neither.status_code == 400
-    assert neither.json()["error"]["code"] == "discount_amount_xor"
+    assert neither.json()["code"] == "discount_amount_xor"
 
 
 def test_discount_percent_out_of_range(tenant_a, as_role):
@@ -132,7 +132,7 @@ def test_discount_percent_out_of_range(tenant_a, as_role):
         format="json",
     )
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "discount_percent_range"
+    assert r.json()["code"] == "discount_percent_range"
 
 
 def test_discount_type_invalid_rejected(tenant_a, as_role):
@@ -148,7 +148,7 @@ def test_discount_type_invalid_rejected(tenant_a, as_role):
         format="json",
     )
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "discount_type_invalid"
+    assert r.json()["code"] == "discount_type_invalid"
 
 
 def test_fixed_amount_overflow_rejected(tenant_a, as_role):
@@ -165,7 +165,7 @@ def test_fixed_amount_overflow_rejected(tenant_a, as_role):
         format="json",
     )
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "discount_fixed_range"
+    assert r.json()["code"] == "discount_fixed_range"
 
 
 def test_discount_nan_amounts_rejected_not_500(tenant_a, as_role):
@@ -173,14 +173,17 @@ def test_discount_nan_amounts_rejected_not_500(tenant_a, as_role):
     comparison would raise InvalidOperation (a 500). It must be a clean 400."""
     teacher, _ = as_role(Role.TEACHER)
     sid = _student_id(tenant_a)
-    for field, code in (("percent", "discount_percent_invalid"), ("fixed_amount_uzs", "discount_fixed_invalid")):
+    for field, code in (
+        ("percent", "discount_percent_invalid"),
+        ("fixed_amount_uzs", "discount_fixed_invalid"),
+    ):
         r = teacher.post(
             REQ,
             {"kind": "discount", "title": "x", "payload": {"student_id": sid, field: "NaN"}},
             format="json",
         )
         assert r.status_code == 400, (field, r.content)
-        assert r.json()["error"]["code"] == code
+        assert r.json()["code"] == code
 
 
 def test_discount_fixed_amount_that_rounds_up_to_overflow_rejected(tenant_a, as_role):
@@ -190,12 +193,15 @@ def test_discount_fixed_amount_that_rounds_up_to_overflow_rejected(tenant_a, as_
     sid = _student_id(tenant_a)
     r = teacher.post(
         REQ,
-        {"kind": "discount", "title": "x",
-         "payload": {"student_id": sid, "fixed_amount_uzs": "9999999999999999.999"}},
+        {
+            "kind": "discount",
+            "title": "x",
+            "payload": {"student_id": sid, "fixed_amount_uzs": "9999999999999999.999"},
+        },
         format="json",
     )
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "discount_fixed_range"
+    assert r.json()["code"] == "discount_fixed_range"
 
 
 def test_percent_quantized_to_two_places(tenant_a, as_role):
@@ -208,7 +214,7 @@ def test_percent_quantized_to_two_places(tenant_a, as_role):
         REQ,
         {"kind": "discount", "title": "x", "payload": {"student_id": sid, "percent": "33.333"}},
         format="json",
-    ).json()
+    ).json()["data"]
     assert body["payload"]["percent"] == "33.33"  # normalized at the gate
 
     director.post(f"{REQ}{body['id']}/approve/", {}, format="json")
@@ -227,11 +233,11 @@ def test_cannot_approve_own_request(tenant_a, as_role):
         REQ,
         {"kind": "discount", "title": "self", "payload": {"student_id": sid, "percent": "10"}},
         format="json",
-    ).json()["id"]
+    ).json()["data"]["id"]
 
     resp = director.post(f"{REQ}{rid}/approve/", {}, format="json")
     assert resp.status_code == 403
-    assert resp.json()["error"]["code"] == "self_approval"
+    assert resp.json()["code"] == "self_approval"
 
     with schema_context(tenant_a.schema_name):
         from apps.approvals.models import ApprovalRequest
@@ -251,7 +257,7 @@ def test_rejecting_approved_discount_deactivates_it(tenant_a, as_role):
         REQ,
         {"kind": "discount", "title": "x", "payload": {"student_id": sid, "percent": "15"}},
         format="json",
-    ).json()["id"]
+    ).json()["data"]["id"]
     director.post(f"{REQ}{rid}/approve/", {}, format="json")
     with schema_context(tenant_a.schema_name):
         from apps.finance.models import Discount
@@ -260,7 +266,7 @@ def test_rejecting_approved_discount_deactivates_it(tenant_a, as_role):
 
     rej = director.post(f"{REQ}{rid}/reject/", {"note": "reconsidered"}, format="json")
     assert rej.status_code == 200
-    assert rej.json()["status"] == "rejected"
+    assert rej.json()["data"]["status"] == "rejected"
     with schema_context(tenant_a.schema_name):
         from apps.finance.models import Discount
 
@@ -277,7 +283,7 @@ def test_discount_student_deleted_before_approve(tenant_a, as_role):
         REQ,
         {"kind": "discount", "title": "x", "payload": {"student_id": sid, "percent": "15"}},
         format="json",
-    ).json()["id"]
+    ).json()["data"]["id"]
 
     with schema_context(tenant_a.schema_name):
         from apps.students.models import StudentProfile
@@ -286,7 +292,7 @@ def test_discount_student_deleted_before_approve(tenant_a, as_role):
 
     resp = director.post(f"{REQ}{rid}/approve/", {}, format="json")
     assert resp.status_code == 422
-    assert resp.json()["error"]["code"] == "discount_student_missing"
+    assert resp.json()["code"] == "discount_student_missing"
     with schema_context(tenant_a.schema_name):
         from apps.approvals.models import ApprovalRequest
         from apps.finance.models import Discount

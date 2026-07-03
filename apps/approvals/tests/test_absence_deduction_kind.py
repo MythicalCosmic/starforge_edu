@@ -91,7 +91,7 @@ def test_request_rejected_when_center_has_not_opted_in(tenant_a, as_role):
     aid = _absence(tenant_a, student_id=sid)
     r = _request(teacher, student_id=sid, attendance_id=aid)
     assert r.status_code == 400, r.content
-    assert r.json()["error"]["code"] == "absence_deduction_disabled"
+    assert r.json()["code"] == "absence_deduction_disabled"
 
 
 def test_excused_only_policy_rejects_a_plain_absence(tenant_a, as_role):
@@ -103,7 +103,7 @@ def test_excused_only_policy_rejects_a_plain_absence(tenant_a, as_role):
     aid = _absence(tenant_a, student_id=sid, status=AttendanceRecord.Status.ABSENT)
     r = _request(teacher, student_id=sid, attendance_id=aid)
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "absence_deduction_requires_excuse"
+    assert r.json()["code"] == "absence_deduction_requires_excuse"
 
 
 def test_plain_absence_allowed_when_policy_does_not_require_excuse(tenant_a, as_role):
@@ -113,7 +113,7 @@ def test_plain_absence_allowed_when_policy_does_not_require_excuse(tenant_a, as_
     aid = _absence(tenant_a, student_id=sid, status=AttendanceRecord.Status.ABSENT)
     r = _request(teacher, student_id=sid, attendance_id=aid)
     assert r.status_code == 201, r.content
-    assert r.json()["amount_uzs"] is None  # decision-only — never disburses
+    assert r.json()["data"]["amount_uzs"] is None  # decision-only — never disburses
 
 
 def test_a_present_record_is_not_an_absence(tenant_a, as_role):
@@ -123,7 +123,7 @@ def test_a_present_record_is_not_an_absence(tenant_a, as_role):
     aid = _absence(tenant_a, student_id=sid, status=AttendanceRecord.Status.PRESENT)
     r = _request(teacher, student_id=sid, attendance_id=aid)
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "absence_deduction_attendance_invalid"
+    assert r.json()["code"] == "absence_deduction_attendance_invalid"
 
 
 def test_attendance_must_belong_to_the_named_student(tenant_a, as_role):
@@ -135,7 +135,7 @@ def test_attendance_must_belong_to_the_named_student(tenant_a, as_role):
     aid_other = _absence(tenant_a, student_id=other_sid)
     r = _request(teacher, student_id=sid, attendance_id=aid_other)
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "absence_deduction_attendance_invalid"
+    assert r.json()["code"] == "absence_deduction_attendance_invalid"
 
 
 def test_approving_materializes_a_credit_discount(tenant_a, as_role):
@@ -145,10 +145,10 @@ def test_approving_materializes_a_credit_discount(tenant_a, as_role):
     sid = _student_id(tenant_a)
     aid = _absence(tenant_a, student_id=sid)
 
-    rid = _request(teacher, student_id=sid, attendance_id=aid, amount="45000").json()["id"]
+    rid = _request(teacher, student_id=sid, attendance_id=aid, amount="45000").json()["data"]["id"]
     ap = director.post(f"{REQ}{rid}/approve/", {"note": "missed a paid lesson"}, format="json")
     assert ap.status_code == 200, ap.content
-    discount_id = ap.json()["payload"]["discount_id"]
+    discount_id = ap.json()["data"]["payload"]["discount_id"]
     assert discount_id
 
     with schema_context(tenant_a.schema_name):
@@ -173,7 +173,7 @@ def test_credit_applies_to_one_invoice_then_retires(tenant_a, as_role):
     director, _ = as_role(Role.DIRECTOR)
     sid = _student_id(tenant_a)
     aid = _absence(tenant_a, student_id=sid)
-    rid = _request(teacher, student_id=sid, attendance_id=aid, amount="45000").json()["id"]
+    rid = _request(teacher, student_id=sid, attendance_id=aid, amount="45000").json()["data"]["id"]
     director.post(f"{REQ}{rid}/approve/", {}, format="json")
 
     with schema_context(tenant_a.schema_name):
@@ -204,7 +204,7 @@ def test_non_dict_payload_is_a_clean_400_not_a_500(tenant_a, as_role):
         format="json",
     )
     assert r.status_code == 400, r.content
-    assert r.json()["error"]["code"] == "payload_invalid"
+    assert r.json()["code"] == "payload_invalid"
 
 
 def test_an_absence_cannot_be_deducted_twice(tenant_a, as_role):
@@ -215,7 +215,7 @@ def test_an_absence_cannot_be_deducted_twice(tenant_a, as_role):
     assert _request(teacher, student_id=sid, attendance_id=aid).status_code == 201
     second = _request(teacher, student_id=sid, attendance_id=aid)
     assert second.status_code == 400
-    assert second.json()["error"]["code"] == "absence_deduction_duplicate"
+    assert second.json()["code"] == "absence_deduction_duplicate"
 
 
 def test_rejecting_deactivates_the_credit_and_frees_the_absence(tenant_a, as_role):
@@ -226,7 +226,7 @@ def test_rejecting_deactivates_the_credit_and_frees_the_absence(tenant_a, as_rol
     director, _ = as_role(Role.DIRECTOR)
     sid = _student_id(tenant_a)
     aid = _absence(tenant_a, student_id=sid)
-    rid = _request(teacher, student_id=sid, attendance_id=aid).json()["id"]
+    rid = _request(teacher, student_id=sid, attendance_id=aid).json()["data"]["id"]
     director.post(f"{REQ}{rid}/approve/", {}, format="json")
     with schema_context(tenant_a.schema_name):
         from apps.finance.models import Discount
@@ -252,4 +252,4 @@ def test_non_finite_amount_is_a_clean_400_not_a_500(tenant_a, as_role):
     aid = _absence(tenant_a, student_id=sid)
     r = _request(teacher, student_id=sid, attendance_id=aid, amount="NaN")
     assert r.status_code == 400, r.content
-    assert r.json()["error"]["code"] == "absence_deduction_amount_invalid"
+    assert r.json()["code"] == "absence_deduction_amount_invalid"
