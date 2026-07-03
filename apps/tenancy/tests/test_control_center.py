@@ -251,7 +251,7 @@ def test_subscription_list_and_patch_reactivates(
 
     listed = staff_client.get("/api/v1/platform/subscriptions/")
     assert listed.status_code == 200
-    rows = listed.json()["results"]
+    rows = listed.json()["data"]  # billing is now layered ({success, data, pagination})
     assert sub.pk in {r["id"] for r in rows}
 
     # Suspended → paywall 402.

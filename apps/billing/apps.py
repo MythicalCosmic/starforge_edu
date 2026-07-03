@@ -12,4 +12,15 @@ class BillingConfig(AppConfig):
     verbose_name = "Billing & Paywall"
 
     def ready(self) -> None:
+        from apps.billing.interfaces.repositories import IPlanRepository, ISubscriptionRepository
+        from apps.billing.interfaces.services import IBillingService
+        from apps.billing.repositories.plan_repository import PlanRepository
+        from apps.billing.repositories.subscription_repository import SubscriptionRepository
+        from apps.billing.services.v1.billing_service import BillingService
+        from core.container import container
+
         from . import receivers  # noqa: F401
+
+        container.register(IPlanRepository, PlanRepository)
+        container.register(ISubscriptionRepository, SubscriptionRepository)
+        container.register(IBillingService, BillingService)

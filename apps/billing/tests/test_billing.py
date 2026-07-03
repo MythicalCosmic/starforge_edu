@@ -318,6 +318,15 @@ def _platform_admin(public_tenant):
     return user
 
 
+def _authed(api_client, user):
+    # The layered billing views authenticate with the custom session authenticator
+    # (not DRF force_authenticate) — mint a real public-schema Bearer session.
+    from core.session_auth import create_session
+
+    api_client.credentials(HTTP_AUTHORIZATION=f"Bearer {create_session(user).key}")
+    return api_client
+
+
 def test_plans_endpoint_requires_admin(public_tenant, api_client):
     assert api_client.get("/api/v1/platform/billing/plans/").status_code == 401
 
@@ -325,17 +334,17 @@ def test_plans_endpoint_requires_admin(public_tenant, api_client):
 def test_plans_endpoint_lists_for_admin(public_tenant, api_client):
     _ensure_plan()
     admin = _platform_admin(public_tenant)
-    api_client.force_authenticate(user=admin)
+    _authed(api_client, admin)
     resp = api_client.get("/api/v1/platform/billing/plans/")
     assert resp.status_code == 200
     body = resp.json()
-    assert set(body) == {"count", "next", "previous", "results"}
+    assert set(body) == {"success", "data", "pagination"}  # layered envelope
 
 
 def test_subscription_patch_suspend_then_reactivate(public_tenant, api_client, tenant_a):
     _set_subscription(tenant_a, status=Subscription.Status.ACTIVE)
     admin = _platform_admin(public_tenant)
-    api_client.force_authenticate(user=admin)
+    _authed(api_client, admin)
     url = f"/api/v1/platform/billing/subscriptions/{tenant_a.pk}/"
     resp = api_client.patch(url, {"status": "suspended"}, format="json")
     assert resp.status_code == 200
@@ -349,7 +358,7 @@ def test_subscription_patch_suspend_then_reactivate(public_tenant, api_client, t
 def test_subscription_patch_invalid_status(public_tenant, api_client, tenant_a):
     _set_subscription(tenant_a, status=Subscription.Status.ACTIVE)
     admin = _platform_admin(public_tenant)
-    api_client.force_authenticate(user=admin)
+    _authed(api_client, admin)
     url = f"/api/v1/platform/billing/subscriptions/{tenant_a.pk}/"
     resp = api_client.patch(url, {"status": "trialing"}, format="json")
     assert resp.status_code == 400
@@ -361,10 +370,10 @@ def test_usage_endpoint(public_tenant, api_client, tenant_a):
 
     UsageSnapshotFactory(center=tenant_a, students_count=42)
     admin = _platform_admin(public_tenant)
-    api_client.force_authenticate(user=admin)
+    _authed(api_client, admin)
     resp = api_client.get(f"/api/v1/platform/billing/usage/?center={tenant_a.pk}")
     assert resp.status_code == 200
-    assert any(row["students_count"] == 42 for row in resp.json())
+    assert any(row["students_count"] == 42 for row in resp.json()["data"])
 
 
 def test_checkout_mock_extends_and_activates(public_tenant, api_client, tenant_a, settings):
@@ -374,7 +383,7 @@ def test_checkout_mock_extends_and_activates(public_tenant, api_client, tenant_a
     )
     old_end = sub.current_period_end
     admin = _platform_admin(public_tenant)
-    api_client.force_authenticate(user=admin)
+    _authed(api_client, admin)
     resp = api_client.post(
         "/api/v1/platform/billing/checkout/",
         {"center": tenant_a.pk, "provider": "payme"},
@@ -389,3 +398,32 @@ def test_checkout_mock_extends_and_activates(public_tenant, api_client, tenant_a
 def test_checkout_requires_admin(public_tenant, api_client, tenant_a):
     resp = api_client.post("/api/v1/platform/billing/checkout/", {"center": tenant_a.pk}, format="json")
     assert resp.status_code == 401
+
+
+def test_subscription_patch_non_string_status_is_400_not_500(public_tenant, api_client, tenant_a):
+    """A list/dict `status` must be a clean 400, not a 500 (unhashable frozenset test)."""
+    _set_subscription(tenant_a, status=Subscription.Status.ACTIVE)
+    _authed(api_client, _platform_admin(public_tenant))
+    url = f"/api/v1/platform/billing/subscriptions/{tenant_a.pk}/"
+    assert api_client.patch(url, {"status": ["active"]}, format="json").status_code == 400
+
+
+def test_checkout_non_string_provider_is_400_not_500(public_tenant, api_client, tenant_a):
+    """A list/dict `provider` must be a clean 400, not a 500 (unhashable frozenset test)."""
+    _set_subscription(tenant_a, status=Subscription.Status.ACTIVE)
+    _authed(api_client, _platform_admin(public_tenant))
+    resp = api_client.post(
+        "/api/v1/platform/billing/checkout/",
+        {"center": tenant_a.pk, "provider": ["payme"]},
+        format="json",
+    )
+    assert resp.status_code == 400
+
+
+def test_subscription_patch_empty_body_on_missing_center_is_400(public_tenant, api_client, tenant_a):
+    """Body validation runs BEFORE the 404 (old serializer-first order): an empty
+    PATCH to a center with no subscription is a 400, not a 404."""
+    Subscription.objects.filter(center=tenant_a).delete()
+    _authed(api_client, _platform_admin(public_tenant))
+    url = f"/api/v1/platform/billing/subscriptions/{tenant_a.pk}/"
+    assert api_client.patch(url, {}, format="json").status_code == 400
