@@ -68,7 +68,7 @@ def _make_branch(tenant, profiles):
 
 
 def _row(client, branch_id):
-    return next(r for r in client.get(BRANCHES).json()["results"] if r["branch"] == branch_id)
+    return next(r for r in client.get(BRANCHES).json()["data"]["results"] if r["branch"] == branch_id)
 
 
 def test_branch_ranking_orders_by_performance(tenant_a, as_role):
@@ -76,7 +76,7 @@ def test_branch_ranking_orders_by_performance(tenant_a, as_role):
     good = _make_branch(tenant_a, [{"present": 5, "grade": 90}] * 3)
     poor = _make_branch(tenant_a, [{"present": 1, "absent": 4, "grade": 30, "overdue": True}] * 3)
 
-    rows = {r["branch"]: r for r in director.get(BRANCHES).json()["results"]}
+    rows = {r["branch"]: r for r in director.get(BRANCHES).json()["data"]["results"]}
     # good: 1.0*50 + 0.9*30 + (1-0)*20 = 97.0   poor: 0.2*50 + 0.3*30 + (1-1)*20 = 19.0
     assert rows[good.id]["score"] == 97.0
     assert rows[poor.id]["score"] == 19.0
@@ -143,7 +143,7 @@ def test_branch_ranking_scoped_to_membership(tenant_a, as_role, user_in, as_user
     poor = _make_branch(tenant_a, [{"present": 1, "absent": 4, "grade": 30}] * 3)
     hod = as_user(tenant_a, user_in(tenant_a, roles=[Role.HEAD_OF_DEPT], branch=good))
 
-    ids = {r["branch"] for r in hod.get(BRANCHES).json()["results"]}
+    ids = {r["branch"] for r in hod.get(BRANCHES).json()["data"]["results"]}
     assert good.id in ids
     assert poor.id not in ids  # a branch-scoped manager sees only their own branch
 
@@ -167,7 +167,7 @@ def test_finance_signal_is_gated_out_of_overdue_and_at_risk(tenant_a, as_role, u
 
 def test_branch_ranking_method_is_transparent(tenant_a, as_role):
     director, _ = as_role(Role.DIRECTOR)
-    method = director.get(BRANCHES).json()["method"]
+    method = director.get(BRANCHES).json()["data"]["method"]
     assert method["metrics"]["attendance_rate"]["weight"] == 50
     assert method["score_range"] == "0-100"
     assert method["min_cell_size"] == 3

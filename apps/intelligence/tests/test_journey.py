@@ -59,7 +59,7 @@ def test_journey_merges_all_event_types_newest_first(tenant_a, as_role):
     director, _ = as_role(Role.DIRECTOR)  # finance-visible -> sees invoices too
     student = _student_with_events(tenant_a, _branch(tenant_a))
 
-    body = director.get(_journey_url(student.id)).json()
+    body = director.get(_journey_url(student.id)).json()["data"]
     assert body["student"] == student.id
     types = {e["type"] for e in body["events"]}
     assert types == {"enrollment", "grade", "achievement", "invoice"}
@@ -71,7 +71,7 @@ def test_journey_invoices_are_finance_gated(tenant_a, as_role):
     teacher, _ = as_role(Role.TEACHER)  # staff, but no finance:read and not the family
     student = _student_with_events(tenant_a, _branch(tenant_a))
 
-    types = {e["type"] for e in teacher.get(_journey_url(student.id)).json()["events"]}
+    types = {e["type"] for e in teacher.get(_journey_url(student.id)).json()["data"]["events"]}
     assert "grade" in types  # the academic story is visible
     assert "invoice" not in types  # ...but not the family's billing
 
@@ -82,7 +82,7 @@ def test_student_sees_own_journey_including_invoices(tenant_a, user_in, as_user)
     student = _student_with_events(tenant_a, branch, user=student_user)
     client = as_user(tenant_a, student_user)
 
-    types = {e["type"] for e in client.get(_journey_url(student.id)).json()["events"]}
+    types = {e["type"] for e in client.get(_journey_url(student.id)).json()["data"]["events"]}
     assert "invoice" in types  # a student sees their OWN bills
 
 
@@ -124,7 +124,7 @@ def test_guardian_sees_own_childs_journey_including_invoices(tenant_a, user_in, 
         GuardianFactory.create(parent=parent_profile, student=student, is_primary=True)
     client = as_user(tenant_a, parent_user)
 
-    types = {e["type"] for e in client.get(_journey_url(student.id)).json()["events"]}
+    types = {e["type"] for e in client.get(_journey_url(student.id)).json()["data"]["events"]}
     assert "invoice" in types  # a guardian sees their own child's bills
     assert client.get(_journey_url(other.id)).status_code == 404  # but not another family's
 
@@ -144,7 +144,7 @@ def test_unpublished_grades_are_excluded(tenant_a, as_role):
         draft = ExamFactory.create(is_published=False, cohort=cohort)
         ExamResultFactory.create(exam=draft, student=student, score=Decimal("40"))
 
-    events = director.get(_journey_url(student.id)).json()["events"]
+    events = director.get(_journey_url(student.id)).json()["data"]["events"]
     grades = [e for e in events if e["type"] == "grade"]
     assert len(grades) == 1  # only the PUBLISHED grade — a draft mark never leaks
 
@@ -156,7 +156,7 @@ def test_empty_student_returns_empty_feed(tenant_a, as_role):
     branch = _branch(tenant_a)
     with schema_context(tenant_a.schema_name):
         student = StudentProfileFactory.create(branch=branch)
-    body = director.get(_journey_url(student.id)).json()
+    body = director.get(_journey_url(student.id)).json()["data"]
     assert body["student"] == student.id
     assert body["events"] == []
 
@@ -170,5 +170,5 @@ def test_journey_orders_by_timestamp_not_source_order(tenant_a, as_role):
     # timestamp to be the newest and assert the selector sorts by the real time
     with schema_context(tenant_a.schema_name):
         EnrollmentEvent.objects.filter(student=student).update(created_at=timezone.now() + timedelta(days=1))
-    events = director.get(_journey_url(student.id)).json()["events"]
+    events = director.get(_journey_url(student.id)).json()["data"]["events"]
     assert events[0]["type"] == "enrollment"  # newest by timestamp, despite source order

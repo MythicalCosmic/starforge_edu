@@ -6,3 +6,10 @@ class IntelligenceConfig(AppConfig):
     name = "apps.intelligence"
     label = "intelligence"
     verbose_name = "Intelligence & risk flags"
+
+    def ready(self) -> None:
+        from apps.intelligence.interfaces.services import IIntelligenceService
+        from apps.intelligence.services.v1.intelligence_service import IntelligenceService
+        from core.container import container
+
+        container.register(IIntelligenceService, IntelligenceService)

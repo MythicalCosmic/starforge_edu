@@ -79,7 +79,7 @@ def test_family_health_levels_and_order(tenant_a, as_role):
     )  # 1 of 3 children at-risk -> 0.33 -> watch
     at_risk = _family(tenant_a, branch, [{"present": 5, "grade": 90, "overdue": True}])  # overdue -> at_risk
 
-    body = director.get(FAMILIES).json()
+    body = director.get(FAMILIES).json()["data"]
     rows = {r["family"]: r for r in body["results"]}
     assert rows[good.id]["health"] == "good"
     assert rows[good.id]["at_risk_children"] == 0
@@ -99,8 +99,8 @@ def test_family_health_overdue_is_finance_gated(tenant_a, as_role, user_in, as_u
     director, _ = as_role(Role.DIRECTOR)
     registrar = as_user(tenant_a, user_in(tenant_a, roles=[Role.REGISTRAR], branch=branch))
 
-    drow = next(r for r in director.get(FAMILIES).json()["results"] if r["family"] == family.id)
-    rrow = next(r for r in registrar.get(FAMILIES).json()["results"] if r["family"] == family.id)
+    drow = next(r for r in director.get(FAMILIES).json()["data"]["results"] if r["family"] == family.id)
+    rrow = next(r for r in registrar.get(FAMILIES).json()["data"]["results"] if r["family"] == family.id)
     # finance-capable director sees the overdue-driven risk
     assert drow["health"] == "at_risk"
     assert drow["overdue_children"] == 1
@@ -117,7 +117,7 @@ def test_family_health_scoped_to_branch(tenant_a, user_in, as_user):
     theirs = _family(tenant_a, other, [{"present": 5, "grade": 90}])
     registrar = as_user(tenant_a, user_in(tenant_a, roles=[Role.REGISTRAR], branch=home))
 
-    ids = {r["family"] for r in registrar.get(FAMILIES).json()["results"]}
+    ids = {r["family"] for r in registrar.get(FAMILIES).json()["data"]["results"]}
     assert mine.id in ids
     assert theirs.id not in ids  # only families with children in the caller's branch
 
@@ -149,8 +149,8 @@ def test_family_spanning_branches_is_branch_scoped(tenant_a, as_role, user_in, a
     director, _ = as_role(Role.DIRECTOR)
     registrar = as_user(tenant_a, user_in(tenant_a, roles=[Role.REGISTRAR], branch=home))
 
-    drow = next(r for r in director.get(FAMILIES).json()["results"] if r["family"] == parent.id)
-    rrow = next(r for r in registrar.get(FAMILIES).json()["results"] if r["family"] == parent.id)
+    drow = next(r for r in director.get(FAMILIES).json()["data"]["results"] if r["family"] == parent.id)
+    rrow = next(r for r in registrar.get(FAMILIES).json()["data"]["results"] if r["family"] == parent.id)
     assert drow["children"] == 2  # the director sees both branches' children
     assert rrow["children"] == 1  # the home registrar sees only the in-scope child
 
@@ -166,7 +166,7 @@ def test_all_withdrawn_family_is_omitted(tenant_a, as_role):
         student = StudentProfileFactory.create(branch=branch, status=StudentProfile.Status.WITHDRAWN)
         GuardianFactory.create(parent=parent, student=student, is_primary=True)
     director, _ = as_role(Role.DIRECTOR)
-    ids = {r["family"] for r in director.get(FAMILIES).json()["results"]}
+    ids = {r["family"] for r in director.get(FAMILIES).json()["data"]["results"]}
     assert parent.id not in ids  # an already-churned family drops off the retention feed
 
 
@@ -187,7 +187,7 @@ def test_child_shared_by_two_guardians_counts_in_both(tenant_a, as_role):
         GuardianFactory.create(parent=p1, student=student, is_primary=True)
         GuardianFactory.create(parent=p2, student=student, is_primary=False)
     director, _ = as_role(Role.DIRECTOR)
-    rows = {r["family"]: r for r in director.get(FAMILIES).json()["results"]}
+    rows = {r["family"]: r for r in director.get(FAMILIES).json()["data"]["results"]}
     # separated parents: the shared at-risk child flags BOTH families (both get the call)
     assert rows[p1.id]["at_risk_children"] == 1
     assert rows[p2.id]["at_risk_children"] == 1

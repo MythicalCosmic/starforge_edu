@@ -56,7 +56,7 @@ def test_low_grades_and_overdue_flags_via_api(tenant_a, as_role):
         ExamResultFactory.create(exam=exam, student=student, score=Decimal("30"))  # 30% < 50
         InvoiceFactory.create(student=student, status=Invoice.Status.OVERDUE)
 
-    body = director.get(RISK).json()
+    body = director.get(RISK).json()["data"]
     row = next(r for r in body["results"] if r["student"] == student.id)
     assert {f["code"] for f in row["flags"]} == {"low_grades", "overdue_payment"}
     assert row["score"] == 4
@@ -73,8 +73,8 @@ def test_healthy_student_is_not_flagged(tenant_a, as_role):
         exam = ExamFactory.create(is_published=True)
         ExamResultFactory.create(exam=exam, student=student, score=Decimal("90"))
 
-    assert all(r["student"] != student.id for r in director.get(RISK).json()["results"])
-    detail = director.get(f"{RISK}{student.id}/").json()
+    assert all(r["student"] != student.id for r in director.get(RISK).json()["data"]["results"])
+    detail = director.get(f"{RISK}{student.id}/").json()["data"]
     assert detail["level"] == "none"
     assert detail["flags"] == []
 
@@ -124,7 +124,7 @@ def test_risk_detail_404_for_unknown_student(tenant_a, as_role):
 
 def test_rules_endpoint_is_transparent(tenant_a, as_role):
     director, _ = as_role(Role.DIRECTOR)
-    body = director.get(RULES).json()
+    body = director.get(RULES).json()["data"]
     assert "low_attendance" in body["rules"]
     assert body["rules"]["low_attendance"]["weight"] == 3
     assert body["thresholds"]["low_grade_pct"] == 50.0
@@ -154,10 +154,10 @@ def test_overdue_flag_hidden_from_non_finance_role(tenant_a, as_role):
         InvoiceFactory.create(student=student, status=Invoice.Status.OVERDUE)
 
     # the director (finance:read via *:*) sees the financial flag...
-    drow = next(r for r in director.get(RISK).json()["results"] if r["student"] == student.id)
+    drow = next(r for r in director.get(RISK).json()["data"]["results"] if r["student"] == student.id)
     assert {f["code"] for f in drow["flags"]} == {"low_grades", "overdue_payment"}
     # ...but a teacher (no finance:read) must NOT learn a student's arrears via the feed
-    trow = next(r for r in teacher_client.get(RISK).json()["results"] if r["student"] == student.id)
+    trow = next(r for r in teacher_client.get(RISK).json()["data"]["results"] if r["student"] == student.id)
     assert {f["code"] for f in trow["flags"]} == {"low_grades"}
     assert trow["score"] == 2  # the overdue weight is not added for a non-finance caller
 
@@ -214,7 +214,7 @@ def test_no_published_exams_not_flagged_on_grades(tenant_a, as_role):
         student = StudentProfileFactory.create()
         exam = ExamFactory.create(is_published=False)  # unpublished -> not counted
         ExamResultFactory.create(exam=exam, student=student, score=Decimal("5"))
-    assert all(r["student"] != student.id for r in director.get(RISK).json()["results"])
+    assert all(r["student"] != student.id for r in director.get(RISK).json()["data"]["results"])
 
 
 def test_high_level_all_three_flags(tenant_a, as_role):
@@ -232,7 +232,7 @@ def test_high_level_all_three_flags(tenant_a, as_role):
         InvoiceFactory.create(student=student, status=Invoice.Status.OVERDUE)
         _attendance(student, [AttendanceRecord.Status.ABSENT] * 4)
 
-    row = next(r for r in director.get(RISK).json()["results"] if r["student"] == student.id)
+    row = next(r for r in director.get(RISK).json()["data"]["results"] if r["student"] == student.id)
     assert {f["code"] for f in row["flags"]} == {"low_attendance", "low_grades", "overdue_payment"}
     assert row["score"] == 7
     assert row["level"] == "high"
@@ -255,6 +255,6 @@ def test_cohort_filter(tenant_a, as_role):
             exam = ExamFactory.create(is_published=True)
             ExamResultFactory.create(exam=exam, student=s, score=Decimal("10"))
 
-    ids = {r["student"] for r in director.get(f"{RISK}?cohort={c1.id}").json()["results"]}
+    ids = {r["student"] for r in director.get(f"{RISK}?cohort={c1.id}").json()["data"]["results"]}
     assert s1.id in ids
     assert s2.id not in ids

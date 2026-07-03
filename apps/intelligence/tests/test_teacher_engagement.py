@@ -38,8 +38,12 @@ def _add_attendance(tenant, term, teacher, branch, profile):
         )
         for i, mark in enumerate(marks):
             lesson = Lesson.objects.create(
-                term=term, cohort=cohort, teacher=teacher, title="L",
-                starts_at=base + timedelta(hours=i * 2), ends_at=base + timedelta(hours=i * 2 + 1),
+                term=term,
+                cohort=cohort,
+                teacher=teacher,
+                title="L",
+                starts_at=base + timedelta(hours=i * 2),
+                ends_at=base + timedelta(hours=i * 2 + 1),
             )
             AttendanceRecord.objects.create(student=student, lesson=lesson, status=mark)
 
@@ -77,7 +81,7 @@ def _setup(tenant, user_in):
 def test_engagement_rates_and_ordering(tenant_a, user_in, as_role):
     s = _setup(tenant_a, user_in)
     director, _ = as_role(Role.DIRECTOR)
-    body = director.get(TEACHERS).json()
+    body = director.get(TEACHERS).json()["data"]
     rows = {r["teacher"]: r for r in body["results"]}
     assert rows[s["t1"].id]["attendance_rate"] == 80.0
     assert rows[s["t1"].id]["marks_sampled"] == 5  # the excused mark is excluded
@@ -92,7 +96,7 @@ def test_manager_sees_only_their_branch_teachers(tenant_a, user_in, as_role, as_
     s = _setup(tenant_a, user_in)
     hod_u = user_in(tenant_a, roles=[Role.HEAD_OF_DEPT], branch=s["branch_a"])
     hod = as_user(tenant_a, hod_u)
-    ids = {r["teacher"] for r in hod.get(TEACHERS).json()["results"]}
+    ids = {r["teacher"] for r in hod.get(TEACHERS).json()["data"]["results"]}
     assert s["t1"].id in ids
     assert s["t2"].id in ids
     assert s["t3"].id not in ids  # branch B is out of the HOD's scope
@@ -101,7 +105,7 @@ def test_manager_sees_only_their_branch_teachers(tenant_a, user_in, as_role, as_
 def test_teacher_sees_only_their_own_row(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in)
     me = as_user(tenant_a, s["t1_u"])
-    rows = me.get(TEACHERS).json()["results"]
+    rows = me.get(TEACHERS).json()["data"]["results"]
     # dignity: a teacher does not see a leaderboard of their peers
     assert [r["teacher"] for r in rows] == [s["t1"].id]
     assert rows[0]["attendance_rate"] == 80.0
@@ -126,11 +130,15 @@ def test_future_scheduled_lessons_are_not_counted_as_delivered(tenant_a, user_in
         cohort = CohortFactory.create(branch=s["branch_a"])
         future = timezone.now() + timedelta(days=5)
         Lesson.objects.create(
-            term=term, cohort=cohort, teacher=s["t2"], title="future",
-            starts_at=future, ends_at=future + timedelta(hours=1),
+            term=term,
+            cohort=cohort,
+            teacher=s["t2"],
+            title="future",
+            starts_at=future,
+            ends_at=future + timedelta(hours=1),
         )
     director, _ = as_role(Role.DIRECTOR)
-    rows = {r["teacher"]: r for r in director.get(TEACHERS).json()["results"]}
+    rows = {r["teacher"]: r for r in director.get(TEACHERS).json()["data"]["results"]}
     assert rows[s["t2"].id]["lessons_delivered"] == 5  # the future lesson is excluded
 
 
@@ -141,7 +149,7 @@ def test_teacher_with_no_marks_has_null_rate_and_sorts_last(tenant_a, user_in, a
     with schema_context(tenant_a.schema_name):
         idle = TeacherProfileFactory.create(branch=s["branch_a"])  # no lessons/attendance
     director, _ = as_role(Role.DIRECTOR)
-    body = director.get(TEACHERS).json()
+    body = director.get(TEACHERS).json()["data"]
     idle_row = next(r for r in body["results"] if r["teacher"] == idle.id)
     assert idle_row["attendance_rate"] is None
     assert idle_row["engagement_score"] is None
