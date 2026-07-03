@@ -10,10 +10,10 @@ from __future__ import annotations
 
 from django.urls import path
 
-from apps.payments.webhook_views import ClickWebhookView, PaymeWebhookView, UzumWebhookView
+from apps.payments.webhook_views import click_webhook_view, payme_webhook_view, uzum_webhook_view
 
 urlpatterns = [
-    path("click/<slug:center_slug>/", ClickWebhookView.as_view(), name="webhook-click"),
-    path("payme/<slug:center_slug>/", PaymeWebhookView.as_view(), name="webhook-payme"),
-    path("uzum/<slug:center_slug>/", UzumWebhookView.as_view(), name="webhook-uzum"),
+    path("click/<slug:center_slug>/", click_webhook_view, name="webhook-click"),
+    path("payme/<slug:center_slug>/", payme_webhook_view, name="webhook-payme"),
+    path("uzum/<slug:center_slug>/", uzum_webhook_view, name="webhook-uzum"),
 ]

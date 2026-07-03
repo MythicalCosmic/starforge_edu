@@ -441,14 +441,39 @@ def test_cash_payment_requires_open_shift(invoice_a, user_in):
 def test_provider_config_serializer_hides_credentials(invoice_a):
     tenant_a, _ = invoice_a
     from apps.payments.models import ProviderConfig
-    from apps.payments.serializers import ProviderConfigSerializer
+    from apps.payments.presenters import provider_config_to_dict
 
     with schema_context(tenant_a.schema_name):
         config = ProviderConfig.objects.get(provider="payme")
-        data = ProviderConfigSerializer(config).data
+        data = provider_config_to_dict(config)
         assert "payme_key" not in data
         assert "payme_test_key" not in data
         assert "uzum_api_key" not in data
         assert "click_secret_key" not in data
         # non-secret fields still present
         assert data["provider"] == "payme"
+
+
+def test_provider_config_patch_rejects_null_credential_and_is_active(invoice_a, user_in, as_user):
+    """An explicit JSON null on a credential/is_active must be a 400 — never a silent
+    wipe of a stored secret (which would break signature checks) or a silent deactivate.
+    And a long key (>128, the old view cap) up to the model's 255 is accepted."""
+    from apps.payments.models import ProviderConfig
+    from core.permissions import Role
+
+    tenant_a, _ = invoice_a
+    director = user_in(tenant_a, roles=[Role.DIRECTOR])
+    with schema_context(tenant_a.schema_name):
+        config = ProviderConfig.objects.get(provider="payme")
+        cfg_id = config.id
+
+    client = as_user(tenant_a, director)
+    base = f"/api/v1/payments/provider-configs/{cfg_id}/"
+    assert client.patch(base, {"payme_key": None}, format="json").status_code == 400
+    assert client.patch(base, {"is_active": None}, format="json").status_code == 400
+    long_key = "k" * 200  # > the old 128 view cap, <= the model's 255
+    assert client.patch(base, {"payme_key": long_key}, format="json").status_code == 200
+    with schema_context(tenant_a.schema_name):
+        config.refresh_from_db()
+        assert config.payme_key == long_key  # the valid long key persisted
+        assert config.is_active is True  # never deactivated by the rejected null

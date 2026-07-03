@@ -105,7 +105,7 @@ def test_checkout_endpoint_idempotency_header_one_payment(invoice_a, user_in, as
     r2 = client.post("/api/v1/payments/checkout/", body, format="json", **headers)
     assert r1.status_code in (200, 201), r1.content
     assert r2.status_code in (200, 201), r2.content
-    assert r1.json()["payment_id"] == r2.json()["payment_id"]
+    assert r1.json()["data"]["payment_id"] == r2.json()["data"]["payment_id"]
 
     from apps.payments.models import Payment
 
