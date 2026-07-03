@@ -8,4 +8,9 @@ class AIConfig(AppConfig):
     verbose_name = "AI"
 
     def ready(self) -> None:
-        from . import receivers  # noqa: F401  (connect signal receivers)
+        from apps.ai import receivers  # noqa: F401  (connect signal receivers)
+        from apps.ai.interfaces.services import IAIService
+        from apps.ai.services.v1.ai_service import AIService
+        from core.container import container
+
+        container.register(IAIService, AIService)

@@ -410,7 +410,7 @@ def test_requests_log_lists_for_teacher(tenant_a, as_role):
     client, _ = as_role("teacher", tenant_a)
     resp = client.get("/api/v1/ai/requests/")
     assert resp.status_code == 200
-    assert resp.data["count"] == 3
+    assert resp.json()["pagination"]["total"] == 3
 
 
 def test_requests_log_cross_tenant_isolation(tenant_a, tenant_b, as_role):
@@ -420,7 +420,7 @@ def test_requests_log_cross_tenant_isolation(tenant_a, tenant_b, as_role):
     client, _ = as_role("teacher", tenant_b)  # tenant B token
     resp = client.get("/api/v1/ai/requests/")
     assert resp.status_code == 200
-    assert resp.data["count"] == 0
+    assert resp.json()["pagination"]["total"] == 0
 
 
 @pytest.mark.parametrize("role", ["student", "parent"])
@@ -450,7 +450,37 @@ def test_budget_get_and_patch(tenant_a, as_role):
     director, _ = as_role("director", tenant_a)
     resp = director.patch("/api/v1/ai/budget/", {"daily_token_limit": 555}, format="json")
     assert resp.status_code == 200
-    assert resp.data["daily_token_limit"] == 555
+    assert resp.json()["data"]["daily_token_limit"] == 555
+
+
+def test_budget_patch_bool_parity(tenant_a, as_role):
+    """is_enabled parses DRF-BooleanField-compatibly: "on"/"y" -> True, and a garbage
+    string is a 400 (NOT a silent coerce to False that would disable AI center-wide)."""
+    _seed_ai(tenant_a)
+    director, _ = as_role("director", tenant_a)
+    on = director.patch("/api/v1/ai/budget/", {"is_enabled": "on"}, format="json")
+    assert on.status_code == 200, on.content
+    assert on.json()["data"]["is_enabled"] is True
+    garbage = director.patch("/api/v1/ai/budget/", {"is_enabled": "maybe"}, format="json")
+    assert garbage.status_code == 400  # not a silent False
+
+
+def test_usage_report_month_year_boundary_is_400_not_500(tenant_a, as_role):
+    """?month=9999-12 parses but its next-month rollover to year 10000 raises ValueError;
+    it must be a clean 400 invalid_month, not a 500."""
+    _seed_ai(tenant_a)
+    teacher, _ = as_role("teacher", tenant_a)
+    resp = teacher.get("/api/v1/ai/usage-report/?month=9999-12")
+    assert resp.status_code == 400, resp.content
+
+
+def test_requests_log_created_after_accepts_date_only(tenant_a, as_role):
+    """created_after/created_before accept a date-only value (parity with the old
+    DateTimeFilter's DATETIME_INPUT_FORMATS) instead of 400-ing on it."""
+    _seed_ai(tenant_a)
+    teacher, _ = as_role("teacher", tenant_a)
+    resp = teacher.get("/api/v1/ai/requests/?created_after=2020-01-01")
+    assert resp.status_code == 200, resp.content
 
 
 def test_exam_generation_gated_by_center_settings(tenant_a, as_role):
@@ -460,7 +490,7 @@ def test_exam_generation_gated_by_center_settings(tenant_a, as_role):
     # Gate off by default -> 403 feature_disabled.
     resp = teacher.post("/api/v1/ai/exam-generation/", body, format="json")
     assert resp.status_code == 403
-    assert resp.data["error"]["code"] == "feature_disabled"
+    assert resp.json()["code"] == "feature_disabled"
 
     # Flip the knob on -> 202 with a request id.
     with schema_context(tenant_a.schema_name):
@@ -474,7 +504,7 @@ def test_exam_generation_gated_by_center_settings(tenant_a, as_role):
     cache.clear()
     resp = teacher.post("/api/v1/ai/exam-generation/", body, format="json")
     assert resp.status_code == 202
-    assert "request_id" in resp.data
+    assert "request_id" in resp.json()["data"]
 
 
 def test_exam_generation_over_budget_429(tenant_a, as_role):
@@ -492,7 +522,7 @@ def test_exam_generation_over_budget_429(tenant_a, as_role):
     body = {"subject_id": 1, "exam_type": "quiz", "question_count": 5, "difficulty": "easy"}
     resp = teacher.post("/api/v1/ai/exam-generation/", body, format="json")
     assert resp.status_code == 429
-    assert resp.data["error"]["code"] == "ai_budget_exceeded"
+    assert resp.json()["code"] == "ai_budget_exceeded"
 
 
 def test_usage_report(tenant_a, as_role):
@@ -510,7 +540,7 @@ def test_usage_report(tenant_a, as_role):
     month = timezone.localdate().strftime("%Y-%m")
     resp = teacher.get(f"/api/v1/ai/usage-report/?month={month}")
     assert resp.status_code == 200
-    row = next(r for r in resp.data if r["feature"] == "assignment_feedback")
+    row = next(r for r in resp.json()["data"] if r["feature"] == "assignment_feedback")
     assert row["requests"] == 2
     assert row["input_tokens"] == 300
     assert row["output_tokens"] == 130

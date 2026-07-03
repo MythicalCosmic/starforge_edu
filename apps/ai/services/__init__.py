@@ -195,9 +195,7 @@ def check_and_reserve_budget(
                 existing.reserved_tokens = requested
                 existing.error_detail = ""
                 existing.requested_by_id = actor_id
-                existing.save(
-                    update_fields=["status", "reserved_tokens", "error_detail", "requested_by_id"]
-                )
+                existing.save(update_fields=["status", "reserved_tokens", "error_detail", "requested_by_id"])
                 obj, created = existing, True
             else:
                 obj, created = _create(AIRequest.Status.QUEUED, reserved=requested)
