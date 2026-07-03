@@ -49,7 +49,7 @@ def test_deactivate_ends_a_discount(tenant_a, as_role):
     did = _discount_id(tenant_a, is_active=True)
     resp = accountant.post(f"{URL}{did}/deactivate/", {}, format="json")
     assert resp.status_code == 200, resp.content
-    assert resp.json()["is_active"] is False
+    assert resp.json()["data"]["is_active"] is False
     with schema_context(tenant_a.schema_name):
         from apps.finance.models import Discount
 
@@ -72,5 +72,5 @@ def test_read_still_works(tenant_a, as_role):
     did = _discount_id(tenant_a)
     listing = accountant.get(URL)
     assert listing.status_code == 200
-    assert any(row["id"] == did for row in listing.json()["results"])
+    assert any(row["id"] == did for row in listing.json()["data"])
     assert accountant.get(f"{URL}{did}/").status_code == 200

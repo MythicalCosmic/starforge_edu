@@ -49,7 +49,7 @@ def test_finance_cross_tenant_token_rejected(tenant_a, tenant_b, user_in, client
     resp = getattr(client_b, method)(url, {}, format="json")
 
     assert resp.status_code == 401, (url, resp.status_code, resp.content)
-    assert resp.json()["error"]["code"] == "authentication_failed"
+    assert resp.json()["code"] == "authentication_failed"
 
 
 def test_finance_invoices_invisible_across_tenant(tenant_a, tenant_b, user_in, as_user):
@@ -80,4 +80,4 @@ def test_finance_invoices_invisible_across_tenant(tenant_a, tenant_b, user_in, a
 
     director_b = user_in(tenant_b, roles=["director"])
     body = as_user(tenant_b, director_b).get("/api/v1/finance/invoices/").json()
-    assert body["count"] == 0
+    assert body["pagination"]["total"] == 0

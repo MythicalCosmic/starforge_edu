@@ -35,7 +35,7 @@ def test_invoice_list_allowed(as_role, role):
 def test_invoice_list_denied(as_role, role):
     resp = as_role(role)[0].get(INVOICES_URL)
     assert resp.status_code == 403
-    assert resp.json()["error"]["code"] == "forbidden"
+    assert resp.json()["code"] == "forbidden"
 
 
 def test_invoice_list_anonymous_denied(tenant_a, client_for):
@@ -57,7 +57,7 @@ def test_invoice_cross_tenant_token_rejected(tenant_a, tenant_b, user_in, client
     client_b.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
     resp = client_b.get(INVOICES_URL)
     assert resp.status_code == 401
-    assert resp.json()["error"]["code"] == "authentication_failed"
+    assert resp.json()["code"] == "authentication_failed"
 
 
 def test_invoice_not_visible_across_tenants(tenant_a, tenant_b, as_role):
@@ -66,7 +66,7 @@ def test_invoice_not_visible_across_tenants(tenant_a, tenant_b, as_role):
     # director on tenant_b cannot see tenant_a's invoice
     client_b, _ = as_role(Role.DIRECTOR, tenant=tenant_b)
     body = client_b.get(INVOICES_URL).json()
-    numbers = {row["number"] for row in body["results"]}
+    numbers = {row["number"] for row in body["data"]}
     assert "INV-2026-900001" not in numbers
 
 
@@ -88,7 +88,7 @@ def test_parent_sees_only_own_childs_balance(tenant_a, user_in, as_user):
     client = as_user(tenant_a, parent_user)
     ok = client.get(f"{OUTSTANDING_URL}?student={my_child.pk}")
     assert ok.status_code == 200
-    assert Decimal(ok.json()["outstanding_uzs"]) == Decimal("100000.00")
+    assert Decimal(ok.json()["data"]["outstanding_uzs"]) == Decimal("100000.00")
 
     denied = client.get(f"{OUTSTANDING_URL}?student={other_child.pk}")
     assert denied.status_code == 403
@@ -101,7 +101,7 @@ def test_director_sees_any_balance(tenant_a, as_role):
         InvoiceFactory(student=student, total_uzs=Decimal("250000.00"))
     resp = client.get(f"{OUTSTANDING_URL}?student={student.pk}")
     assert resp.status_code == 200
-    assert Decimal(resp.json()["outstanding_uzs"]) == Decimal("250000.00")
+    assert Decimal(resp.json()["data"]["outstanding_uzs"]) == Decimal("250000.00")
 
 
 # --------------------------------------------------------------------------- #
@@ -116,10 +116,44 @@ def test_create_invoice_endpoint(tenant_a, as_role):
         fs = FeeScheduleFactory(amount_uzs=Decimal("777000.00"))
     resp = client.post(INVOICES_URL, {"student": student.pk, "fee_schedule": fs.pk}, format="json")
     assert resp.status_code == 201
-    body = resp.json()
+    body = resp.json()["data"]
     assert body["status"] == "issued"
     assert Decimal(body["total_uzs"]) == Decimal("777000.00")
     assert len(body["lines"]) == 1
+
+
+def test_invoice_line_explicit_zero_quantity_is_not_coerced_to_one(tenant_a, as_role):
+    """An explicit quantity of 0 must bill 0 (a waived line), not be defaulted to 1
+    (the default applies only when the key is absent) — no money over-charge."""
+    client, _ = as_role(Role.ACCOUNTANT)
+    with schema_context(tenant_a.schema_name):
+        student = StudentProfileFactory()
+    resp = client.post(
+        INVOICES_URL,
+        {"student": student.pk, "lines": [{"description": "waived", "unit_price_uzs": "100000", "quantity": 0}]},
+        format="json",
+    )
+    assert resp.status_code == 201, resp.content
+    body = resp.json()["data"]
+    assert Decimal(body["lines"][0]["amount_uzs"]) == Decimal("0.00")
+    assert Decimal(body["total_uzs"]) == Decimal("0.00")
+
+
+def test_invoice_line_oversized_quantity_is_400_not_500(tenant_a, as_role):
+    """A quantity beyond the column's 8 digits is a clean 400, not a decimal-context
+    overflow -> 500 in the line-amount quantize."""
+    client, _ = as_role(Role.ACCOUNTANT)
+    with schema_context(tenant_a.schema_name):
+        student = StudentProfileFactory()
+    resp = client.post(
+        INVOICES_URL,
+        {
+            "student": student.pk,
+            "lines": [{"description": "x", "unit_price_uzs": "9999999999999999", "quantity": "9999999999999999"}],
+        },
+        format="json",
+    )
+    assert resp.status_code == 400, resp.content
 
 
 def test_create_invoice_validation_empty(tenant_a, as_role):
@@ -141,7 +175,7 @@ def test_invoice_void_action(tenant_a, as_role):
         inv = InvoiceFactory(total_uzs=Decimal("100000.00"))
     resp = client.post(f"{INVOICES_URL}{inv.pk}/void/")
     assert resp.status_code == 200
-    assert resp.json()["status"] == "void"
+    assert resp.json()["data"]["status"] == "void"
 
 
 # --------------------------------------------------------------------------- #
@@ -181,7 +215,7 @@ def test_cashier_shift_open_close_endpoints(tenant_a, user_in, as_user):
         format="json",
     )
     assert opened.status_code == 201
-    shift_id = opened.json()["id"]
+    shift_id = opened.json()["data"]["id"]
 
     # double open -> 409
     again = client.post("/api/v1/finance/cashier-shifts/open/", {"branch": branch.pk}, format="json")
@@ -193,11 +227,11 @@ def test_cashier_shift_open_close_endpoints(tenant_a, user_in, as_user):
         format="json",
     )
     assert closed.status_code == 200
-    assert closed.json()["discrepancy_uzs"] == "0.00"
+    assert closed.json()["data"]["discrepancy_uzs"] == "0.00"
 
     report = client.get(f"/api/v1/finance/cashier-shifts/{shift_id}/report/")
     assert report.status_code == 200
-    assert report.json()["payments_total_uzs"] == "0.00"
+    assert report.json()["data"]["payments_total_uzs"] == "0.00"
 
 
 # --------------------------------------------------------------------------- #
@@ -218,7 +252,7 @@ def test_statement_request_returns_202(tenant_a, as_role, monkeypatch):
         student = StudentProfileFactory()
     resp = client.post(f"/api/v1/finance/students/{student.pk}/statement/", {"locale": "en"}, format="json")
     assert resp.status_code == 202
-    assert "task_id" in resp.json()
+    assert "task_id" in resp.json()["data"]
 
 
 # --------------------------------------------------------------------------- #
@@ -235,4 +269,4 @@ def test_invoice_list_query_budget(as_role, tenant_a, django_assert_max_num_quer
     # +1 for billing paywall middleware subscription check
     with django_assert_max_num_queries(10):  # +1: A-2 per-request permission-override load
         body = client.get(INVOICES_URL).json()
-    assert set(body) == {"count", "next", "previous", "results"}
+    assert set(body) == {"success", "data", "pagination"}
