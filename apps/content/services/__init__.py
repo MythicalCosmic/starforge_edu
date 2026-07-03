@@ -335,9 +335,7 @@ def approve_teacher_leg(*, file: LessonFile, actor) -> LessonFile:
     if file.status != LessonFile.Status.CLEAN:
         raise ConflictException(_("Only a clean file can be approved."), code="file_not_clean")
     if file.is_approved_teacher:
-        raise ConflictException(
-            _("This file already has teacher approval."), code="teacher_already_approved"
-        )
+        raise ConflictException(_("This file already has teacher approval."), code="teacher_already_approved")
     file.is_approved_teacher = True
     file.approved_teacher_by = actor
     file.approved_teacher_at = timezone.now()
@@ -369,13 +367,9 @@ def approve_manager_leg(
             _("A teacher must approve this file first."), code="teacher_approval_required"
         )
     if file.is_approved_manager:
-        raise ConflictException(
-            _("This file already has manager approval."), code="manager_already_approved"
-        )
+        raise ConflictException(_("This file already has manager approval."), code="manager_already_approved")
     if not actor.is_superuser and not (set(actor_roles) & set(_MANAGER_APPROVAL_ROLES)):
-        raise PermissionException(
-            _("Only a manager can give the second approval."), code="not_a_manager"
-        )
+        raise PermissionException(_("Only a manager can give the second approval."), code="not_a_manager")
     if file.approved_teacher_by_id == actor.id:
         raise PermissionException(
             _("The manager approval must come from a different person than the teacher approval."),
@@ -432,9 +426,7 @@ def request_material_generation(*, material: LibraryMaterial, requested_by=None)
     from core.utils import current_schema
 
     if material.status != LibraryMaterial.Status.DRAFT:
-        raise UnprocessableEntity(
-            _("Only a draft material can be AI-drafted."), code="material_not_draft"
-        )
+        raise UnprocessableEntity(_("Only a draft material can be AI-drafted."), code="material_not_draft")
     prompt = active_prompt(AIFeature.MATERIAL_GENERATION)
     ai_request = check_and_reserve_budget(
         feature=AIFeature.MATERIAL_GENERATION,

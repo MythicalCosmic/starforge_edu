@@ -14,7 +14,7 @@ import pytest
 from django_tenants.utils import schema_context
 
 from apps.content import selectors, services
-from apps.content.models import FileView, LessonFile
+from apps.content.models import ContentLibrary, FileView, LessonFile
 from apps.content.tests.factories import (
     ContentLibraryFactory,
     FolderFactory,
@@ -547,7 +547,7 @@ def test_upload_url_accepts_in_scope_folder(tenant_a, as_role, monkeypatch):
         format="json",
     )
     assert resp.status_code == 200
-    assert "file_id" in resp.json()
+    assert "file_id" in resp.json()["data"]
 
 
 @pytest.mark.parametrize(
@@ -586,7 +586,7 @@ def test_upload_url_rejects_unsafe_filename(tenant_a, as_role, monkeypatch, bad_
         format="json",
     )
     assert resp.status_code == 400
-    assert "filename" in resp.json().get("error", {}).get("fields", resp.json())
+    assert "filename" in resp.json().get("errors", resp.json())
     with schema_context(tenant_a.schema_name):
         assert LessonFile.objects.count() == before  # nothing created
 
@@ -613,7 +613,7 @@ def test_upload_url_normal_filename_accepted_key_under_schema(tenant_a, as_role,
         format="json",
     )
     assert resp.status_code == 200
-    body = resp.json()
+    body = resp.json()["data"]
     assert body["key"].startswith(f"{tenant_a.schema_name}/tmp/")
     assert body["key"].endswith("/lecture-notes_v2.pdf")
 
@@ -643,7 +643,7 @@ def test_files_cross_tenant_isolated(tenant_a, tenant_b, user_in, as_user):
 
     director_b = user_in(tenant_b, roles=["director"])
     body = as_user(tenant_b, director_b).get("/api/v1/content/files/").json()
-    assert body["count"] == 0
+    assert body["pagination"]["total"] == 0
 
 
 def test_files_list_query_budget(tenant_a, user_in, as_user, django_assert_max_num_queries):
@@ -656,8 +656,8 @@ def test_files_list_query_budget(tenant_a, user_in, as_user, django_assert_max_n
     client = as_user(tenant_a, director)
     with django_assert_max_num_queries(9):  # +1: A-2 per-request permission-override load
         body = client.get("/api/v1/content/files/").json()
-    assert set(body) == {"count", "next", "previous", "results"}
-    assert body["count"] == 5
+    assert set(body) == {"success", "data", "pagination"}
+    assert body["pagination"]["total"] == 5
 
 
 def test_libraries_list_query_budget(tenant_a, user_in, as_user, django_assert_max_num_queries):
@@ -669,7 +669,7 @@ def test_libraries_list_query_budget(tenant_a, user_in, as_user, django_assert_m
     client = as_user(tenant_a, director)
     with django_assert_max_num_queries(9):  # +1: A-2 per-request permission-override load
         body = client.get("/api/v1/content/libraries/").json()
-    assert body["count"] == 5
+    assert body["pagination"]["total"] == 5
 
 
 def test_library_clean_file_round_trip_api(tenant_a, user_in, as_user, monkeypatch):
@@ -681,13 +681,39 @@ def test_library_clean_file_round_trip_api(tenant_a, user_in, as_user, monkeypat
         file_id = file.id
 
     client = as_user(tenant_a, director)
-    detail = client.get(f"/api/v1/content/files/{file_id}/").json()
+    detail = client.get(f"/api/v1/content/files/{file_id}/").json()["data"]
     assert detail["status"] == "clean"
     dl = client.get(f"/api/v1/content/files/{file_id}/download-url/")
     assert dl.status_code == 200
-    assert dl.json()["expires_in"] == 300
+    assert dl.json()["data"]["expires_in"] == 300
     with schema_context(tenant_a.schema_name):
         assert LessonFile.objects.get(pk=file_id).download_count == 1
+
+    # download-url is GET-only (it has write side-effects): a HEAD must be a 405 and
+    # must NOT bump download_count / write a FileView row (parity with the old @action).
+    head = client.head(f"/api/v1/content/files/{file_id}/download-url/")
+    assert head.status_code == 405
+    with schema_context(tenant_a.schema_name):
+        assert LessonFile.objects.get(pk=file_id).download_count == 1  # unchanged by HEAD
+
+
+def test_library_put_is_full_replace_missing_required_400(tenant_a, user_in, as_user):
+    """PUT is a full replace (DRF parity): omitting the required 'name' -> 400, not a
+    silent partial update."""
+    director = user_in(tenant_a, roles=["director"])
+    with schema_context(tenant_a.schema_name):
+        lib: Any = ContentLibraryFactory(visibility="tenant", name="Original")
+        lib_id = lib.id
+
+    client = as_user(tenant_a, director)
+    resp = client.put(f"/api/v1/content/libraries/{lib_id}/", {"description": "x"}, format="json")
+    assert resp.status_code == 400, resp.content
+    with schema_context(tenant_a.schema_name):
+        assert ContentLibrary.objects.get(pk=lib_id).name == "Original"  # not touched
+    # PATCH stays partial: description-only succeeds, name preserved.
+    patched = client.patch(f"/api/v1/content/libraries/{lib_id}/", {"description": "y"}, format="json")
+    assert patched.status_code == 200, patched.content
+    assert patched.json()["data"]["name"] == "Original"
 
 
 def test_serializer_hides_thumbnail_key_and_signs_url(tenant_a, user_in, as_user, monkeypatch):
@@ -707,9 +733,9 @@ def test_serializer_hides_thumbnail_key_and_signs_url(tenant_a, user_in, as_user
         with_id, no_id = with_thumb.id, no_thumb.id
 
     client = as_user(tenant_a, director)
-    detail = client.get(f"/api/v1/content/files/{with_id}/").json()
+    detail = client.get(f"/api/v1/content/files/{with_id}/").json()["data"]
     assert "thumbnail_key" not in detail  # raw key never exposed
     assert detail["thumbnail_url"] == "https://signed/tenant_a/content/7/thumb.jpg"
 
-    no_detail = client.get(f"/api/v1/content/files/{no_id}/").json()
+    no_detail = client.get(f"/api/v1/content/files/{no_id}/").json()["data"]
     assert no_detail["thumbnail_url"] is None  # no thumbnail → null, not signed
