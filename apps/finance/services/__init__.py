@@ -339,7 +339,10 @@ def _due_date(issue_day: date, fee_schedule: FeeSchedule | None, settings) -> da
     `due_day_of_month` this month (or next month if already past)."""
     import calendar
 
-    day = fee_schedule.due_day_of_month if fee_schedule else 5
+    # Clamp the lower bound: a stored due_day_of_month of 0 (legacy rows / other
+    # write paths) would make date(year, month, 0) raise ValueError -> 500. The
+    # upper bound is handled per-month by min(day, last_day) below.
+    day = max(fee_schedule.due_day_of_month if fee_schedule else 5, 1)
     year, month = issue_day.year, issue_day.month
     last_day = calendar.monthrange(year, month)[1]
     due = date(year, month, min(day, last_day))
@@ -546,6 +549,72 @@ def allocate_payment(
     # total_due and each `take` is an exact Decimal min — `remaining` lands on 0.
     if remaining != _ZERO:  # pragma: no cover - defensive
         raise ValidationException(_("Allocation could not be balanced."), code="allocation_unbalanced")
+    return allocations
+
+
+@transaction.atomic
+def allocate_payment_lines(
+    *, payment_id: int, lines: list[dict[str, Any]]
+) -> list[PaymentAllocation]:
+    """Allocate a payment across explicit ``(invoice, amount)`` lines — the manual
+    allocation endpoint's contract, where the operator chooses exactly how much of the
+    payment lands on each invoice (unlike ``allocate_payment``, which splits a single
+    total oldest-due-first). Each line must target an OPEN invoice and must not push
+    that invoice past its outstanding balance; two lines naming the same invoice sum
+    against that one balance. Idempotent on ``payment_id`` — a payment that already has
+    allocations returns them unchanged, matching ``allocate_payment``.
+
+    Split out of ``allocate_manual`` (payments): calling ``allocate_payment`` once per
+    line silently no-opped every line after the first (its idempotency guard sees the
+    first line's rows), dropping money while the payment was marked ALLOCATED."""
+    existing = list(PaymentAllocation.objects.filter(payment_id=payment_id))
+    if existing:  # already allocated — idempotent no-op
+        return existing
+    if not lines:
+        raise ValidationException(
+            _("At least one allocation line is required."), code="no_allocations"
+        )
+
+    # Aggregate per invoice first so duplicate lines sum against a single outstanding
+    # balance, and lock every target row for the balance checks below.
+    per_invoice: dict[int, Decimal] = {}
+    for line in lines:
+        inv_id = int(line["invoice"])
+        amount = Decimal(str(line["amount"])).quantize(_CENT)
+        if amount <= _ZERO:
+            raise ValidationException(
+                _("Allocation amount must be positive."), code="invalid_amount"
+            )
+        per_invoice[inv_id] = per_invoice.get(inv_id, _ZERO) + amount
+
+    invoices = {
+        inv.pk: inv
+        for inv in Invoice.objects.select_for_update()
+        .filter(pk__in=list(per_invoice), status__in=OPEN_STATUSES)
+        .order_by("due_date", "id")
+    }
+    if len(invoices) != len(per_invoice):
+        raise ValidationException(
+            _("One or more invoices are not open for allocation."), code="invoice_not_open"
+        )
+
+    allocations: list[PaymentAllocation] = []
+    for inv_id, amount in per_invoice.items():
+        invoice = invoices[inv_id]
+        owed = _outstanding_for(invoice)
+        if amount > owed:
+            raise ValidationException(
+                _("Allocation to invoice %(n)s exceeds its outstanding balance.")
+                % {"n": invoice.number},
+                code="over_allocation",
+                fields={"amount_uzs": [str(amount)], "outstanding_uzs": [str(owed)]},
+            )
+        allocations.append(
+            PaymentAllocation.objects.create(
+                invoice=invoice, payment_id=payment_id, amount_uzs=amount
+            )
+        )
+        _refresh_invoice_status(invoice)
     return allocations
 
 

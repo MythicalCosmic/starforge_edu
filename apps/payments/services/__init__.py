@@ -215,20 +215,40 @@ def _auto_allocate(payment: Payment) -> None:
 
 @transaction.atomic
 def allocate_manual(*, payment_id: int, allocations: list[dict[str, Any]]) -> Payment:
-    """Manual allocation endpoint body — drives Lane A per (invoice, amount)."""
+    """Manual allocation endpoint body — applies each ``(invoice, amount)`` line to the
+    invoice the operator named.
+
+    Uses Lane A's ``allocate_payment_lines`` so the per-line amounts are honored. The
+    previous implementation looped ``allocate_payment`` (a total oldest-due-first split
+    that is idempotent per payment): every line after the first hit that idempotency
+    guard and was silently dropped, yet the payment was still marked ALLOCATED — losing
+    money. Guards the total against the real amount received so an operator cannot
+    allocate more than the payment is worth."""
     payment = Payment.objects.select_for_update().filter(pk=payment_id).first()
     if payment is None:
         raise NotFoundException(_("Payment not found."), code="payment_not_found")
     if payment.status != Payment.Status.COMPLETED:
         raise UnprocessableEntity(_("Only completed payments can be allocated."))
-    from apps.finance.services import allocate_payment
-
-    for alloc in allocations:
-        allocate_payment(
-            payment_id=payment.pk,
-            amount_uzs=Decimal(str(alloc["amount"])),
-            invoice_ids=[int(alloc["invoice"])],
+    if not allocations:
+        raise ValidationException(
+            _("At least one allocation line is required."), code="no_allocations"
         )
+    total = sum(
+        (Decimal(str(a["amount"])) for a in allocations), Decimal("0")
+    ).quantize(Decimal("0.01"))
+    if total > payment.amount_uzs:
+        raise UnprocessableEntity(
+            _("Allocations exceed the payment amount."), code="over_allocation"
+        )
+    from apps.finance.services import allocate_payment_lines
+
+    allocate_payment_lines(
+        payment_id=payment.pk,
+        lines=[
+            {"invoice": int(a["invoice"]), "amount": Decimal(str(a["amount"]))}
+            for a in allocations
+        ],
+    )
     payment.allocation_status = Payment.Allocation.ALLOCATED
     payment.save(update_fields=["allocation_status", "updated_at"])
     return payment

@@ -130,7 +130,11 @@ class RealPaymeClient(PaymeClient):
             ).as_rpc(rpc_id)
 
         method = str(body.get("method") or "")
-        params = body.get("params") or {}
+        # Attacker-controlled body: a non-dict `params` ([...], "x", 5) would make the
+        # handlers' params.get(...) / params[...] raise below. Coerce so a malformed
+        # request becomes a JSON-RPC error, never a 500 (Payme's always-200 contract).
+        raw_params = body.get("params")
+        params = raw_params if isinstance(raw_params, dict) else {}
         handler = {
             "CheckPerformTransaction": self._check_perform,
             "CreateTransaction": self._create,
@@ -146,6 +150,11 @@ class RealPaymeClient(PaymeClient):
             result = handler(params, store)
         except PaymeError as exc:
             return exc.as_rpc(rpc_id)
+        except (KeyError, TypeError, ValueError):
+            # A required param is missing or the wrong type (e.g. CreateTransaction
+            # without an "id"/"amount"). Malformed input, not a server fault — answer
+            # with the JSON-RPC parse error rather than letting it become a 500.
+            return PaymeError(ERR_PARSE, _msg("Invalid parameters.")).as_rpc(rpc_id)
         return {"jsonrpc": "2.0", "id": rpc_id, "result": result}
 
     # ----- methods ---------------------------------------------------------

@@ -77,7 +77,11 @@ def apply_filters(
         queryset = queryset.filter(clause)
 
     ordering = request.GET.get("ordering")
-    if ordering and ordering.lstrip("-") in ordering_fields:
+    # Strip at most ONE leading "-" (descending). ``lstrip("-")`` would strip every
+    # dash, so "--field" would pass the whitelist yet reach order_by() as "--field"
+    # -> an unmapped FieldError (500) on a field named "-field". Peel a single sign.
+    field_name = ordering[1:] if ordering and ordering.startswith("-") else ordering
+    if field_name and field_name in ordering_fields:
         queryset = queryset.order_by(ordering)
     elif default_ordering is not None:
         queryset = queryset.order_by(default_ordering)

@@ -477,3 +477,67 @@ def test_provider_config_patch_rejects_null_credential_and_is_active(invoice_a, 
         config.refresh_from_db()
         assert config.payme_key == long_key  # the valid long key persisted
         assert config.is_active is True  # never deactivated by the rejected null
+
+
+# --------------------------------------------------------------------------- #
+# Manual allocation across multiple lines (regression: dropped-line money bug)
+# --------------------------------------------------------------------------- #
+def test_allocate_manual_applies_every_line(tenant_a):
+    """allocate_manual used to loop finance.allocate_payment (idempotent per
+    payment_id): only the FIRST line landed while the payment was marked ALLOCATED,
+    silently dropping the rest. Every (invoice, amount) line must now be applied."""
+    from apps.finance.models import Invoice, PaymentAllocation
+    from apps.payments import services
+    from apps.payments.models import Payment
+
+    inv_a = helpers.seed_open_invoice(tenant_a, number="INV-2026-000010", amount_uzs="100000.00")
+    inv_b = helpers.seed_open_invoice(tenant_a, number="INV-2026-000011", amount_uzs="60000.00")
+    with schema_context(tenant_a.schema_name):
+        payment, _ = services.get_or_create_payment(
+            idempotency_key="alloc-multi-1",
+            provider="payme",
+            amount_uzs=Decimal("160000.00"),
+            account_ref=inv_a.number,
+            metadata={},
+        )
+        Payment.objects.filter(pk=payment.pk).update(status=Payment.Status.COMPLETED)
+
+        result = services.allocate_manual(
+            payment_id=payment.pk,
+            allocations=[
+                {"invoice": inv_a.pk, "amount": Decimal("100000.00")},
+                {"invoice": inv_b.pk, "amount": Decimal("60000.00")},
+            ],
+        )
+        assert result.allocation_status == Payment.Allocation.ALLOCATED
+        allocs = PaymentAllocation.objects.filter(payment_id=payment.pk)
+        assert allocs.filter(invoice=inv_a).count() == 1
+        assert allocs.filter(invoice=inv_b).count() == 1  # was dropped by the bug
+        assert sum(a.amount_uzs for a in allocs) == Decimal("160000.00")
+        inv_a.refresh_from_db()
+        inv_b.refresh_from_db()
+        assert inv_a.status == Invoice.Status.PAID
+        assert inv_b.status == Invoice.Status.PAID
+
+
+def test_allocate_manual_rejects_over_payment_amount(tenant_a):
+    """The total of the lines may not exceed the real money received."""
+    from core.exceptions import StarforgeError
+    from apps.payments import services
+    from apps.payments.models import Payment
+
+    inv = helpers.seed_open_invoice(tenant_a, number="INV-2026-000012", amount_uzs="100000.00")
+    with schema_context(tenant_a.schema_name):
+        payment, _ = services.get_or_create_payment(
+            idempotency_key="alloc-over-1",
+            provider="payme",
+            amount_uzs=Decimal("50000.00"),
+            account_ref=inv.number,
+            metadata={},
+        )
+        Payment.objects.filter(pk=payment.pk).update(status=Payment.Status.COMPLETED)
+        with pytest.raises(StarforgeError):
+            services.allocate_manual(
+                payment_id=payment.pk,
+                allocations=[{"invoice": inv.pk, "amount": Decimal("90000.00")}],
+            )

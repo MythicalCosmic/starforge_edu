@@ -130,7 +130,11 @@ def payme_webhook_view(request: HttpRequest, center_slug: str) -> HttpResponse:
         client = get_payme_client()
 
         method = body.get("method")
-        params = body.get("params") or {}
+        # `params` is attacker-controlled: a dict body carrying a non-dict params
+        # ([...], "x", 5) would make params.get("id") raise AttributeError -> 500,
+        # breaking Payme's always-HTTP-200 JSON-RPC contract. Coerce to {}.
+        raw_params = body.get("params")
+        params = raw_params if isinstance(raw_params, dict) else {}
         if method in ("CreateTransaction",) and params.get("id"):
             # Payme's CreateTransaction is idempotent on params.id — a repeat of the same
             # id is an EXPECTED retry, not a nonce-replay, so it must not be flagged

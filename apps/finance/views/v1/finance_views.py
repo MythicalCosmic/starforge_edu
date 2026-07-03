@@ -169,6 +169,10 @@ def _fee_data(request: HttpRequest, *, require_required: bool) -> dict[str, Any]
         day = _positive_int(data, "due_day_of_month")
         if day is None:
             raise _reject("due_day_of_month", "This field may not be null.")
+        if not 1 <= day <= 31:
+            # 0 (or >31) is storable in the PositiveSmallIntegerField but makes
+            # _due_date build date(year, month, 0) -> ValueError -> 500 on every issue.
+            raise _reject("due_day_of_month", "Must be between 1 and 31.")
         out["due_day_of_month"] = day
     if "is_active" in data:
         out["is_active"] = _bool(data, "is_active")
