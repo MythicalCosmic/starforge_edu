@@ -1,26 +1,25 @@
 from django.urls import path
-from rest_framework.routers import DefaultRouter
 
-from .views import (
-    ExamViewSet,
-    GradeRecomputeView,
-    GradeViewSet,
-    HonorRollView,
-    SubjectViewSet,
-    TranscriptViewSet,
-    WarningsView,
-)
-
-router = DefaultRouter()
-router.register("subjects", SubjectViewSet, basename="subject")
-router.register("exams", ExamViewSet, basename="exam")
-router.register("grades", GradeViewSet, basename="grade")
-router.register("transcripts", TranscriptViewSet, basename="transcript")
+from apps.academics.views.v1 import academics_views as views
 
 urlpatterns = [
-    # Explicit collection routes must precede the router's `{pk}` patterns.
-    path("grades/recompute/", GradeRecomputeView.as_view(), name="grade-recompute"),
-    path("honor-roll/", HonorRollView.as_view(), name="honor-roll"),
-    path("warnings/", WarningsView.as_view(), name="warnings"),
-    *router.urls,
+    # Subjects
+    path("subjects/", views.subjects_collection_view, name="subject-list"),
+    path("subjects/<int:pk>/", views.subject_detail_view, name="subject-detail"),
+    # Exams (+ per-student results / CSV import / publish actions)
+    path("exams/", views.exams_collection_view, name="exam-list"),
+    path("exams/<int:pk>/results/import-csv/", views.exam_import_csv_view, name="exam-import-csv"),
+    path("exams/<int:pk>/results/", views.exam_results_view, name="exam-results"),
+    path("exams/<int:pk>/publish/", views.exam_publish_view, name="exam-publish"),
+    path("exams/<int:pk>/", views.exam_detail_view, name="exam-detail"),
+    # Grades (read-only computed) + recompute — recompute BEFORE the <pk> route
+    path("grades/recompute/", views.grade_recompute_view, name="grade-recompute"),
+    path("grades/", views.grades_collection_view, name="grade-list"),
+    path("grades/<int:pk>/", views.grade_detail_view, name="grade-detail"),
+    # Transcripts (async PDF)
+    path("transcripts/", views.transcripts_collection_view, name="transcript-list"),
+    path("transcripts/<int:pk>/", views.transcript_detail_view, name="transcript-detail"),
+    # Staff-only aggregates
+    path("honor-roll/", views.honor_roll_view, name="honor-roll"),
+    path("warnings/", views.warnings_view, name="warnings"),
 ]

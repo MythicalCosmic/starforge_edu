@@ -272,6 +272,36 @@ def test_csv_import_atomic_and_row_errors(tenant_a):
         assert ExamResult.objects.filter(exam=exam).count() == 2
 
 
+def test_csv_import_nan_score_is_row_error_not_500(tenant_a):
+    """Decimal("NaN") parses without raising, but a NaN comparison would raise
+    InvalidOperation (an uncaught 500). It must be reported as a bad row (422)."""
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        exam: Any = ExamFactory(max_score=Decimal("100"))
+        s1: Any = StudentProfileFactory(branch=branch)
+        CohortMembershipFactory(cohort=exam.cohort, student=s1)
+        nan_csv = io.BytesIO(f"student_id,score\n{s1.student_id},NaN\n".encode())
+        nan_csv.name = "nan.csv"
+        with pytest.raises(UnprocessableEntity) as exc:
+            services.bulk_grade_import(exam=exam, csv_file=nan_csv, actor=None)
+        assert exc.value.code == "csv_row_errors"
+        assert ExamResult.objects.filter(exam=exam).count() == 0
+
+
+def test_csv_import_non_utf8_is_400_not_500(tenant_a):
+    """A Latin-1 export (byte 0xE9 = 'é') would raise an uncaught UnicodeDecodeError;
+    it must surface as a clean 400 bad_encoding."""
+    from core.exceptions import ValidationException
+
+    with schema_context(tenant_a.schema_name):
+        exam: Any = ExamFactory(max_score=Decimal("100"))
+        latin1 = io.BytesIO("student_id,score,note\nX,80,caf\xe9\n".encode("latin-1"))
+        latin1.name = "latin1.csv"
+        with pytest.raises(ValidationException) as exc:
+            services.bulk_grade_import(exam=exam, csv_file=latin1, actor=None)
+        assert exc.value.code == "bad_encoding"
+
+
 # --------------------------------------------------------------------------- #
 # transcript task lifecycle
 # --------------------------------------------------------------------------- #
@@ -318,7 +348,7 @@ def test_transcript_post_returns_202_pending(tenant_a, user_in, as_user):
         "/api/v1/academics/transcripts/", {"student": student_id}, format="json"
     )
     assert resp.status_code == 202
-    body = resp.json()
+    body = resp.json()["data"]
     assert body["status"] == "pending"
     with schema_context(tenant_a.schema_name):
         assert Transcript.objects.filter(pk=body["id"], status="pending").exists()
@@ -383,14 +413,14 @@ def test_publication_gating_parent_student_teacher(tenant_a, user_in, as_user):
         published_id, draft_id = published.id, draft.id
 
     student_body = as_user(tenant_a, student_user).get("/api/v1/academics/grades/").json()
-    assert {g["id"] for g in student_body["results"]} == {published_id}
+    assert {g["id"] for g in student_body["data"]} == {published_id}
 
     parent_body = as_user(tenant_a, parent_user).get("/api/v1/academics/grades/").json()
-    assert {g["id"] for g in parent_body["results"]} == {published_id}
+    assert {g["id"] for g in parent_body["data"]} == {published_id}
 
     # Teacher of the cohort sees BOTH published + draft for their students.
     teacher_body = as_user(tenant_a, teacher_user).get("/api/v1/academics/grades/").json()
-    teacher_ids = {g["id"] for g in teacher_body["results"]}
+    teacher_ids = {g["id"] for g in teacher_body["data"]}
     assert published_id in teacher_ids
     assert draft_id in teacher_ids
 
@@ -456,6 +486,12 @@ def test_exam_results_write_path_teacher_cohort_scoped(tenant_a, user_in, as_use
     director_client = as_user(tenant_a, director)
     assert director_client.get(f"{base}/results/").status_code == 200
     assert director_client.post(f"{base}/publish/").status_code == 200
+    # Empty body is a 400 contract error (parity with the old DRF ParseError); an
+    # explicit empty JSON array [] is a valid no-op (200).
+    assert (
+        director_client.post(f"{base}/results/", data="", content_type="application/json").status_code == 400
+    )
+    assert director_client.post(f"{base}/results/", [], format="json").status_code == 200
 
 
 def test_exam_list_teacher_cohort_scoped(tenant_a, user_in, as_user):
@@ -472,7 +508,7 @@ def test_exam_list_teacher_cohort_scoped(tenant_a, user_in, as_user):
         my_exam_id = my_exam.id
 
     body = as_user(tenant_a, teacher_user).get("/api/v1/academics/exams/").json()
-    assert {e["id"] for e in body["results"]} == {my_exam_id}
+    assert {e["id"] for e in body["data"]} == {my_exam_id}
 
 
 # --------------------------------------------------------------------------- #
@@ -559,15 +595,15 @@ def test_honor_roll_and_warnings_teacher_cohort_scoped(tenant_a, user_in, as_use
     teacher = as_user(tenant_a, teacher_user)
     director_client = as_user(tenant_a, director)
 
-    honor = teacher.get(f"/api/v1/academics/honor-roll/?term={term_id}").json()
+    honor = teacher.get(f"/api/v1/academics/honor-roll/?term={term_id}").json()["data"]
     assert {g["id"] for g in honor} == {mine_grade_id}  # teacher: own cohort only
-    warn = teacher.get(f"/api/v1/academics/warnings/?term={term_id}").json()
+    warn = teacher.get(f"/api/v1/academics/warnings/?term={term_id}").json()["data"]
     assert {g["id"] for g in warn} == {mine_warn_id}
 
     # Director sees the whole tenant (both cohorts).
-    director_honor = director_client.get(f"/api/v1/academics/honor-roll/?term={term_id}").json()
+    director_honor = director_client.get(f"/api/v1/academics/honor-roll/?term={term_id}").json()["data"]
     assert len(director_honor) == 2
-    director_warn = director_client.get(f"/api/v1/academics/warnings/?term={term_id}").json()
+    director_warn = director_client.get(f"/api/v1/academics/warnings/?term={term_id}").json()["data"]
     assert len(director_warn) == 2
 
 
@@ -616,7 +652,7 @@ def test_teacher_cannot_create_exam_in_non_taught_cohort(tenant_a, user_in, as_u
 
     ok = client.post("/api/v1/academics/exams/", {**base, "cohort": own_id}, format="json")
     assert ok.status_code == 201
-    assert ok.json()["cohort"] == own_id
+    assert ok.json()["data"]["cohort"] == own_id
 
 
 def test_grades_cross_tenant_isolated(tenant_a, tenant_b, user_in, as_user):
@@ -627,7 +663,7 @@ def test_grades_cross_tenant_isolated(tenant_a, tenant_b, user_in, as_user):
 
     director_b = user_in(tenant_b, roles=["director"])
     body = as_user(tenant_b, director_b).get("/api/v1/academics/grades/").json()
-    assert body["count"] == 0
+    assert body["pagination"]["total"] == 0
 
 
 def test_grades_list_query_budget(tenant_a, user_in, as_user, django_assert_max_num_queries):
@@ -642,8 +678,8 @@ def test_grades_list_query_budget(tenant_a, user_in, as_user, django_assert_max_
     client = as_user(tenant_a, director)
     with django_assert_max_num_queries(8):
         body = client.get("/api/v1/academics/grades/").json()
-    assert set(body) == {"count", "next", "previous", "results"}
-    assert body["count"] == 5
+    assert set(body) == {"success", "data", "pagination"}
+    assert body["pagination"]["total"] == 5
 
 
 def test_exams_list_query_budget(tenant_a, user_in, as_user, django_assert_max_num_queries):
@@ -664,4 +700,4 @@ def test_exams_list_query_budget(tenant_a, user_in, as_user, django_assert_max_n
     client = as_user(tenant_a, director)
     with django_assert_max_num_queries(9):  # +1: A-2 per-request permission-override load
         body = client.get("/api/v1/academics/exams/").json()
-    assert body["count"] == 5
+    assert body["pagination"]["total"] == 5

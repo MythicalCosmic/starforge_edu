@@ -125,7 +125,15 @@ def bulk_grade_import(*, exam: Exam, csv_file, actor=None) -> dict:
             code="file_too_large",
         )
     raw = csv_file.read()
-    text = raw.decode("utf-8-sig") if isinstance(raw, bytes) else raw
+    if isinstance(raw, bytes):
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            # A Latin-1 / Windows-1252 export (Excel's default) would otherwise raise
+            # an uncaught UnicodeDecodeError -> hard 500; surface a clean 400 instead.
+            raise ValidationException(_("CSV file must be UTF-8 encoded."), code="bad_encoding") from None
+    else:
+        text = raw
     reader = csv.DictReader(io.StringIO(text))
     if not {"student_id", "score"} <= set(reader.fieldnames or []):
         raise ValidationException(
@@ -158,6 +166,11 @@ def bulk_grade_import(*, exam: Exam, csv_file, actor=None) -> dict:
         try:
             score = Decimal((raw_row.get("score") or "").strip())
         except (InvalidOperation, ValueError):
+            row_errors.append({"row": line_no, "error": "Score is not a number."})
+            continue
+        if not score.is_finite():
+            # Decimal("NaN")/"Infinity" parse without raising, but a NaN comparison
+            # below raises InvalidOperation (an uncaught 500) — reject as a bad row.
             row_errors.append({"row": line_no, "error": "Score is not a number."})
             continue
         if score < 0 or score > exam.max_score:
