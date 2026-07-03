@@ -59,7 +59,7 @@ def test_register_agent_stores_only_hash(tenant_a):
 # Agent auth: valid / revoked / unknown / cross-branch (D4-LD-2/3)
 # --------------------------------------------------------------------------- #
 def test_agent_claim_valid_token_returns_job(tenant_a, client_for, monkeypatch):
-    from apps.printing import views
+    from apps.printing.views.v1 import printing_views as views
 
     monkeypatch.setattr(views, "presign_download", lambda key, **kw: f"signed://{key}")
     with schema_context(tenant_a.schema_name):
@@ -69,7 +69,7 @@ def test_agent_claim_valid_token_returns_job(tenant_a, client_for, monkeypatch):
 
     resp = _agent_client(client_for, tenant_a, raw).post(CLAIM_URL)
     assert resp.status_code == 200
-    body = resp.json()
+    body = resp.json()["data"]
     assert body["job"]["id"] == job.pk
     assert body["download_url"].startswith("signed://")
 
@@ -89,13 +89,13 @@ def test_agent_revoked_token_rejected_401(tenant_a, client_for):
         services.revoke_agent(agent_id=agent.pk)
     resp = _agent_client(client_for, tenant_a, raw).post(CLAIM_URL)
     assert resp.status_code == 401
-    assert resp.json()["error"]["code"] == "agent_token_invalid"
+    assert resp.json()["code"] == "agent_token_invalid"
 
 
 def test_agent_unknown_token_rejected_401(tenant_a, client_for):
     resp = _agent_client(client_for, tenant_a, "deadbeef-not-a-real-token").post(CLAIM_URL)
     assert resp.status_code == 401
-    assert resp.json()["error"]["code"] == "agent_token_invalid"
+    assert resp.json()["code"] == "agent_token_invalid"
 
 
 def test_agent_missing_token_rejected_401(tenant_a, client_for):
@@ -104,7 +104,7 @@ def test_agent_missing_token_rejected_401(tenant_a, client_for):
 
 
 def test_agent_cannot_claim_other_branch_job(tenant_a, client_for, monkeypatch):
-    from apps.printing import views
+    from apps.printing.views.v1 import printing_views as views
 
     monkeypatch.setattr(views, "presign_download", lambda key, **kw: "signed://x")
     with schema_context(tenant_a.schema_name):
@@ -141,7 +141,7 @@ def test_transition_picked_to_printing_to_done(tenant_a, client_for):
     assert client.post(_status_url(job.pk), {"status": "printing"}, format="json").status_code == 200
     resp = client.post(_status_url(job.pk), {"status": "done", "pages_printed": 3}, format="json")
     assert resp.status_code == 200
-    assert resp.json()["status"] == "done"
+    assert resp.json()["data"]["status"] == "done"
     with schema_context(tenant_a.schema_name):
         job.refresh_from_db()
         assert job.pages_printed == 3
@@ -165,7 +165,7 @@ def test_illegal_transitions_409(tenant_a, client_for, start, to):
         job = PrintJobFactory(branch=branch, status=start, agent=agent)
     resp = _agent_client(client_for, tenant_a, raw).post(_status_url(job.pk), {"status": to}, format="json")
     assert resp.status_code == 409
-    assert resp.json()["error"]["code"] == "invalid_transition"
+    assert resp.json()["code"] == "invalid_transition"
 
 
 # --------------------------------------------------------------------------- #
@@ -480,7 +480,7 @@ def test_staff_create_job_director(as_role, tenant_a):
         format="json",
     )
     assert resp.status_code == 201
-    assert resp.json()["status"] == "queued"
+    assert resp.json()["data"]["status"] == "queued"
 
 
 def test_staff_create_job_teacher_allowed(as_role, tenant_a, user_in, as_user):
@@ -532,7 +532,7 @@ def test_register_agent_endpoint_returns_token_once(as_role, tenant_a):
         branch = BranchFactory()
     resp = client.post(AGENTS_URL, {"branch": branch.pk, "name": "Desk"}, format="json")
     assert resp.status_code == 201
-    body = resp.json()
+    body = resp.json()["data"]
     assert "token" in body
     assert len(body["token"]) >= 32
     # The token returned is raw; the DB stores only its hash.
@@ -541,7 +541,7 @@ def test_register_agent_endpoint_returns_token_once(as_role, tenant_a):
         assert agent.token_hash == stable_hash(body["token"])
     # Listing agents never exposes the token.
     list_body = client.get(AGENTS_URL).json()
-    assert all("token" not in row and "token_hash" not in row for row in list_body["results"])
+    assert all("token" not in row and "token_hash" not in row for row in list_body["data"])
 
 
 @pytest.mark.parametrize("role", [Role.STUDENT, Role.PARENT])
@@ -564,6 +564,22 @@ def test_register_agent_registrar_own_branch_allowed(tenant_a, user_in, as_user)
     assert resp.status_code == 201
 
 
+def test_printer_patch_explicit_null_rejected(as_role, tenant_a):
+    """PATCH of a NOT NULL column with an explicit JSON null is a 400, not a silent
+    coerce-to-default that would wipe the printer's capabilities."""
+    from apps.printing.models import Printer
+
+    client, _ = as_role(Role.DIRECTOR)
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        printer = Printer.objects.create(branch=branch, name="P1", capabilities={"color": True})
+    resp = client.patch(f"{PRINTERS_URL}{printer.pk}/", {"capabilities": None}, format="json")
+    assert resp.status_code == 400
+    with schema_context(tenant_a.schema_name):
+        printer.refresh_from_db()
+        assert printer.capabilities == {"color": True}  # not wiped
+
+
 # --------------------------------------------------------------------------- #
 # Cross-tenant isolation (TD-1)
 # --------------------------------------------------------------------------- #
@@ -577,7 +593,7 @@ def test_jobs_cross_tenant_token_rejected(tenant_a, tenant_b, user_in, client_fo
     client_b.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
     resp = client_b.get(JOBS_URL)
     assert resp.status_code == 401
-    assert resp.json()["error"]["code"] == "authentication_failed"
+    assert resp.json()["code"] == "authentication_failed"
 
 
 def test_jobs_not_visible_across_tenants(tenant_a, tenant_b, as_role):
@@ -585,7 +601,7 @@ def test_jobs_not_visible_across_tenants(tenant_a, tenant_b, as_role):
         branch = BranchFactory()
         PrintJobFactory(branch=branch, source_id=7777, payload_s3_key="a/secret.pdf")
     client_b, _ = as_role(Role.DIRECTOR, tenant=tenant_b)
-    keys = {row["payload_s3_key"] for row in client_b.get(JOBS_URL).json()["results"]}
+    keys = {row["payload_s3_key"] for row in client_b.get(JOBS_URL).json()["data"]}
     assert "a/secret.pdf" not in keys
 
 
@@ -596,7 +612,7 @@ def test_agent_token_does_not_authenticate_cross_tenant(tenant_a, tenant_b, clie
     # The same raw token presented to tenant_b finds no matching hash there.
     resp = _agent_client(client_for, tenant_b, raw).post(CLAIM_URL)
     assert resp.status_code == 401
-    assert resp.json()["error"]["code"] == "agent_token_invalid"
+    assert resp.json()["code"] == "agent_token_invalid"
 
 
 # --------------------------------------------------------------------------- #
@@ -611,4 +627,4 @@ def test_jobs_list_query_budget(as_role, tenant_a, django_assert_max_num_queries
     with django_assert_max_num_queries(10):
         resp = client.get(JOBS_URL)
     assert resp.status_code == 200
-    assert len(resp.json()["results"]) == 10
+    assert len(resp.json()["data"]) == 10
