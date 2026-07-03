@@ -11,9 +11,8 @@ from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from django_tenants.utils import schema_context
 
+from apps.tenancy.models import Center, Domain, PlatformEvent
 from core.exceptions import NotFoundException, ValidationException
-
-from .models import Center, Domain, PlatformEvent
 
 # Postgres-safe schema names: lowercase, starts with a letter, ≤ 63 chars.
 SLUG_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")

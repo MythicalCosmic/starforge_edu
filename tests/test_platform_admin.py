@@ -38,27 +38,39 @@ def test_public_schema_platform_admin_login(platform_admin):
     assert resp.wsgi_request.user.is_authenticated
 
 
-def test_platform_centers_api_staff_200(platform_admin, tenant_a):
+def _staff_client(user):
+    # The layered platform views use the custom session authenticator (not DRF
+    # force_authenticate) — mint a real public-schema session key.
+    from core.session_auth import create_session
+
     client = APIClient()
-    client.force_authenticate(platform_admin)
-    resp = client.get("/api/v1/platform/centers/")
+    client.credentials(HTTP_AUTHORIZATION=f"Bearer {create_session(user).key}")
+    return client
+
+
+def test_platform_centers_api_staff_200(platform_admin, tenant_a):
+    resp = _staff_client(platform_admin).get("/api/v1/platform/centers/")
     assert resp.status_code == 200
-    data = resp.json()
-    rows = data["results"] if isinstance(data, dict) else data
+    rows = resp.json()["data"]  # layered {success, data, pagination}
     assert tenant_a.slug in {row["slug"] for row in rows}
 
 
-def test_platform_centers_api_non_staff_403(public_tenant, tenant_a, user_in):
-    user = user_in(tenant_a)  # plain tenant user, is_staff=False
-    client = APIClient()
-    client.force_authenticate(user)
-    assert client.get("/api/v1/platform/centers/").status_code == 403
+def test_platform_centers_api_non_staff_403(public_tenant, tenant_a):
+    """A public-schema NON-staff user authenticates but is denied (is_staff gate).
+
+    (A tenant-schema user is rejected earlier with 401 — no public Session row —
+    covered by the D4-LE-7 apex lockdown tests; here we exercise the is_staff
+    branch, so the user must be a real public-schema user.)"""
+    from apps.users.models import User
+
+    user = User.objects.create_user(username="plat-plain", password=PASSWORD)  # is_staff=False
+    assert _staff_client(user).get("/api/v1/platform/centers/").status_code == 403
 
 
 def test_set_primary_non_numeric_domain_id_404(platform_admin, tenant_a):
-    """Routing regression: (?P<domain_id>\\d+) must reject non-numeric ids at
-    the resolver (404) instead of int() exploding into a 500."""
-    client = APIClient()
-    client.force_authenticate(platform_admin)
-    resp = client.post(f"/api/v1/platform/centers/{tenant_a.pk}/domains/abc/set-primary/")
+    """Routing regression: <int:domain_id> must reject non-numeric ids at the
+    resolver (404) instead of int() exploding into a 500."""
+    resp = _staff_client(platform_admin).post(
+        f"/api/v1/platform/centers/{tenant_a.pk}/domains/abc/set-primary/"
+    )
     assert resp.status_code == 404

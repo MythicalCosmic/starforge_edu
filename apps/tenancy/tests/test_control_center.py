@@ -52,8 +52,13 @@ def staff_admin(public_tenant):
 
 @pytest.fixture
 def staff_client(staff_admin):
+    # The layered control-center views authenticate with the custom session
+    # authenticator (not DRF force_authenticate) — mint a real public-schema
+    # session key so a Bearer credential exercises the platform-admin gate.
+    from core.session_auth import create_session
+
     client = APIClient()
-    client.force_authenticate(staff_admin)
+    client.credentials(HTTP_AUTHORIZATION=f"Bearer {create_session(staff_admin).key}")
     return client
 
 
@@ -105,7 +110,7 @@ def test_suspend_then_activate_round_trip(
     assert resp.status_code == 200
     # Suspension is SOFT: is_active stays True (the 402 paywall gates the API; a
     # 503 InactiveTenant would otherwise shadow the paywall and block auth too).
-    assert resp.json()["is_active"] is True
+    assert resp.json()["data"]["is_active"] is True
     assert Subscription.objects.get(center=tenant_a).status == "suspended"
 
     # Tenant API now blocked by the Day-3 paywall (402 subscription_required).
@@ -116,7 +121,7 @@ def test_suspend_then_activate_round_trip(
     with django_capture_on_commit_callbacks(execute=True):
         resp = staff_client.post(f"/api/v1/platform/centers/{tenant_a.pk}/activate/", {}, format="json")
     assert resp.status_code == 200
-    assert resp.json()["is_active"] is True
+    assert resp.json()["data"]["is_active"] is True
     assert Subscription.objects.get(center=tenant_a).status == "active"
 
     # Reactivated → tenant API returns past the paywall again.
@@ -161,13 +166,34 @@ def test_create_center_delegates_to_provision(staff_client):
         assert CenterSettings.objects.filter(pk=1).exists()
 
 
+def test_create_center_trims_padded_contact_email(staff_client):
+    """A padded contact_email must be trimmed+accepted (DRF EmailField parity),
+    not 400'd — and stored without the surrounding whitespace."""
+    resp = staff_client.post(
+        "/api/v1/platform/centers/",
+        {
+            "name": "Padded Email",
+            "slug": "padmail",
+            "primary_domain": "padmail.localhost",
+            "contact_email": "  ops@padmail.example  ",
+        },
+        format="json",
+    )
+    assert resp.status_code == 201, resp.content
+    assert resp.json()["data"]["contact_email"] == "ops@padmail.example"
+    from apps.tenancy.models import Center
+
+    assert Center.objects.get(slug="padmail").contact_email == "ops@padmail.example"
+
+
 def test_non_staff_public_user_403(public_tenant, tenant_a):
     """A public-schema NON-staff user is forbidden on the control center."""
     from apps.users.models import User
+    from core.session_auth import create_session
 
     user = User.objects.create_user(username="ctl-plain", password=PASSWORD)
     client = APIClient()
-    client.force_authenticate(user)
+    client.credentials(HTTP_AUTHORIZATION=f"Bearer {create_session(user).key}")
     assert client.post(f"/api/v1/platform/centers/{tenant_a.pk}/suspend/", {}).status_code == 403
 
 
@@ -189,7 +215,7 @@ def test_usage_endpoint_series_and_live_today(staff_client, tenant_a):
 
     resp = staff_client.get(f"/api/v1/platform/centers/{tenant_a.pk}/usage/?days=30")
     assert resp.status_code == 200
-    body = resp.json()
+    body = resp.json()["data"]
     assert any(p["students"] == 42 for p in body["series"])
     assert body["today"]["students"] == 42  # carried from latest snapshot
     assert body["today"]["dau"] >= 1
@@ -202,8 +228,8 @@ def test_usage_endpoint_two_tenant_isolation(staff_client, tenant_a, tenant_b):
     UsageSnapshot.objects.create(center=tenant_a, date=today, students_count=11)
     UsageSnapshot.objects.create(center=tenant_b, date=today, students_count=22)
 
-    a = staff_client.get(f"/api/v1/platform/centers/{tenant_a.pk}/usage/").json()
-    b = staff_client.get(f"/api/v1/platform/centers/{tenant_b.pk}/usage/").json()
+    a = staff_client.get(f"/api/v1/platform/centers/{tenant_a.pk}/usage/").json()["data"]
+    b = staff_client.get(f"/api/v1/platform/centers/{tenant_b.pk}/usage/").json()["data"]
     assert all(p["students"] in (11, 0) for p in a["series"])
     assert all(p["students"] in (22, 0) for p in b["series"])
 
@@ -260,7 +286,7 @@ def test_impersonation_mint_returns_access_only(staff_client, tenant_a, user_in)
     target = user_in(tenant_a, roles=["teacher"])
     resp = _mint_impersonation(staff_client, tenant_a, target.pk)
     assert resp.status_code == 200
-    body = resp.json()
+    body = resp.json()["data"]
     assert body["expires_in"] == 600
     assert "access" in body  # access-ONLY...
     assert "refresh" not in body  # ...no refresh token is minted
@@ -269,7 +295,7 @@ def test_impersonation_mint_returns_access_only(staff_client, tenant_a, user_in)
 def test_impersonation_unknown_user_404(staff_client, tenant_a):
     resp = _mint_impersonation(staff_client, tenant_a, 999999)
     assert resp.status_code == 404
-    assert resp.json()["error"]["code"] == "user_not_found"
+    assert resp.json()["code"] == "user_not_found"
 
 
 def test_impersonation_both_sides_audited(staff_client, tenant_a, user_in):
@@ -304,7 +330,7 @@ def test_impersonation_token_get_works_write_denied(staff_client, tenant_a, user
         pytest.skip("DenyWriteForReadOnlyToken not wired yet (see integration_needed)")
 
     director = user_in(tenant_a, roles=["director"])
-    minted = _mint_impersonation(staff_client, tenant_a, director.pk).json()
+    minted = _mint_impersonation(staff_client, tenant_a, director.pk).json()["data"]
     token = minted["access"]
 
     tclient = client_for(tenant_a)
@@ -330,7 +356,7 @@ def test_impersonation_write_denied_on_apiview(staff_client, tenant_a, user_in, 
     override permission_classes, so a permission-class-only guard would miss them.
     Uses the CenterSettings APIView: GET works, PATCH is denied read_only_token."""
     director = user_in(tenant_a, roles=["director"])
-    token = _mint_impersonation(staff_client, tenant_a, director.pk).json()["access"]
+    token = _mint_impersonation(staff_client, tenant_a, director.pk).json()["data"]["access"]
 
     tclient = client_for(tenant_a)
     tclient.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
@@ -346,7 +372,7 @@ def test_impersonation_token_get_works_unconditionally(staff_client, tenant_a, u
     impersonation token (it carries valid schema+tv), so a GET succeeds. This
     test proves the read path independent of the core write-deny wiring."""
     director = user_in(tenant_a, roles=["director"])
-    token = _mint_impersonation(staff_client, tenant_a, director.pk).json()["access"]
+    token = _mint_impersonation(staff_client, tenant_a, director.pk).json()["data"]["access"]
     tclient = client_for(tenant_a)
     tclient.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
     assert tclient.get("/api/v1/org/branches/").status_code == 200
@@ -358,7 +384,7 @@ def test_impersonation_token_expires(staff_client, tenant_a, user_in, client_for
 
     director = user_in(tenant_a, roles=["director"])
     with time_machine.travel(timezone.now() - timedelta(minutes=11), tick=False):
-        token = _mint_impersonation(staff_client, tenant_a, director.pk).json()["access"]
+        token = _mint_impersonation(staff_client, tenant_a, director.pk).json()["data"]["access"]
 
     tclient = client_for(tenant_a)
     tclient.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
@@ -375,7 +401,7 @@ def test_impersonation_mints_a_readonly_session(staff_client, tenant_a, user_in)
 
     target = user_in(tenant_a, roles=["teacher"])
 
-    key = _mint_impersonation(staff_client, tenant_a, target.pk).json()["access"]
+    key = _mint_impersonation(staff_client, tenant_a, target.pk).json()["data"]["access"]
 
     with schema_context(tenant_a.schema_name):
         session = Session.objects.get(key=key)
@@ -430,7 +456,7 @@ def test_platform_event_is_append_only(staff_client, tenant_a):
 def test_resolve_happy(public_tenant, tenant_a, api_client):
     resp = api_client.get(f"/api/v1/platform/resolve/?slug={tenant_a.slug}")
     assert resp.status_code == 200
-    body = resp.json()
+    body = resp.json()["data"]
     assert body["name"] == tenant_a.name
     assert body["ws_url"].endswith("/ws/notifications/")
     assert body["locale"]  # non-empty
@@ -439,7 +465,7 @@ def test_resolve_happy(public_tenant, tenant_a, api_client):
 def test_resolve_unknown_slug_404(public_tenant, api_client):
     resp = api_client.get("/api/v1/platform/resolve/?slug=does-not-exist")
     assert resp.status_code == 404
-    assert resp.json()["error"]["code"] == "center_not_found"
+    assert resp.json()["code"] == "center_not_found"
 
 
 def test_resolve_missing_slug_400(public_tenant, api_client):
@@ -447,14 +473,15 @@ def test_resolve_missing_slug_400(public_tenant, api_client):
 
 
 def test_resolve_anon_throttle(public_tenant, tenant_a, api_client, monkeypatch):
-    """Anonymous resolve is anon-rate throttled (429 after the limit)."""
-    # DRF binds SimpleRateThrottle.THROTTLE_RATES once at import, so a plain
-    # settings override of DEFAULT_THROTTLE_RATES does NOT reach the throttle
-    # mid-suite. Mutate the exact dict the throttle reads (monkeypatch restores
-    # it on teardown); conftest._clear_cache gives a fresh throttle bucket.
-    from rest_framework.throttling import AnonRateThrottle
+    """Anonymous resolve is anon-rate throttled (429 after the limit).
 
-    monkeypatch.setitem(AnonRateThrottle.THROTTLE_RATES, "anon", "2/min")
+    The layered resolve view uses core.ratelimit.check_rate keyed by client IP
+    (not DRF's AnonRateThrottle). Lower the view's per-IP limit so the 429 path
+    fires within a few requests; conftest._clear_cache gives a fresh bucket.
+    """
+    from apps.tenancy.views.v1 import tenancy_views
+
+    monkeypatch.setattr(tenancy_views, "RESOLVE_RATE_LIMIT", 2)
     url = f"/api/v1/platform/resolve/?slug={tenant_a.slug}"
     codes = [api_client.get(url).status_code for _ in range(4)]
     assert 429 in codes
