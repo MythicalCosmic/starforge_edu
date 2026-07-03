@@ -159,32 +159,32 @@ def test_generate_endpoint_returns_202(tenant_a, user_in, as_user, monkeypatch):
     s = _setup(tenant_a, user_in, as_user)
     _seed_placement_ai(tenant_a)
     _mock_complete(monkeypatch, json.dumps(_GOOD_QUESTIONS))
-    tid = s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["id"]
+    tid = s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["data"]["id"]
     r = s["teacher"].post(f"{TESTS}{tid}/generate/", {"count": 5, "difficulty": "easy"}, format="json")
     assert r.status_code == 202, r.content
-    assert r.json()["request_id"]
+    assert r.json()["data"]["request_id"]
 
 
 def test_generate_endpoint_blocked_when_feature_disabled(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     _seed_placement_ai(tenant_a, enabled=False)  # centre has AI generation off
-    tid = s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["id"]
+    tid = s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["data"]["id"]
     r = s["teacher"].post(f"{TESTS}{tid}/generate/", {"count": 5}, format="json")
     assert r.status_code == 403
-    assert r.json()["error"]["code"] == "feature_disabled"
+    assert r.json()["code"] == "feature_disabled"
 
 
 def test_generate_endpoint_rejects_a_non_draft_test(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     _seed_placement_ai(tenant_a)
-    tid = s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["id"]
+    tid = s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["data"]["id"]
     s["teacher"].post(f"{TESTS}{tid}/questions/", {
         "prompt": "q", "question_type": "true_false", "correct_answer": True,
     }, format="json")
     s["teacher"].post(f"{TESTS}{tid}/submit/", {}, format="json")  # -> PENDING
     r = s["teacher"].post(f"{TESTS}{tid}/generate/", {"count": 5}, format="json")
     assert r.status_code == 422
-    assert r.json()["error"]["code"] == "test_not_draft"
+    assert r.json()["code"] == "test_not_draft"
 
 
 def test_apply_skips_unknown_types_and_bounds_points_without_failing(tenant_a, user_in, as_user):
@@ -233,6 +233,6 @@ def test_apply_tolerates_a_vanished_test(tenant_a):
 def test_student_cannot_generate(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     _seed_placement_ai(tenant_a)
-    tid = s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["id"]
+    tid = s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["data"]["id"]
     student = as_user(tenant_a, user_in(tenant_a, roles=[Role.STUDENT], branch=s["branch"]))
     assert student.post(f"{TESTS}{tid}/generate/", {"count": 5}, format="json").status_code == 403

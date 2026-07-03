@@ -60,7 +60,7 @@ def _setup(tenant, user_in, as_user, *, minutes):
 def _assign(s):
     r = s["hod"].post(ATTEMPTS, {"test": s["test"].id, "student": s["lead"].id}, format="json")
     assert r.status_code == 201, r.content
-    return r.json()
+    return r.json()["data"]
 
 
 def test_timed_attempt_gets_a_deadline(tenant_a, user_in, as_user):
@@ -91,7 +91,7 @@ def test_submit_before_deadline_succeeds(tenant_a, user_in, as_user):
         format="json",
     )
     assert res.status_code == 200
-    assert res.json()["status"] == "graded"
+    assert res.json()["data"]["status"] == "graded"
 
 
 def test_submit_after_deadline_is_rejected(tenant_a, user_in, as_user):
@@ -112,7 +112,7 @@ def test_submit_after_deadline_is_rejected(tenant_a, user_in, as_user):
         format="json",
     )
     assert res.status_code == 422
-    assert res.json()["error"]["code"] == "attempt_expired"
+    assert res.json()["code"] == "attempt_expired"
 
 
 def test_manager_sets_time_limit_on_the_test(tenant_a, user_in, as_user):
@@ -125,4 +125,4 @@ def test_manager_sets_time_limit_on_the_test(tenant_a, user_in, as_user):
         TESTS, {"title": "T", "branch": branch.id, "time_limit_minutes": 20}, format="json"
     )
     assert created.status_code == 201
-    assert created.json()["time_limit_minutes"] == 20
+    assert created.json()["data"]["time_limit_minutes"] == 20

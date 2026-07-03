@@ -71,8 +71,8 @@ def test_toggle_off_proposal_enrolls_directly(tenant_a, user_in, as_user):
         PROPOSALS, {"student": s["lead"].id, "cohort": s["cohort"].id}, format="json"
     )
     assert r.status_code == 201, r.content
-    assert r.json()["status"] == "accepted"
-    assert r.json()["membership"] is not None
+    assert r.json()["data"]["status"] == "accepted"
+    assert r.json()["data"]["membership"] is not None
     assert _is_enrolled(tenant_a, s["lead"], s["cohort"])
 
 
@@ -83,14 +83,14 @@ def test_toggle_on_requires_manager_acceptance(tenant_a, user_in, as_user):
         PROPOSALS, {"student": s["lead"].id, "cohort": s["cohort"].id}, format="json"
     )
     assert proposed.status_code == 201
-    assert proposed.json()["status"] == "pending"
-    pid = proposed.json()["id"]
+    assert proposed.json()["data"]["status"] == "pending"
+    pid = proposed.json()["data"]["id"]
     # not enrolled yet — it's awaiting a manager
     assert not _is_enrolled(tenant_a, s["lead"], s["cohort"])
     # the manager accepts -> enrolled
     accepted = s["hod"].post(f"{PROPOSALS}{pid}/accept/", {}, format="json")
     assert accepted.status_code == 200
-    assert accepted.json()["status"] == "accepted"
+    assert accepted.json()["data"]["status"] == "accepted"
     assert _is_enrolled(tenant_a, s["lead"], s["cohort"])
 
 
@@ -99,11 +99,11 @@ def test_manager_rejects_with_reason_no_enrollment(tenant_a, user_in, as_user):
     _set_require_acceptance(tenant_a, True)
     pid = s["reception"].post(
         PROPOSALS, {"student": s["lead"].id, "cohort": s["cohort"].id}, format="json"
-    ).json()["id"]
+    ).json()["data"]["id"]
     rejected = s["hod"].post(f"{PROPOSALS}{pid}/reject/", {"reason": "Wrong level"}, format="json")
     assert rejected.status_code == 200
-    assert rejected.json()["status"] == "rejected"
-    assert rejected.json()["reject_reason"] == "Wrong level"
+    assert rejected.json()["data"]["status"] == "rejected"
+    assert rejected.json()["data"]["reject_reason"] == "Wrong level"
     assert not _is_enrolled(tenant_a, s["lead"], s["cohort"])
 
 
@@ -114,10 +114,10 @@ def test_proposer_cannot_self_accept(tenant_a, user_in, as_user):
     # an HOD proposes (HOD holds both write + approve)
     pid = s["hod"].post(
         PROPOSALS, {"student": s["lead"].id, "cohort": s["cohort"].id}, format="json"
-    ).json()["id"]
+    ).json()["data"]["id"]
     own = s["hod"].post(f"{PROPOSALS}{pid}/accept/", {}, format="json")
     assert own.status_code == 403
-    assert own.json()["error"]["code"] == "self_acceptance"
+    assert own.json()["code"] == "self_acceptance"
     # a different manager can accept
     assert s["hod2"].post(f"{PROPOSALS}{pid}/accept/", {}, format="json").status_code == 200
 
@@ -127,7 +127,7 @@ def test_reception_cannot_accept(tenant_a, user_in, as_user):
     _set_require_acceptance(tenant_a, True)
     pid = s["reception"].post(
         PROPOSALS, {"student": s["lead"].id, "cohort": s["cohort"].id}, format="json"
-    ).json()["id"]
+    ).json()["data"]["id"]
     # reception holds placement:write but not placement:approve
     assert s["reception"].post(f"{PROPOSALS}{pid}/accept/", {}, format="json").status_code == 403
 
@@ -137,11 +137,11 @@ def test_cannot_accept_a_decided_proposal(tenant_a, user_in, as_user):
     _set_require_acceptance(tenant_a, True)
     pid = s["reception"].post(
         PROPOSALS, {"student": s["lead"].id, "cohort": s["cohort"].id}, format="json"
-    ).json()["id"]
+    ).json()["data"]["id"]
     assert s["hod"].post(f"{PROPOSALS}{pid}/accept/", {}, format="json").status_code == 200
     again = s["hod2"].post(f"{PROPOSALS}{pid}/accept/", {}, format="json")
     assert again.status_code == 422
-    assert again.json()["error"]["code"] == "proposal_not_pending"
+    assert again.json()["code"] == "proposal_not_pending"
 
 
 def test_cannot_propose_a_non_prospective_student(tenant_a, user_in, as_user):
@@ -152,7 +152,7 @@ def test_cannot_propose_a_non_prospective_student(tenant_a, user_in, as_user):
         PROPOSALS, {"student": s["lead"].id, "cohort": s["cohort"].id}, format="json"
     )
     assert r.status_code == 422
-    assert r.json()["error"]["code"] == "student_not_prospective"
+    assert r.json()["code"] == "student_not_prospective"
 
 
 def test_duplicate_pending_proposal_conflicts(tenant_a, user_in, as_user):
@@ -162,7 +162,7 @@ def test_duplicate_pending_proposal_conflicts(tenant_a, user_in, as_user):
     assert s["reception"].post(PROPOSALS, body, format="json").status_code == 201
     dup = s["reception"].post(PROPOSALS, body, format="json")
     assert dup.status_code == 409
-    assert dup.json()["error"]["code"] == "already_proposed"
+    assert dup.json()["code"] == "already_proposed"
 
 
 def test_cannot_propose_into_an_archived_cohort(tenant_a, user_in, as_user):
@@ -177,7 +177,7 @@ def test_cannot_propose_into_an_archived_cohort(tenant_a, user_in, as_user):
         PROPOSALS, {"student": s["lead"].id, "cohort": archived.id}, format="json"
     )
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "cohort_archived"
+    assert r.json()["code"] == "cohort_archived"
 
 
 def test_cannot_propose_a_cohort_in_another_branch(tenant_a, user_in, as_user):
@@ -192,7 +192,7 @@ def test_cannot_propose_a_cohort_in_another_branch(tenant_a, user_in, as_user):
         PROPOSALS, {"student": s["lead"].id, "cohort": other_cohort.id}, format="json"
     )
     assert r.status_code == 403
-    assert r.json()["error"]["code"] == "cross_branch"
+    assert r.json()["code"] == "cross_branch"
 
 
 def test_toggle_is_settable_through_the_settings_api(tenant_a, user_in, as_user, as_role):
@@ -209,7 +209,7 @@ def test_toggle_is_settable_through_the_settings_api(tenant_a, user_in, as_user,
     proposed = s["reception"].post(
         PROPOSALS, {"student": s["lead"].id, "cohort": s["cohort"].id}, format="json"
     )
-    assert proposed.json()["status"] == "pending"
+    assert proposed.json()["data"]["status"] == "pending"
 
 
 def test_accept_revalidates_student_is_still_prospective(tenant_a, user_in, as_user):
@@ -221,12 +221,12 @@ def test_accept_revalidates_student_is_still_prospective(tenant_a, user_in, as_u
     _set_require_acceptance(tenant_a, True)
     pid = s["reception"].post(
         PROPOSALS, {"student": s["lead"].id, "cohort": s["cohort"].id}, format="json"
-    ).json()["id"]
+    ).json()["data"]["id"]
     with schema_context(tenant_a.schema_name):  # the lead's lifecycle drifts forward
         StudentProfile.objects.filter(pk=s["lead"].id).update(status=StudentProfile.Status.ACTIVE)
     r = s["hod"].post(f"{PROPOSALS}{pid}/accept/", {}, format="json")
     assert r.status_code == 422
-    assert r.json()["error"]["code"] == "student_not_prospective"
+    assert r.json()["code"] == "student_not_prospective"
     assert not _is_enrolled(tenant_a, s["lead"], s["cohort"])
 
 
@@ -238,7 +238,7 @@ def test_accept_enrolls_under_real_autocommit(tenant_a, user_in, as_user):
     _set_require_acceptance(tenant_a, True)
     pid = s["reception"].post(
         PROPOSALS, {"student": s["lead"].id, "cohort": s["cohort"].id}, format="json"
-    ).json()["id"]
+    ).json()["data"]["id"]
     res = s["hod"].post(f"{PROPOSALS}{pid}/accept/", {}, format="json")
     assert res.status_code == 200
     assert _is_enrolled(tenant_a, s["lead"], s["cohort"])

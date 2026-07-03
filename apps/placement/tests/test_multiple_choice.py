@@ -52,7 +52,7 @@ def _setup(tenant, user_in, as_user, *, options=None, correct=None, points=2):
 def _assign(s):
     r = s["staff"].post(ATTEMPTS, {"test": s["test"].id, "student": s["lead"].id}, format="json")
     assert r.status_code == 201, r.content
-    return r.json()["id"]
+    return r.json()["data"]["id"]
 
 
 def _submit(s, aid, response):
@@ -64,7 +64,7 @@ def _submit(s, aid, response):
 def test_exact_set_scores_full_points(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     aid = _assign(s)
-    body = _submit(s, aid, ["2", "4"]).json()
+    body = _submit(s, aid, ["2", "4"]).json()["data"]
     assert body["status"] == "graded"
     assert body["score"] == 2
     assert body["max_score"] == 2
@@ -76,7 +76,7 @@ def test_grading_is_order_independent(tenant_a, user_in, as_user):
     the chosen SET is what matters, not the sequence."""
     s = _setup(tenant_a, user_in, as_user)
     aid = _assign(s)
-    body = _submit(s, aid, ["4", "2"]).json()
+    body = _submit(s, aid, ["4", "2"]).json()["data"]
     assert body["score"] == 2
 
 
@@ -85,7 +85,7 @@ def test_partial_selection_scores_zero(tenant_a, user_in, as_user):
     rule, not silent partial credit)."""
     s = _setup(tenant_a, user_in, as_user)
     aid = _assign(s)
-    body = _submit(s, aid, ["2"]).json()
+    body = _submit(s, aid, ["2"]).json()["data"]
     assert body["score"] == 0
     assert body["max_score"] == 2
     assert body["level"] == "beginner"  # 0%
@@ -96,14 +96,14 @@ def test_over_selection_scores_zero(tenant_a, user_in, as_user):
     shotgunning every option)."""
     s = _setup(tenant_a, user_in, as_user)
     aid = _assign(s)
-    body = _submit(s, aid, ["2", "4", "1"]).json()
+    body = _submit(s, aid, ["2", "4", "1"]).json()["data"]
     assert body["score"] == 0
 
 
 def test_empty_selection_is_left_blank_and_scores_zero(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     aid = _assign(s)
-    body = _submit(s, aid, []).json()
+    body = _submit(s, aid, []).json()["data"]
     assert body["score"] == 0
     assert body["max_score"] == 2
 
@@ -113,7 +113,7 @@ def test_response_must_be_a_list(tenant_a, user_in, as_user):
     aid = _assign(s)
     r = _submit(s, aid, "2")  # a bare string, not a list
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "answer_not_list"
+    assert r.json()["code"] == "answer_not_list"
 
 
 def test_response_options_must_be_offered(tenant_a, user_in, as_user):
@@ -121,13 +121,13 @@ def test_response_options_must_be_offered(tenant_a, user_in, as_user):
     aid = _assign(s)
     r = _submit(s, aid, ["2", "9"])  # "9" was never an option
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "answer_not_in_options"
+    assert r.json()["code"] == "answer_not_in_options"
 
 
 def test_answer_key_is_never_served_to_the_lead(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     aid = _assign(s)
-    body = s["lead_c"].get(f"{ATTEMPTS}{aid}/").json()
+    body = s["lead_c"].get(f"{ATTEMPTS}{aid}/").json()["data"]
     assert body["questions"], "expected the multiple-choice question to solve"
     assert all("correct_answer" not in q for q in body["questions"])
 

@@ -70,7 +70,7 @@ def test_manual_marking_folds_writing_into_the_grade(tenant_a, user_in, as_user)
     assert s["attempt"].level == "advanced"  # 2/2 objective at submit
     r = _mark(s, [{"question": s["q_write"].id, "score": 4}])
     assert r.status_code == 200, r.content
-    body = r.json()
+    body = r.json()["data"]
     assert body["max_score"] == 10  # 2 objective + 8 writing now counted
     assert body["score"] == 6  # 2 + 4
     assert body["level"] == "intermediate"  # 60% -> recomputed down
@@ -78,7 +78,7 @@ def test_manual_marking_folds_writing_into_the_grade(tenant_a, user_in, as_user)
 
 def test_zero_score_still_counts_in_the_denominator(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
-    body = _mark(s, [{"question": s["q_write"].id, "score": 0}]).json()
+    body = _mark(s, [{"question": s["q_write"].id, "score": 0}]).json()["data"]
     assert body["max_score"] == 10  # writing counted at 0, not excluded
     assert body["score"] == 2
     assert body["level"] == "beginner"  # 2/10 = 20%
@@ -87,7 +87,7 @@ def test_zero_score_still_counts_in_the_denominator(tenant_a, user_in, as_user):
 def test_remarking_overwrites_the_previous_mark(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     _mark(s, [{"question": s["q_write"].id, "score": 4}])
-    body = _mark(s, [{"question": s["q_write"].id, "score": 7}]).json()
+    body = _mark(s, [{"question": s["q_write"].id, "score": 7}]).json()["data"]
     assert body["score"] == 9  # 2 + 7 (not double-counted)
 
 
@@ -95,21 +95,21 @@ def test_score_above_the_questions_points_is_rejected(tenant_a, user_in, as_user
     s = _setup(tenant_a, user_in, as_user)
     r = _mark(s, [{"question": s["q_write"].id, "score": 99}])  # max is 8
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "score_out_of_range"
+    assert r.json()["code"] == "score_out_of_range"
 
 
 def test_negative_score_is_rejected(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     r = _mark(s, [{"question": s["q_write"].id, "score": -1}])
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "invalid_score"
+    assert r.json()["code"] == "invalid_score"
 
 
 def test_unknown_question_is_rejected(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     r = _mark(s, [{"question": 999999, "score": 3}])
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "unknown_writing_question"
+    assert r.json()["code"] == "unknown_writing_question"
 
 
 def test_marking_a_non_writing_question_is_rejected(tenant_a, user_in, as_user):
@@ -117,14 +117,14 @@ def test_marking_a_non_writing_question_is_rejected(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     r = _mark(s, [{"question": s["q_obj"].id, "score": 2}])
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "unknown_writing_question"
+    assert r.json()["code"] == "unknown_writing_question"
 
 
 def test_duplicate_mark_is_rejected(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     r = _mark(s, [{"question": s["q_write"].id, "score": 3}, {"question": s["q_write"].id, "score": 4}])
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "duplicate_mark"
+    assert r.json()["code"] == "duplicate_mark"
 
 
 def test_lead_cannot_mark_their_own_writing(tenant_a, user_in, as_user):
@@ -162,7 +162,7 @@ def test_cannot_mark_an_unsubmitted_attempt(tenant_a, user_in, as_user):
         format="json",
     )
     assert r.status_code == 422
-    assert r.json()["error"]["code"] == "attempt_not_graded"
+    assert r.json()["code"] == "attempt_not_graded"
 
 
 def test_empty_marks_list_is_rejected_by_the_serializer(tenant_a, user_in, as_user):

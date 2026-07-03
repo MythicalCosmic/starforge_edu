@@ -67,7 +67,7 @@ def _setup(tenant, user_in, as_user):
 def _assign(s):
     r = s["staff"].post(ATTEMPTS, {"test": s["test"].id, "student": s["lead"].id}, format="json")
     assert r.status_code == 201, r.content
-    return r.json()["id"]
+    return r.json()["data"]["id"]
 
 
 def _all_correct(s):
@@ -86,11 +86,11 @@ def test_assign_solve_and_auto_level(tenant_a, user_in, as_user):
     # the lead sees the attempt assigned to them
     got = s["lead_c"].get(f"{ATTEMPTS}{aid}/")
     assert got.status_code == 200
-    assert got.json()["status"] == "assigned"
+    assert got.json()["data"]["status"] == "assigned"
 
     res = s["lead_c"].post(f"{ATTEMPTS}{aid}/submit/", {"answers": _all_correct(s)}, format="json")
     assert res.status_code == 200, res.content
-    body = res.json()
+    body = res.json()["data"]
     assert body["status"] == "graded"
     assert body["score"] == 5  # objective points only (writing excluded from max_score)
     assert body["max_score"] == 5
@@ -105,7 +105,7 @@ def test_assign_solve_and_auto_level(tenant_a, user_in, as_user):
 def test_answer_key_is_never_served_to_the_lead(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     aid = _assign(s)
-    body = s["lead_c"].get(f"{ATTEMPTS}{aid}/").json()
+    body = s["lead_c"].get(f"{ATTEMPTS}{aid}/").json()["data"]
     # the lead gets the questions to solve but NEVER the correct_answer key
     assert body["questions"], "expected questions to solve"
     assert all("correct_answer" not in q for q in body["questions"])
@@ -121,7 +121,7 @@ def test_partial_and_failing_scores_map_to_bands(tenant_a, user_in, as_user):
         {"question": q2.id, "response": "Paris"},  # right (2)
         {"question": q3.id, "response": False},  # wrong (0)
     ]
-    body = s["lead_c"].post(f"{ATTEMPTS}{aid}/submit/", {"answers": answers}, format="json").json()
+    body = s["lead_c"].post(f"{ATTEMPTS}{aid}/submit/", {"answers": answers}, format="json").json()["data"]
     assert body["score"] == 2
     assert body["max_score"] == 5
     assert body["level"] == "intermediate"
@@ -132,7 +132,7 @@ def test_writing_question_is_not_auto_graded(tenant_a, user_in, as_user):
     aid = _assign(s)
     s["lead_c"].post(f"{ATTEMPTS}{aid}/submit/", {"answers": _all_correct(s)}, format="json")
     # grading detail is staff-only (the lead view hides is_correct — see below)
-    body = s["staff"].get(f"{ATTEMPTS}{aid}/").json()
+    body = s["staff"].get(f"{ATTEMPTS}{aid}/").json()["data"]
     writing_qid = s["q"][3].id
     writing_answer = next(a for a in body["answers"] if a["question"] == writing_qid)
     assert writing_answer["is_correct"] is None  # marked by a person later (F8-3)
@@ -144,11 +144,11 @@ def test_lead_never_sees_per_question_correctness(tenant_a, user_in, as_user):
     gets only {question, response}; the full grading is staff-only."""
     s = _setup(tenant_a, user_in, as_user)
     aid = _assign(s)
-    body = s["lead_c"].post(f"{ATTEMPTS}{aid}/submit/", {"answers": _all_correct(s)}, format="json").json()
+    body = s["lead_c"].post(f"{ATTEMPTS}{aid}/submit/", {"answers": _all_correct(s)}, format="json").json()["data"]
     assert body["answers"], "the lead still sees their own responses"
     assert all("is_correct" not in a and "awarded_points" not in a for a in body["answers"])
     # but a staff member (proctor/manager) sees the full grading
-    staff_body = s["staff"].get(f"{ATTEMPTS}{aid}/").json()
+    staff_body = s["staff"].get(f"{ATTEMPTS}{aid}/").json()["data"]
     assert all("is_correct" in a for a in staff_body["answers"])
 
 
@@ -160,7 +160,7 @@ def test_single_choice_answer_must_be_an_option(tenant_a, user_in, as_user):
         f"{ATTEMPTS}{aid}/submit/", {"answers": [{"question": q1.id, "response": "banana"}]}, format="json"
     )
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "answer_not_in_options"
+    assert r.json()["code"] == "answer_not_in_options"
 
 
 def test_cannot_assign_to_a_non_prospective_student(tenant_a, user_in, as_user):
@@ -177,7 +177,7 @@ def test_cannot_assign_to_a_non_prospective_student(tenant_a, user_in, as_user):
         )
     r = s["staff"].post(ATTEMPTS, {"test": s["test"].id, "student": enrolled.id}, format="json")
     assert r.status_code == 422
-    assert r.json()["error"]["code"] == "student_not_prospective"
+    assert r.json()["code"] == "student_not_prospective"
 
 
 def test_only_an_approved_test_can_be_assigned(tenant_a, user_in, as_user):
@@ -188,7 +188,7 @@ def test_only_an_approved_test_can_be_assigned(tenant_a, user_in, as_user):
         draft = services.create_test(title="draft", created_by=s["teacher_u"], branch=s["branch"])
     r = s["staff"].post(ATTEMPTS, {"test": draft.id, "student": s["lead"].id}, format="json")
     assert r.status_code == 422
-    assert r.json()["error"]["code"] == "test_not_approved"
+    assert r.json()["code"] == "test_not_approved"
 
 
 def test_duplicate_assignment_conflicts(tenant_a, user_in, as_user):
@@ -196,7 +196,7 @@ def test_duplicate_assignment_conflicts(tenant_a, user_in, as_user):
     _assign(s)
     dup = s["staff"].post(ATTEMPTS, {"test": s["test"].id, "student": s["lead"].id}, format="json")
     assert dup.status_code == 409
-    assert dup.json()["error"]["code"] == "already_assigned"
+    assert dup.json()["code"] == "already_assigned"
 
 
 def test_cannot_submit_twice(tenant_a, user_in, as_user):
@@ -205,7 +205,7 @@ def test_cannot_submit_twice(tenant_a, user_in, as_user):
     assert s["lead_c"].post(f"{ATTEMPTS}{aid}/submit/", {"answers": _all_correct(s)}, format="json").status_code == 200
     again = s["lead_c"].post(f"{ATTEMPTS}{aid}/submit/", {"answers": _all_correct(s)}, format="json")
     assert again.status_code == 409
-    assert again.json()["error"]["code"] == "already_submitted"
+    assert again.json()["code"] == "already_submitted"
 
 
 def test_response_type_is_validated(tenant_a, user_in, as_user):
@@ -217,13 +217,13 @@ def test_response_type_is_validated(tenant_a, user_in, as_user):
         f"{ATTEMPTS}{aid}/submit/", {"answers": [{"question": q3.id, "response": "yes"}]}, format="json"
     )
     assert bad_tf.status_code == 400
-    assert bad_tf.json()["error"]["code"] == "answer_not_boolean"
+    assert bad_tf.json()["code"] == "answer_not_boolean"
     # a single_choice answered with a non-string
     bad_sc = s["lead_c"].post(
         f"{ATTEMPTS}{aid}/submit/", {"answers": [{"question": q1.id, "response": 4}]}, format="json"
     )
     assert bad_sc.status_code == 400
-    assert bad_sc.json()["error"]["code"] == "answer_not_text"
+    assert bad_sc.json()["code"] == "answer_not_text"
 
 
 def test_unknown_question_rejected(tenant_a, user_in, as_user):
@@ -233,7 +233,7 @@ def test_unknown_question_rejected(tenant_a, user_in, as_user):
         f"{ATTEMPTS}{aid}/submit/", {"answers": [{"question": 999999, "response": "4"}]}, format="json"
     )
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "unknown_question"
+    assert r.json()["code"] == "unknown_question"
 
 
 def test_another_lead_cannot_see_or_submit(tenant_a, user_in, as_user):
@@ -256,7 +256,7 @@ def test_proctor_can_submit_on_behalf(tenant_a, user_in, as_user):
     # a placement:write staff member (the assigner's branch) may submit (proctored)
     res = s["staff"].post(f"{ATTEMPTS}{aid}/submit/", {"answers": _all_correct(s)}, format="json")
     assert res.status_code == 200
-    assert res.json()["status"] == "graded"
+    assert res.json()["data"]["status"] == "graded"
 
 
 def test_cannot_assign_a_student_in_another_branch(tenant_a, user_in, as_user):
@@ -270,7 +270,7 @@ def test_cannot_assign_a_student_in_another_branch(tenant_a, user_in, as_user):
         outsider = StudentProfileFactory.create(branch=other_branch, status=StudentProfile.Status.LEAD)
     r = s["staff"].post(ATTEMPTS, {"test": s["test"].id, "student": outsider.id}, format="json")
     assert r.status_code == 403
-    assert r.json()["error"]["code"] == "cross_branch"
+    assert r.json()["code"] == "cross_branch"
 
 
 @pytest.mark.django_db(transaction=True)

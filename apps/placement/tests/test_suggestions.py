@@ -71,7 +71,7 @@ def test_suggestions_rank_level_match_and_seats(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     res = s["staff"].get(f"{ATTEMPTS}{s['attempt'].id}/suggestions/")
     assert res.status_code == 200, res.content
-    rows = res.json()
+    rows = res.json()["data"]
     ids = [r["cohort_id"] for r in rows]
 
     # full / archived / other-branch cohorts are never suggested
@@ -108,5 +108,5 @@ def test_ended_cohort_is_not_suggested(tenant_a, user_in, as_user):
             branch=s["branch"], name="Adv-Ended", level="advanced", capacity=10,
             start_date=date(2025, 1, 1), end_date=date(2025, 12, 31),
         )
-    rows = s["staff"].get(f"{ATTEMPTS}{s['attempt'].id}/suggestions/").json()
+    rows = s["staff"].get(f"{ATTEMPTS}{s['attempt'].id}/suggestions/").json()["data"]
     assert ended.id not in [r["cohort_id"] for r in rows]

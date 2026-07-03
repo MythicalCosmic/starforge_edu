@@ -51,7 +51,7 @@ def _setup(tenant, user_in, as_user, *, correct=None, points=2):
 def _assign(s):
     r = s["staff"].post(ATTEMPTS, {"test": s["test"].id, "student": s["lead"].id}, format="json")
     assert r.status_code == 201, r.content
-    return r.json()["id"]
+    return r.json()["data"]["id"]
 
 
 def _submit(s, aid, response):
@@ -63,7 +63,7 @@ def _submit(s, aid, response):
 def test_exact_answer_scores_full_points(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     aid = _assign(s)
-    body = _submit(s, aid, "blue").json()
+    body = _submit(s, aid, "blue").json()["data"]
     assert body["score"] == 2
     assert body["max_score"] == 2
     assert body["level"] == "advanced"
@@ -72,14 +72,14 @@ def test_exact_answer_scores_full_points(tenant_a, user_in, as_user):
 def test_grading_ignores_case_and_surrounding_whitespace(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     aid = _assign(s)
-    assert _submit(s, aid, "  BLUE  ").json()["score"] == 2
+    assert _submit(s, aid, "  BLUE  ").json()["data"]["score"] == 2
 
 
 def test_any_acceptable_synonym_is_correct(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     aid = _assign(s)
     # "Light  Blue" normalizes to "light blue", the second acceptable answer
-    assert _submit(s, aid, "Light  Blue").json()["score"] == 2
+    assert _submit(s, aid, "Light  Blue").json()["data"]["score"] == 2
 
 
 def test_grading_matches_across_unicode_form_and_case(tenant_a, user_in, as_user):
@@ -93,13 +93,13 @@ def test_grading_matches_across_unicode_form_and_case(tenant_a, user_in, as_user
     s = _setup(tenant_a, user_in, as_user, correct=[nfc])
     aid = _assign(s)
     typed = nfd.upper()  # the same word, still decomposed, now uppercased
-    assert _submit(s, aid, typed).json()["score"] == 2
+    assert _submit(s, aid, typed).json()["data"]["score"] == 2
 
 
 def test_wrong_answer_scores_zero(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     aid = _assign(s)
-    body = _submit(s, aid, "green").json()
+    body = _submit(s, aid, "green").json()["data"]
     assert body["score"] == 0
     assert body["level"] == "beginner"
 
@@ -107,7 +107,7 @@ def test_wrong_answer_scores_zero(tenant_a, user_in, as_user):
 def test_blank_answer_scores_zero(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     aid = _assign(s)
-    assert _submit(s, aid, "   ").json()["score"] == 0  # normalizes to "", no match
+    assert _submit(s, aid, "   ").json()["data"]["score"] == 0  # normalizes to "", no match
 
 
 def test_response_must_be_text(tenant_a, user_in, as_user):
@@ -115,13 +115,13 @@ def test_response_must_be_text(tenant_a, user_in, as_user):
     aid = _assign(s)
     r = _submit(s, aid, 42)  # a number, not text
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "answer_not_text"
+    assert r.json()["code"] == "answer_not_text"
 
 
 def test_answer_key_is_never_served_to_the_lead(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     aid = _assign(s)
-    body = s["lead_c"].get(f"{ATTEMPTS}{aid}/").json()
+    body = s["lead_c"].get(f"{ATTEMPTS}{aid}/").json()["data"]
     assert body["questions"], "expected the short-answer question to solve"
     assert all("correct_answer" not in q for q in body["questions"])
 

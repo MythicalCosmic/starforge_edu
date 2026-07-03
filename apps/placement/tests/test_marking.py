@@ -209,7 +209,7 @@ def test_mark_writing_endpoint_202(tenant_a, user_in, as_user, monkeypatch):
     _seed_marking_ai(tenant_a)
     r = s["staff"].post(f"{ATTEMPTS}{s['attempt'].id}/mark-writing/", {}, format="json")
     assert r.status_code == 202, r.content
-    assert r.json()["request_id"]
+    assert r.json()["data"]["request_id"]
 
 
 def test_lead_cannot_mark_their_own_writing(tenant_a, user_in, as_user):
@@ -241,4 +241,4 @@ def test_cannot_mark_an_unsubmitted_attempt(tenant_a, user_in, as_user):
     staff = as_user(tenant_a, hod_u)
     r = staff.post(f"{ATTEMPTS}{attempt.id}/mark-writing/", {}, format="json")
     assert r.status_code == 422
-    assert r.json()["error"]["code"] == "attempt_not_graded"
+    assert r.json()["code"] == "attempt_not_graded"

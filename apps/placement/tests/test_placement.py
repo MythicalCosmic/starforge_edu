@@ -51,11 +51,11 @@ def _q(**over):
 
 def _build_pending(client, branch_id):
     """Create a test, add a question, submit it -> returns the PENDING test id."""
-    tid = client.post(TESTS, {"title": "English placement", "branch": branch_id}, format="json").json()["id"]
+    tid = client.post(TESTS, {"title": "English placement", "branch": branch_id}, format="json").json()["data"]["id"]
     assert client.post(f"{TESTS}{tid}/questions/", _q(), format="json").status_code == 201
     submitted = client.post(f"{TESTS}{tid}/submit/", {}, format="json")
     assert submitted.status_code == 200, submitted.content
-    assert submitted.json()["status"] == "pending"
+    assert submitted.json()["data"]["status"] == "pending"
     return tid
 
 
@@ -65,8 +65,8 @@ def test_build_submit_approve_lifecycle(tenant_a, user_in, as_user):
     # a manager (different person) approves -> live
     approved = s["hod1"].post(f"{TESTS}{tid}/approve/", {}, format="json")
     assert approved.status_code == 200, approved.content
-    assert approved.json()["status"] == "approved"
-    assert approved.json()["approved_by"] == s["hod1_u"].id
+    assert approved.json()["data"]["status"] == "approved"
+    assert approved.json()["data"]["approved_by"] == s["hod1_u"].id
 
 
 def test_builder_cannot_approve_own_test(tenant_a, user_in, as_user):
@@ -75,7 +75,7 @@ def test_builder_cannot_approve_own_test(tenant_a, user_in, as_user):
     tid = _build_pending(s["hod1"], s["branch"].id)  # hod1 builds AND submits
     own = s["hod1"].post(f"{TESTS}{tid}/approve/", {}, format="json")
     assert own.status_code == 403
-    assert own.json()["error"]["code"] == "self_approval"
+    assert own.json()["code"] == "self_approval"
     # a different manager can approve it
     assert s["hod2"].post(f"{TESTS}{tid}/approve/", {}, format="json").status_code == 200
 
@@ -89,20 +89,20 @@ def test_teacher_cannot_approve(tenant_a, user_in, as_user):
 
 def test_cannot_approve_a_draft(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
-    tid = s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["id"]
+    tid = s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["data"]["id"]
     s["teacher"].post(f"{TESTS}{tid}/questions/", _q(), format="json")
     # never submitted -> still DRAFT -> not approvable
     r = s["hod1"].post(f"{TESTS}{tid}/approve/", {}, format="json")
     assert r.status_code == 422
-    assert r.json()["error"]["code"] == "test_not_pending"
+    assert r.json()["code"] == "test_not_pending"
 
 
 def test_cannot_submit_an_empty_test(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
-    tid = s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["id"]
+    tid = s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["data"]["id"]
     r = s["teacher"].post(f"{TESTS}{tid}/submit/", {}, format="json")
     assert r.status_code == 422
-    assert r.json()["error"]["code"] == "test_has_no_questions"
+    assert r.json()["code"] == "test_has_no_questions"
 
 
 def test_cannot_edit_after_submit(tenant_a, user_in, as_user):
@@ -111,7 +111,7 @@ def test_cannot_edit_after_submit(tenant_a, user_in, as_user):
     # PENDING is frozen — no more questions
     r = s["teacher"].post(f"{TESTS}{tid}/questions/", _q(prompt="late"), format="json")
     assert r.status_code == 422
-    assert r.json()["error"]["code"] == "test_not_draft"
+    assert r.json()["code"] == "test_not_draft"
 
 
 def test_reject_kicks_back_to_draft_then_editable(tenant_a, user_in, as_user):
@@ -119,8 +119,8 @@ def test_reject_kicks_back_to_draft_then_editable(tenant_a, user_in, as_user):
     tid = _build_pending(s["teacher"], s["branch"].id)
     rejected = s["hod1"].post(f"{TESTS}{tid}/reject/", {"reason": "Add a writing task"}, format="json")
     assert rejected.status_code == 200
-    assert rejected.json()["status"] == "draft"
-    assert rejected.json()["reject_reason"] == "Add a writing task"
+    assert rejected.json()["data"]["status"] == "draft"
+    assert rejected.json()["data"]["reject_reason"] == "Add a writing task"
     # back to DRAFT -> the builder can edit + resubmit
     assert s["teacher"].post(f"{TESTS}{tid}/questions/", _q(prompt="more"), format="json").status_code == 201
     assert s["teacher"].post(f"{TESTS}{tid}/submit/", {}, format="json").status_code == 200
@@ -144,15 +144,15 @@ def test_reject_needs_a_reason(tenant_a, user_in, as_user):
 )
 def test_single_choice_validation(tenant_a, user_in, as_user, bad, code):
     s = _setup(tenant_a, user_in, as_user)
-    tid = s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["id"]
+    tid = s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["data"]["id"]
     r = s["teacher"].post(f"{TESTS}{tid}/questions/", _q(**bad), format="json")
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == code
+    assert r.json()["code"] == code
 
 
 def test_true_false_and_writing_validation(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
-    tid = s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["id"]
+    tid = s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["data"]["id"]
     # true/false needs a boolean key
     bad_tf = s["teacher"].post(
         f"{TESTS}{tid}/questions/",
@@ -160,7 +160,7 @@ def test_true_false_and_writing_validation(tenant_a, user_in, as_user):
         format="json",
     )
     assert bad_tf.status_code == 400
-    assert bad_tf.json()["error"]["code"] == "answer_not_boolean"
+    assert bad_tf.json()["code"] == "answer_not_boolean"
     # a writing question must NOT carry an answer key
     bad_w = s["teacher"].post(
         f"{TESTS}{tid}/questions/",
@@ -168,7 +168,7 @@ def test_true_false_and_writing_validation(tenant_a, user_in, as_user):
         format="json",
     )
     assert bad_w.status_code == 400
-    assert bad_w.json()["error"]["code"] == "writing_has_no_answer"
+    assert bad_w.json()["code"] == "writing_has_no_answer"
     # the valid forms succeed
     assert s["teacher"].post(
         f"{TESTS}{tid}/questions/",
@@ -184,11 +184,11 @@ def test_true_false_and_writing_validation(tenant_a, user_in, as_user):
 
 def test_remove_question_while_draft(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
-    tid = s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["id"]
-    qid = s["teacher"].post(f"{TESTS}{tid}/questions/", _q(), format="json").json()["id"]
+    tid = s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["data"]["id"]
+    qid = s["teacher"].post(f"{TESTS}{tid}/questions/", _q(), format="json").json()["data"]["id"]
     assert s["teacher"].post(f"{TESTS}{tid}/questions/{qid}/remove/", {}, format="json").status_code == 204
     # the test now has no questions
-    assert s["teacher"].get(f"{TESTS}{tid}/", format="json").json()["questions"] == []
+    assert s["teacher"].get(f"{TESTS}{tid}/", format="json").json()["data"]["questions"] == []
 
 
 def test_branch_scoping_on_create_and_read(tenant_a, user_in, as_user):
@@ -200,7 +200,7 @@ def test_branch_scoping_on_create_and_read(tenant_a, user_in, as_user):
     # cannot build a test for a branch you're not in
     cross = s["teacher"].post(TESTS, {"title": "X", "branch": other.id}, format="json")
     assert cross.status_code == 403
-    assert cross.json()["error"]["code"] == "cross_branch"
+    assert cross.json()["code"] == "cross_branch"
     # a manager in `other` branch does not see the home-branch test
     tid = _build_pending(s["teacher"], s["branch"].id)
     outsider = as_user(tenant_a, user_in(tenant_a, roles=[Role.HEAD_OF_DEPT], branch=other))
@@ -217,7 +217,7 @@ def test_student_has_no_placement_access(tenant_a, user_in, as_user):
 
 def test_draft_test_can_be_deleted(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
-    tid = s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["id"]
+    tid = s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["data"]["id"]
     s["teacher"].post(f"{TESTS}{tid}/questions/", _q(), format="json")
     assert s["teacher"].delete(f"{TESTS}{tid}/").status_code == 204
     assert s["teacher"].get(f"{TESTS}{tid}/").status_code == 404
@@ -231,7 +231,7 @@ def test_pending_and_approved_tests_cannot_be_deleted(tenant_a, user_in, as_user
     # PENDING: the builder cannot yank it out of the review queue
     rejected_del = s["teacher"].delete(f"{TESTS}{tid}/")
     assert rejected_del.status_code == 422
-    assert rejected_del.json()["error"]["code"] == "test_not_draft"
+    assert rejected_del.json()["code"] == "test_not_draft"
     # APPROVED: still frozen against deletion
     s["hod1"].post(f"{TESTS}{tid}/approve/", {}, format="json")
     assert s["teacher"].delete(f"{TESTS}{tid}/").status_code == 422
