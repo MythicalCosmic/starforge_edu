@@ -331,6 +331,82 @@ def test_uzum_complete_rejects_amount_mismatch(invoice_a):
 
 
 # --------------------------------------------------------------------------- #
+# Regression (HIGH, this-session bug hunt): the checkout merchant reference is
+# echoed back on the completion callback, where the webhook resolves the invoice
+# by Invoice.number. It MUST be invoice.number — sending the Payment PK made
+# every real Click/Uzum callback resolve to number="<pk>" (no such invoice) so
+# the payment was ACKed to the provider yet the invoice was never credited.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    ("provider", "ref_key"), [("click", "merchant_trans_id"), ("uzum", "order_id")]
+)
+def test_checkout_merchant_ref_is_invoice_number_not_pk(invoice_a, provider, ref_key):
+    tenant_a, inv = invoice_a
+    from apps.payments import services
+
+    with schema_context(tenant_a.schema_name):
+        payload = services.create_checkout(
+            invoice_id=inv.id, provider=provider, idempotency_key=f"co-{provider}-1"
+        )
+        # The provider echoes this reference back on the Complete callback, where
+        # the webhook does Invoice.objects.filter(number=<ref>). It must be the
+        # invoice number so that lookup resolves — not the (unrelated) Payment PK.
+        assert payload[ref_key] == inv.number
+        assert payload[ref_key] != str(payload["payment_id"])
+
+
+# --------------------------------------------------------------------------- #
+# Regression (HIGH, this-session bug hunt): the checkout rounds the invoice total
+# to whole soum (Click/Uzum are charged in soum), but the amount check compared
+# the callback exactly against a fractional total_uzs — so a fractional invoice
+# (e.g. from a percentage discount) was PERMANENTLY unpayable online.
+# --------------------------------------------------------------------------- #
+def test_click_complete_credits_fractional_invoice_at_rounded_soum(tenant_a):
+    from apps.payments import services
+    from apps.payments.models import Payment
+
+    helpers.seed_provider_configs(tenant_a)
+    inv = helpers.seed_open_invoice(tenant_a, number="INV-2026-000777", amount_uzs="149999.99")
+    with schema_context(tenant_a.schema_name):
+        # Checkout charges the whole-soum rounded figure (149999.99 -> 150000).
+        payload = services.create_checkout(
+            invoice_id=inv.id, provider="click", idempotency_key="co-frac-1"
+        )
+        assert "amount=150000" in payload["redirect_url"]
+        # The provider reports the amount it charged; the webhook must accept it.
+        payment = services.process_click_complete(
+            payload={
+                "click_trans_id": "click-frac",
+                "merchant_trans_id": inv.number,
+                "amount": "150000",
+            },
+            invoice=inv,
+        )
+        payment.refresh_from_db()
+        assert payment.status == Payment.Status.COMPLETED
+
+
+def test_click_complete_still_rejects_underpay_on_fractional_invoice(tenant_a):
+    from apps.payments import services
+    from core.exceptions import ValidationException
+
+    helpers.seed_provider_configs(tenant_a)
+    inv = helpers.seed_open_invoice(tenant_a, number="INV-2026-000778", amount_uzs="149999.99")
+    with schema_context(tenant_a.schema_name):
+        # 149999 (truncated, one soum short) must NOT satisfy the 150000 charge.
+        with pytest.raises(ValidationException) as exc:
+            services.process_click_complete(
+                payload={
+                    "click_trans_id": "click-frac-under",
+                    "merchant_trans_id": inv.number,
+                    "amount": "149999",
+                },
+                invoice=inv,
+            )
+        assert exc.value.code == "amount_mismatch"
+
+
+# --------------------------------------------------------------------------- #
 # Over-allocation during auto-allocate must NOT roll back the completion
 # (BLOCKER): completing a payment whose invoice is already PAID still produces a
 # COMPLETED Payment with allocation_status=MANUAL_REVIEW — no exception.
@@ -522,9 +598,9 @@ def test_allocate_manual_applies_every_line(tenant_a):
 
 def test_allocate_manual_rejects_over_payment_amount(tenant_a):
     """The total of the lines may not exceed the real money received."""
-    from core.exceptions import StarforgeError
     from apps.payments import services
     from apps.payments.models import Payment
+    from core.exceptions import StarforgeError
 
     inv = helpers.seed_open_invoice(tenant_a, number="INV-2026-000012", amount_uzs="100000.00")
     with schema_context(tenant_a.schema_name):

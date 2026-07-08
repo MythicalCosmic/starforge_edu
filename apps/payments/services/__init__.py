@@ -348,11 +348,19 @@ def _build_provider_checkout(*, provider: str, payment: Payment, config, account
     # drops fractional UZS (e.g. 149999.99 -> 149999), short-changing the bill.
     # Payme uses tiyin (1 UZS = 100 tiyin) so it carries the exact cents.
     amount_uzs = int(payment.amount_uzs.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    # The merchant reference we hand the provider is echoed back verbatim on the
+    # completion callback, where the webhook resolves the invoice by
+    # ``Invoice.number`` (click_webhook_view / uzum_webhook_view). It MUST therefore
+    # be the invoice number, not the Payment PK — sending the PK made every real
+    # Click/Uzum callback resolve to a non-existent invoice (number="<pk>") and the
+    # payment was acknowledged to the provider yet never credited. ``account`` carries
+    # the canonical reference (``{"invoice": invoice.number}``), matching Payme.
+    merchant_ref = str(account["invoice"])
     if provider == Provider.CLICK:
         from infrastructure.payments.click import get_click_client
 
         return get_click_client().build_checkout(
-            amount_uzs=amount_uzs, merchant_trans_id=str(payment.pk), config=config
+            amount_uzs=amount_uzs, merchant_trans_id=merchant_ref, config=config
         )
     if provider == Provider.PAYME:
         from infrastructure.payments.payme import get_payme_client
@@ -364,7 +372,7 @@ def _build_provider_checkout(*, provider: str, payment: Payment, config, account
         from infrastructure.payments.uzum import get_uzum_client
 
         return get_uzum_client().build_checkout(
-            amount_uzs=amount_uzs, order_id=str(payment.pk), config=config
+            amount_uzs=amount_uzs, order_id=merchant_ref, config=config
         )
     return {}
 
@@ -660,10 +668,6 @@ def _assert_provider_amount(payload: dict, invoice) -> None:
             fields={"amount": ["required"]},
         )
     try:
-        # Compare as exact Decimals (NOT int()): truncating to whole soum would let
-        # a provider under-pay a fractional invoice (e.g. 1000.50 vs 1000) and still
-        # credit the full total. Decimal equality ignores trailing zeros, so
-        # "1000" == 1000.00.
         reported = Decimal(str(raw))
     except (ArithmeticError, ValueError) as exc:
         raise ValidationException(
@@ -671,7 +675,22 @@ def _assert_provider_amount(payload: dict, invoice) -> None:
             code="amount_invalid",
             fields={"amount": [str(raw)]},
         ) from exc
-    expected = invoice.total_uzs
+    if not reported.is_finite():  # NaN / Infinity never equal a real total — reject
+        raise ValidationException(
+            _("Provider callback amount is not a number."),
+            code="amount_invalid",
+            fields={"amount": [str(raw)]},
+        )
+    # Click/Uzum are CHARGED in whole soum — the checkout rounds the invoice total
+    # half-up to the nearest soum (see _build_provider_checkout), so the completion
+    # callback reports that rounded figure, not the raw fractional total. Compare
+    # against the SAME rounding: an exact compare against a fractional total_uzs
+    # (e.g. 149999.99 from a percentage discount) can NEVER match the whole-soum
+    # 150000 the provider charged, making the invoice permanently unpayable online.
+    # A whole-soum total is unaffected (quantize is a no-op) and under-payment is
+    # still caught (the provider must report the rounded charge). Payme carries exact
+    # tiyin and guards amounts in its own client (-31001), so it never reaches here.
+    expected = invoice.total_uzs.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
     if reported != expected:
         raise ValidationException(
             _("Provider amount does not match the invoice total."),

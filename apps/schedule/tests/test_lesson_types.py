@@ -3,10 +3,11 @@ the rule's lesson_type."""
 
 from __future__ import annotations
 
-from datetime import date, time
+from datetime import time, timedelta
 from typing import Any
 
 import pytest
+from django.utils import timezone
 from django_tenants.utils import schema_context
 
 from apps.cohorts.tests.factories import CohortFactory
@@ -37,16 +38,21 @@ def test_materialized_lessons_inherit_rule_lesson_type(tenant_a):
     with schema_context(tenant_a.schema_name):
         branch = BranchFactory()
         lt = LessonType.objects.create(name="Main Lesson", slug="main-lesson")
+        # Anchor to the next future Monday: materialize_rule only creates FUTURE
+        # occurrences, so a hardcoded calendar window silently stops producing
+        # lessons once it passes (a rotting `assert lessons`).
+        today = timezone.localdate()
+        anchor = today + timedelta(days=((0 - today.weekday()) % 7 or 7))
         rule = services.create_rule(
-            term=TermFactory(start_date=date(2026, 1, 1), end_date=date(2026, 12, 31)),
+            term=TermFactory(start_date=anchor - timedelta(days=180), end_date=anchor + timedelta(days=180)),
             cohort=CohortFactory(branch=branch),
             teacher=TeacherProfileFactory(branch=branch),
             room=RoomFactory(branch=branch),
             lesson_type=lt,
             title="Algebra",
             rrule="FREQ=WEEKLY;BYDAY=MO",
-            start_date=date(2026, 7, 6),
-            end_date=date(2026, 7, 27),
+            start_date=anchor,
+            end_date=anchor + timedelta(days=21),
             start_time=time(14, 0),
             end_time=time(15, 30),
         )

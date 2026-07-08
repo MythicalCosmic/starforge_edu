@@ -27,18 +27,48 @@ def _aware(y, m, d, hh, mm=0):
     return timezone.make_aware(datetime(y, m, d, hh, mm))
 
 
-def _setup(*, term_end=date(2026, 12, 31)):
+def _at(day: date, hh: int, mm: int = 0):
+    """Aware datetime on `day` — the relative-date counterpart of `_aware`."""
+    return timezone.make_aware(datetime(day.year, day.month, day.day, hh, mm))
+
+
+# `materialize_rule` only ever creates occurrences STRICTLY IN THE FUTURE
+# (`if starts_at <= now: continue`). Anchoring the rule window to a hardcoded
+# calendar date therefore silently stops materializing lessons once that date
+# passes, turning these tests into false failures (and, worse, hiding real
+# regressions). Anchor every window to the next Monday instead.
+_WINDOW_DAYS = 25  # Mon + Wed for 4 weeks = 8 occurrences, all inside the window
+_TERM_PAD = timedelta(days=180)
+
+
+def _anchor_monday() -> date:
+    """The first Monday STRICTLY in the future, so a 14:00 lesson on it is future."""
+    today = timezone.localdate()
+    return today + timedelta(days=((0 - today.weekday()) % 7 or 7))
+
+
+def _setup(*, term_end=None):
     branch = BranchFactory()
+    anchor = _anchor_monday()
     return {
         "branch": branch,
-        "term": TermFactory(start_date=date(2026, 1, 1), end_date=term_end),
+        "anchor": anchor,
+        "term": TermFactory(
+            start_date=anchor - _TERM_PAD,
+            end_date=term_end if term_end is not None else anchor + _TERM_PAD,
+        ),
         "cohort": CohortFactory(branch=branch),
         "teacher": TeacherProfileFactory(branch=branch),
         "room": RoomFactory(branch=branch),
     }
 
 
-def _make_rule(ctx, *, rrule="FREQ=WEEKLY;BYDAY=MO,WE", start=date(2026, 7, 6), end=date(2026, 7, 31)):
+_UNSET = object()
+
+
+def _make_rule(ctx, *, rrule="FREQ=WEEKLY;BYDAY=MO,WE", start=_UNSET, end=_UNSET):
+    start_date = ctx["anchor"] if start is _UNSET else start
+    end_date = start_date + timedelta(days=_WINDOW_DAYS) if end is _UNSET else end
     return services.create_rule(
         term=ctx["term"],
         cohort=ctx["cohort"],
@@ -46,8 +76,8 @@ def _make_rule(ctx, *, rrule="FREQ=WEEKLY;BYDAY=MO,WE", start=date(2026, 7, 6), 
         room=ctx["room"],
         title="Algebra",
         rrule=rrule,
-        start_date=start,
-        end_date=end,
+        start_date=start_date,
+        end_date=end_date,
         start_time=time(14, 0),
         end_time=time(15, 30),
     )
@@ -56,11 +86,11 @@ def _make_rule(ctx, *, rrule="FREQ=WEEKLY;BYDAY=MO,WE", start=date(2026, 7, 6), 
 def test_materialize_counts_and_holiday_skip(tenant_a):
     with schema_context(tenant_a.schema_name):
         ctx = _setup()
-        BranchHoliday.objects.create(branch=ctx["branch"], date=date(2026, 7, 6), name="Holiday")
+        BranchHoliday.objects.create(branch=ctx["branch"], date=ctx["anchor"], name="Holiday")
         rule = _make_rule(ctx)
-        # Jul 6,8,13,15,20,22,27,29 = 8 Mon/Wed slots, minus the Jul 6 holiday = 7.
+        # anchor +0,+2,+7,+9,+14,+16,+21,+23 = 8 Mon/Wed slots, minus the anchor holiday = 7.
         assert rule.lessons.count() == 7
-        assert not rule.lessons.filter(starts_at__date=date(2026, 7, 6)).exists()
+        assert not rule.lessons.filter(starts_at__date=ctx["anchor"]).exists()
 
 
 def test_materialize_idempotent(tenant_a):
@@ -79,7 +109,8 @@ def test_detached_lesson_survives_rematerialize(tenant_a):
         ctx = _setup()
         rule = _make_rule(ctx)
         lesson = rule.lessons.order_by("starts_at").first()
-        services.move_occurrence(lesson, starts_at=_aware(2026, 8, 3, 9), ends_at=_aware(2026, 8, 3, 10))
+        away = ctx["anchor"] + timedelta(days=28)  # past the rule window, still inside the term
+        services.move_occurrence(lesson, starts_at=_at(away, 9), ends_at=_at(away, 10))
         services.materialize_rule(rule)
         lesson.refresh_from_db()
         assert lesson.detached_from_rule is True
@@ -89,7 +120,7 @@ def test_detached_lesson_survives_rematerialize(tenant_a):
 def test_exclusion_constraint_blocks_raw_orm_overlap(tenant_a):
     with schema_context(tenant_a.schema_name):
         ctx = _setup()
-        start = _aware(2026, 7, 6, 14)
+        start = _at(ctx["anchor"], 14)
         Lesson.objects.create(
             term=ctx["term"],
             cohort=ctx["cohort"],
@@ -113,7 +144,8 @@ def test_exclusion_constraint_blocks_raw_orm_overlap(tenant_a):
 def test_conflict_overlap_raises_409(tenant_a, dimension):
     with schema_context(tenant_a.schema_name):
         ctx = _setup()
-        _make_rule(ctx, rrule="FREQ=WEEKLY;BYDAY=MO", start=date(2026, 7, 6), end=date(2026, 7, 6))
+        anchor = ctx["anchor"]
+        _make_rule(ctx, rrule="FREQ=WEEKLY;BYDAY=MO", start=anchor, end=anchor)
         # A second rule overlapping on the chosen dimension, same Monday 14:00.
         other = dict(ctx)
         if dimension == "teacher":
@@ -126,7 +158,7 @@ def test_conflict_overlap_raises_409(tenant_a, dimension):
             other["teacher"] = TeacherProfileFactory(branch=ctx["branch"])
             other["cohort"] = CohortFactory(branch=ctx["branch"])
         with pytest.raises(ConflictException) as exc:
-            _make_rule(other, rrule="FREQ=WEEKLY;BYDAY=MO", start=date(2026, 7, 6), end=date(2026, 7, 6))
+            _make_rule(other, rrule="FREQ=WEEKLY;BYDAY=MO", start=anchor, end=anchor)
         assert exc.value.code == "schedule_conflict"
         # D2-A-3: conflicting ids sit directly under error.fields[dimension].
         assert dimension in (exc.value.fields or {})
@@ -135,7 +167,7 @@ def test_conflict_overlap_raises_409(tenant_a, dimension):
 def test_adjacent_lessons_allowed(tenant_a):
     with schema_context(tenant_a.schema_name):
         ctx = _setup()
-        start = _aware(2026, 7, 6, 14)
+        start = _at(ctx["anchor"], 14)
         Lesson.objects.create(
             term=ctx["term"],
             cohort=ctx["cohort"],
@@ -251,7 +283,8 @@ def test_deactivating_rule_preserves_detached_lessons(tenant_a):
         ctx = _setup()
         rule = _make_rule(ctx)
         moved = rule.lessons.order_by("starts_at").first()
-        services.move_occurrence(moved, starts_at=_aware(2026, 8, 3, 9), ends_at=_aware(2026, 8, 3, 10))
+        away = ctx["anchor"] + timedelta(days=28)
+        services.move_occurrence(moved, starts_at=_at(away, 9), ends_at=_at(away, 10))
         services.update_rule(rule, is_active=False)
         moved.refresh_from_db()
         assert rule.lessons.filter(pk=moved.pk).exists()
@@ -405,8 +438,9 @@ def test_move_rejects_non_scheduled_lesson(tenant_a):
         lesson = rule.lessons.order_by("starts_at").first()
         services.cancel_occurrence(lesson, reason="snow day")
         lesson.refresh_from_db()
+        away = ctx["anchor"] + timedelta(days=28)
         with pytest.raises(ConflictException) as exc:
-            services.move_occurrence(lesson, starts_at=_aware(2026, 8, 3, 9), ends_at=_aware(2026, 8, 3, 10))
+            services.move_occurrence(lesson, starts_at=_at(away, 9), ends_at=_at(away, 10))
         assert exc.value.code == "lesson_not_scheduled"
 
 
@@ -503,8 +537,8 @@ def test_rules_create_reversed_times_is_400_not_500(tenant_a, as_role):
             "teacher": ctx["teacher"].id,
             "title": "Bad hours",
             "rrule": "FREQ=WEEKLY;BYDAY=MO",
-            "start_date": "2026-07-06",
-            "end_date": "2026-07-31",
+            "start_date": ctx["anchor"].isoformat(),
+            "end_date": (ctx["anchor"] + timedelta(days=_WINDOW_DAYS)).isoformat(),
             "start_time": "15:00",
             "end_time": "14:00",
         },
@@ -549,8 +583,8 @@ def test_rule_put_omitting_is_active_preserves_it(tenant_a, as_role):
             "room": ctx["room"].id,
             "title": "Algebra",
             "rrule": "FREQ=WEEKLY;BYDAY=MO,WE",
-            "start_date": "2026-07-06",
-            "end_date": "2026-07-31",
+            "start_date": ctx["anchor"].isoformat(),
+            "end_date": (ctx["anchor"] + timedelta(days=_WINDOW_DAYS)).isoformat(),
             "start_time": "14:00",
             "end_time": "15:30",
         },
