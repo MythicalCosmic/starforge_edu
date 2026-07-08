@@ -125,6 +125,11 @@ def assign_task(*, task: Task, actor, actor_roles: set[str], assignee=_UNSET, de
 
 @transaction.atomic
 def transition_task(*, task: Task, to_status: str, actor=None) -> Task:
+    # Re-fetch under a row lock so two concurrent transitions can't both read the
+    # same pre-image and each pass the gate, bypassing the state-machine graph
+    # (e.g. one racer commits OPEN->CANCELLED while the other commits OPEN->DONE,
+    # landing a CANCELLED task in DONE). Mirrors every sibling transition service.
+    task = Task.objects.select_for_update().get(pk=task.pk)
     if to_status == task.status:
         return task  # no-op
     if to_status not in _ALLOWED_TRANSITIONS.get(task.status, set()):

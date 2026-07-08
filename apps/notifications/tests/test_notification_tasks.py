@@ -73,6 +73,34 @@ def test_in_app_group_send_is_schema_prefixed(tenant_a, monkeypatch, django_capt
 
 
 # --------------------------------------------------------------------------- #
+# Realtime push is best-effort: a channel-layer (Redis) outage must not raise
+# --------------------------------------------------------------------------- #
+def test_group_send_swallows_channel_layer_failure(monkeypatch):
+    """A realtime broadcast runs inside transaction.on_commit hooks; if it raised
+    (Redis down) it would 500 an already-committed request AND abort the remaining
+    on_commit callbacks — e.g. dropping the guardian notifications of every later
+    absent student in a mark-attendance batch. group_send must swallow + log."""
+    from infrastructure.websocket import channel_layer
+
+    class _BoomLayer:
+        async def group_send(self, group, message):
+            raise ConnectionError("redis down")
+
+    monkeypatch.setattr(channel_layer, "get_channel_layer", lambda: _BoomLayer())
+    # Must NOT raise despite the layer erroring.
+    channel_layer.group_send("tenant.cohort.1", {"type": "attendance.update"})
+
+
+def test_group_send_no_layer_configured_is_noop(monkeypatch):
+    """No channel layer (e.g. a management command context) is a silent no-op,
+    never an AttributeError on None.group_send."""
+    from infrastructure.websocket import channel_layer
+
+    monkeypatch.setattr(channel_layer, "get_channel_layer", lambda: None)
+    channel_layer.group_send("tenant.cohort.1", {"type": "attendance.update"})
+
+
+# --------------------------------------------------------------------------- #
 # Quiet-hours deferral is idempotent under dispatch_notification redelivery
 # --------------------------------------------------------------------------- #
 @time_machine.travel("2026-06-16 23:30:00 +05:00", tick=False)
