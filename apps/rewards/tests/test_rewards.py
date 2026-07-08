@@ -71,6 +71,53 @@ def test_cash_reward_routes_through_a1_to_the_ledger(tenant_a, as_role):
     assert reward_entry["party_label"] == (teacher.get_full_name() or teacher.username)
 
 
+def test_reward_recipient_cannot_self_disburse(tenant_a, as_role):
+    """R2-01: a cash reward's recipient may not disburse their own payout. The
+    beneficiary maker-checker guard (previously loan-only) now covers rewards, so a
+    cashier who is granted a cash reward cannot pay it out to themselves."""
+    director, _ = as_role(Role.DIRECTOR)
+    hod_client, _h = as_role(Role.HEAD_OF_DEPT)
+    cashier, cashier_user = as_role(Role.CASHIER)  # holds approvals:disburse
+    with schema_context(tenant_a.schema_name):
+        from apps.finance.models import PaymentMethod
+
+        method_id = PaymentMethod.objects.create(name="Cash", slug="cash").id
+
+    rt = director.post(
+        TYPES, {"name": "Bonus", "is_cash": True, "default_amount_uzs": "100000.00"}, format="json"
+    ).json()["data"]["id"]
+    # HOD grants the cash reward TO the cashier (requester != recipient).
+    granted = hod_client.post(
+        GRANTS, {"reward_type": rt, "recipient": cashier_user.id, "reason": "x"}, format="json"
+    )
+    assert granted.status_code == 201, granted.content
+    req_id = granted.json()["data"]["approval_request"]
+    # An independent director approves — fine.
+    assert director.post(f"{APPROVALS}{req_id}/approve/", {}, format="json").status_code == 200
+    # The RECIPIENT (cashier) tries to pay the reward out to themselves -> blocked.
+    dis = cashier.post(f"{APPROVALS}{req_id}/disburse/", {"payment_method": method_id}, format="json")
+    assert dis.status_code == 403, dis.content
+    assert dis.json()["code"] == "reward_self_dealing"
+
+
+def test_reward_recipient_cannot_self_approve(tenant_a, as_role):
+    """R2-01 (approve leg): a recipient who holds approvals:approve cannot approve
+    their own reward request either."""
+    granter, _ = as_role(Role.DIRECTOR)
+    recipient_client, recipient = as_role(Role.DIRECTOR)  # a second director holds approvals:approve
+    rt = granter.post(
+        TYPES, {"name": "Bonus2", "is_cash": True, "default_amount_uzs": "100000.00"}, format="json"
+    ).json()["data"]["id"]
+    granted = granter.post(
+        GRANTS, {"reward_type": rt, "recipient": recipient.id, "reason": "x"}, format="json"
+    )
+    assert granted.status_code == 201, granted.content
+    req_id = granted.json()["data"]["approval_request"]
+    resp = recipient_client.post(f"{APPROVALS}{req_id}/approve/", {}, format="json")
+    assert resp.status_code == 403, resp.content
+    assert resp.json()["code"] == "reward_self_dealing"
+
+
 def test_non_cash_reward_recorded_without_approval(tenant_a, as_role):
     director, _ = as_role(Role.DIRECTOR)
     _tc, teacher = as_role(Role.TEACHER)

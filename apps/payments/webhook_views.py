@@ -21,6 +21,7 @@ member) — the documented TD-18 exception (Payme's protocol is non-negotiable).
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from django.http import HttpRequest, HttpResponse, JsonResponse
@@ -31,6 +32,8 @@ from apps.payments import services
 from apps.payments.models import Provider, ProviderConfig
 from core.exceptions import ValidationException
 from core.utils import client_ip
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_center(center_slug: str):
@@ -97,14 +100,30 @@ def click_webhook_view(request: HttpRequest, center_slug: str) -> HttpResponse:
             from apps.finance.models import Invoice
 
             invoice = Invoice.objects.filter(number=payload.get("merchant_trans_id", "")).first()
-            if invoice is not None:
-                try:
-                    services.process_click_complete(payload=payload, invoice=invoice)
-                except ValidationException:
-                    # Amount mismatch: reject the event so a Click retry is NOT swallowed
-                    # as a duplicate, and never credit the invoice. -1 is Click's generic code.
-                    services.mark_webhook_rejected(event)
-                    return JsonResponse({"error": ERROR_SIGN_CHECK_FAILED, "error_note": "Amount mismatch"})
+            if invoice is None:
+                # The order can't be resolved (invoice deleted/renumbered after
+                # checkout, or a number drift). Do NOT ACK success + mark processed —
+                # that permanently swallows the provider's corrective retry and
+                # silently loses a captured payment. Reject so the event stays
+                # retryable and surfaces as a REJECTED row for manual reconciliation.
+                services.mark_webhook_rejected(event)
+                return JsonResponse({"error": ERROR_SIGN_CHECK_FAILED, "error_note": "Unknown order"})
+            try:
+                services.process_click_complete(payload=payload, invoice=invoice)
+            except ValidationException:
+                # Amount mismatch: reject the event so a Click retry is NOT swallowed
+                # as a duplicate, and never credit the invoice. -1 is Click's generic code.
+                services.mark_webhook_rejected(event)
+                return JsonResponse({"error": ERROR_SIGN_CHECK_FAILED, "error_note": "Amount mismatch"})
+            except Exception:
+                # A transient failure (DB deadlock/serialization, or any non-validation
+                # error) must NOT leave the event committed as RECEIVED — on the
+                # provider's retry, record_webhook_event would flip it to DUPLICATE and
+                # swallow it, permanently losing a captured payment. Reject so the retry
+                # reprocesses cleanly.
+                logger.exception("Click webhook processing failed for event %s", event_id)
+                services.mark_webhook_rejected(event)
+                return JsonResponse({"error": ERROR_SIGN_CHECK_FAILED, "error_note": "Processing error"})
         services.mark_webhook_processed(event)
         return JsonResponse({"error": ERROR_SUCCESS, "error_note": "Success"})
 
@@ -188,17 +207,30 @@ def uzum_webhook_view(request: HttpRequest, center_slug: str) -> HttpResponse:
 
         order_ref = payload.get("order_id") or payload.get("order_number") or payload.get("account", "")
         invoice = Invoice.objects.filter(number=order_ref).first()
-        if invoice is not None:
-            try:
-                services.process_uzum_payment(payload=payload, invoice=invoice)
-            except ValidationException:
-                # Amount mismatch: reject (do not credit the invoice) and mark the event
-                # rejected so a retry is not swallowed as a duplicate.
-                services.mark_webhook_rejected(event)
-                return _error(
-                    "amount_mismatch",
-                    "Reported amount does not match the invoice total.",
-                    http_status=400,
-                )
+        if invoice is None:
+            # Unresolvable order: do NOT mark processed + ok — that swallows the
+            # provider's corrective retry and silently loses a captured payment.
+            # Reject so the event stays retryable (surfaces as a REJECTED row).
+            services.mark_webhook_rejected(event)
+            return _error("unknown_order", "No invoice matches this order.", http_status=400)
+        try:
+            services.process_uzum_payment(payload=payload, invoice=invoice)
+        except ValidationException:
+            # Amount mismatch: reject (do not credit the invoice) and mark the event
+            # rejected so a retry is not swallowed as a duplicate.
+            services.mark_webhook_rejected(event)
+            return _error(
+                "amount_mismatch",
+                "Reported amount does not match the invoice total.",
+                http_status=400,
+            )
+        except Exception:
+            # A transient failure (DB deadlock/serialization, or any non-validation
+            # error) must NOT leave the event committed as RECEIVED — on retry it would
+            # be flipped to DUPLICATE and swallowed, losing a captured payment. Reject
+            # so the retry reprocesses cleanly.
+            logger.exception("Uzum webhook processing failed for event %s", event_id)
+            services.mark_webhook_rejected(event)
+            return _error("processing_error", "Could not process the callback.", http_status=400)
         services.mark_webhook_processed(event)
         return JsonResponse({"status": "ok"})

@@ -178,6 +178,50 @@ def test_click_complete_replay_duplicate_single_allocation(configured_a):
 
 
 # --------------------------------------------------------------------------- #
+# Regression (round-2 bug hunt): a Complete callback must NEVER be ACKed as
+# success + marked processed unless a Payment was actually recorded — otherwise
+# the provider stops retrying and a captured payment is silently lost.
+# --------------------------------------------------------------------------- #
+def test_click_complete_unknown_invoice_is_rejected_not_acked(configured_a):
+    """R2-09: a validly-signed Click Complete whose merchant_trans_id resolves to
+    no invoice must be REJECTED (retryable), not marked processed + success."""
+    complete = bld.make_click_complete(
+        click_trans_id="click-unknown-1",
+        merchant_trans_id="INV-DOES-NOT-EXIST",
+        amount=AMOUNT_UZS,
+    )
+    resp = _post_click(configured_a, complete)
+    body = resp.json()
+    assert body["error"] != 0, body  # NOT the success code
+    # No payment created, and the event is retryable (rejected), not processed.
+    assert helpers.payment_rows(configured_a, provider="click") == []
+    events = helpers.webhook_event_rows(configured_a, provider="click")
+    assert events
+    assert all(e.status == "rejected" for e in events)
+
+
+def test_click_complete_processing_error_is_rejected_not_swallowed(configured_a, monkeypatch):
+    """R2-02: if processing throws a non-ValidationException (e.g. a transient DB
+    error), the event must be REJECTED so the provider's retry reprocesses — never
+    left as RECEIVED (which the next attempt would dedup-swallow as DUPLICATE)."""
+    from apps.payments import services
+
+    def _boom(*a, **k):
+        raise RuntimeError("simulated deadlock")
+
+    monkeypatch.setattr(services, "process_click_complete", _boom)
+    complete = bld.make_click_complete(
+        click_trans_id="click-boom-1", merchant_trans_id=ACCOUNT["order_id"], amount=AMOUNT_UZS
+    )
+    resp = _post_click(configured_a, complete)
+    assert resp.json()["error"] != 0
+    events = helpers.webhook_event_rows(configured_a, provider="click", event_id="click-boom-1:1")
+    assert events
+    assert events[0].status == "rejected"
+    assert helpers.payment_rows(configured_a, provider="click") == []
+
+
+# --------------------------------------------------------------------------- #
 # D3-F-3 — wrong-tenant slug
 # --------------------------------------------------------------------------- #
 def test_payme_valid_for_a_posted_to_b_fails_no_rows(configured_a, configured_b):

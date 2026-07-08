@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal, InvalidOperation
+from typing import Any
 
 from django.db import transaction
 from django.utils import timezone
@@ -39,6 +40,9 @@ KIND_FINE = "fine"
 # gated by a per-center policy and tied to a real absence record (anti-fraud: you can
 # only deduct for an absence that actually happened, and only once).
 KIND_ABSENCE_DEDUCTION = "absence_deduction"
+# A money-OUT kind (acts at disburse) paying a named STAFF recipient (cash reward,
+# F17-1). Built by apps.rewards; the recipient's User id is pinned in the payload.
+KIND_REWARD = "reward"
 
 # Money/percent columns are NUMERIC(_, 2); normalize payload values to that scale.
 _TWO_PLACES = Decimal("0.01")
@@ -712,18 +716,36 @@ def _assert_not_self_approval(req: ApprovalRequest, actor) -> None:
         raise PermissionException(_("You cannot approve your own request."), code="self_approval")
 
 
-def _assert_not_loan_self_dealing(req: ApprovalRequest, actor) -> None:
-    """Segregation of duties extends to the BENEFICIARY, not just the maker: a loan's
-    borrower may neither approve nor disburse their own loan. Without this, a
-    colleague keys a loan naming the borrower, and the borrower (if they hold
-    approve/disburse rights) signs off the payout to themselves — the requester
-    self-approval block alone misses it. Superusers are exempt."""
+# Money-OUT-to-a-named-STAFF-member kinds pin the beneficiary's User id in the
+# payload under a per-kind key. SoD extends to that beneficiary — they may neither
+# approve nor disburse a payout to themselves. Each entry: (payload key, error code,
+# message). Supplier/vendor payees (procurement/expense party_label) and student
+# payees (book_cash money-IN) are NOT staff users, so they aren't listed.
+_BENEFICIARY_SELF_DEALING: dict[str, tuple[str, str, Any]] = {
+    KIND_LOAN: ("borrower_id", "loan_self_dealing", _("You cannot approve or disburse your own loan.")),
+    KIND_REWARD: (
+        "recipient_id",
+        "reward_self_dealing",
+        _("You cannot approve or disburse your own reward."),
+    ),
+}
+
+
+def _assert_not_beneficiary_self_dealing(req: ApprovalRequest, actor) -> None:
+    """Segregation of duties extends to the BENEFICIARY, not just the maker: the named
+    payee of a money-OUT request (a loan borrower, a cash-reward recipient) may neither
+    approve nor disburse their own payout. Without this, a colleague keys the request
+    naming the beneficiary, and the beneficiary (if they hold approve/disburse rights)
+    signs off the payout to themselves — the requester self-approval block alone misses
+    it. Applied on BOTH approve and disburse. Superusers are exempt."""
     if actor is None or getattr(actor, "is_superuser", False):
         return
-    if req.kind == KIND_LOAN and req.payload.get("borrower_id") == getattr(actor, "id", None):
-        raise PermissionException(
-            _("You cannot approve or disburse your own loan."), code="loan_self_dealing"
-        )
+    spec = _BENEFICIARY_SELF_DEALING.get(req.kind)
+    if spec is None:
+        return
+    key, code, message = spec
+    if req.payload.get(key) == getattr(actor, "id", None):
+        raise PermissionException(message, code=code)
 
 
 @transaction.atomic
@@ -732,7 +754,7 @@ def approve(*, request_id: int, actor=None, note: str = "") -> ApprovalRequest:
     if req.status != ApprovalRequest.Status.PENDING:
         raise UnprocessableEntity(_("Only a pending request can be approved."), code="approval_not_pending")
     _assert_not_self_approval(req, actor)
-    _assert_not_loan_self_dealing(req, actor)
+    _assert_not_beneficiary_self_dealing(req, actor)
     req.status = ApprovalRequest.Status.APPROVED
     req.decided_by = actor
     req.decided_at = timezone.now()
@@ -806,7 +828,7 @@ def disburse(
         raise UnprocessableEntity(
             _("Only an approved request can be disbursed."), code="approval_not_approved"
         )
-    _assert_not_loan_self_dealing(req, actor)
+    _assert_not_beneficiary_self_dealing(req, actor)
     if req.amount_uzs is None:
         raise UnprocessableEntity(_("This request has no amount to disburse."), code="approval_no_amount")
     method = PaymentMethod.objects.filter(pk=payment_method_id, is_active=True).first()
