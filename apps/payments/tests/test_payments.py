@@ -225,6 +225,32 @@ def test_refund_completed_payment_drives_finance_refund(invoice_a):
         assert finance_selectors.outstanding_balance(inv.student_id) == Decimal(AMOUNT_UZS)
 
 
+def test_refund_explicit_zero_amount_is_rejected_not_full_refund(invoice_a):
+    """R7 (money): an EXPLICIT amount of 0 must be rejected (positivity 400), NOT
+    silently coalesced to a full refund. refund_payment presence-checks the amount, so
+    Decimal('0') reaches request_refund's `amount <= 0` guard instead of `0 or full`."""
+    from apps.finance.models import Invoice, Refund
+    from apps.payments import services
+    from apps.payments.models import Payment
+    from core.exceptions import ValidationException
+
+    tenant_a, inv = invoice_a
+    with schema_context(tenant_a.schema_name):
+        payment = services.process_click_complete(
+            payload={"click_trans_id": "click-zero", "merchant_trans_id": inv.number, "amount": AMOUNT_UZS},
+            invoice=inv,
+        )
+        with pytest.raises(ValidationException) as exc:
+            services.refund_payment(payment_id=payment.pk, amount_uzs=Decimal("0"), reason="oops")
+        assert exc.value.code == "invalid_amount"
+        # Nothing was refunded: no Refund row, payment still COMPLETED, invoice still PAID.
+        assert not Refund.objects.filter(payment_id=payment.pk).exists()
+        payment.refresh_from_db()
+        assert payment.status == Payment.Status.COMPLETED
+        inv.refresh_from_db()
+        assert inv.status == Invoice.Status.PAID
+
+
 def test_refund_cannot_be_applied_twice(invoice_a):
     """A second refund on an already-fully-refunded payment is rejected — the
     payment is no longer COMPLETED, and the net-paid guard would also block it."""

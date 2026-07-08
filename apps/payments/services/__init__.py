@@ -634,7 +634,11 @@ def refund_payment(*, payment_id: int, amount_uzs: Decimal | None = None, reason
     refund = request_refund(
         invoice=invoice,
         payment_id=payment.pk,
-        amount_uzs=amount_uzs or payment.amount_uzs,
+        # Presence-check, NOT truthiness: an OMITTED amount (None) means a full refund,
+        # but an EXPLICIT 0 must fall through to request_refund's positivity guard (400
+        # invalid_amount), not silently become the full amount. `Decimal("0") or X` -> X
+        # would turn a "refund nothing" request into a full money-out refund.
+        amount_uzs=payment.amount_uzs if amount_uzs is None else amount_uzs,
         reason=reason or "manual_refund",
     )
     register_refund_completion(refund_id=refund.pk, payment_id=payment.pk)
