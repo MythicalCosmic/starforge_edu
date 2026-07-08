@@ -14,9 +14,9 @@ from django.db import IntegrityError, transaction
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
-from apps.cohorts.models import Cohort, CohortMembership
+from apps.cohorts.models import Cohort, CohortMembership, CohortTeacher
 from apps.cohorts.signals import cohort_member_moved
-from core.exceptions import ConflictException, ValidationException
+from core.exceptions import ConflictException, NotFoundException, ValidationException
 from core.utils import current_schema
 
 
@@ -107,3 +107,68 @@ def move_student(*, student, to_cohort: Cohort, reason: str = "", actor=None) ->
         )
     )
     return {"membership": membership, "over_capacity": over_capacity}
+
+
+@transaction.atomic
+def unenroll_student_from_cohort(*, cohort: Cohort, student, reason: str = "") -> CohortMembership:
+    """Remove a student FROM a group without moving them to another (the "remove from
+    group" list action, F2): end-date the active membership in `cohort` while keeping the
+    student enrolled in the centre (they simply become groupless for that course).
+
+    History is preserved (the row is end-dated, never deleted). If this was the student's
+    PRIMARY cohort, the primary is recomputed from any remaining active membership (else
+    cleared to null / groupless), keeping `current_cohort` stable and truthful — the same
+    stable-primary contract as `enroll`/`move` (R2-04). The student row is locked so a
+    concurrent move/unenroll can't race on `current_cohort`.
+
+    Deliberately does NOT emit `cohort_member_moved`: that signal's receivers (finance
+    auto-issue, notifications, audit) all key on a *destination* cohort; a removal has
+    none, so firing it would wrongly issue an invoice for a phantom cohort."""
+    student = type(student).objects.select_for_update().get(pk=student.pk)
+    membership = CohortMembership.objects.filter(
+        cohort=cohort, student=student, end_date__isnull=True
+    ).first()
+    if membership is None:
+        raise ValidationException(
+            _("Student is not active in this cohort."), code="not_enrolled"
+        )
+    membership.end_date = timezone.now().date()
+    if reason:
+        membership.moved_reason = reason
+    membership.save(update_fields=["end_date", "moved_reason"])
+
+    if student.current_cohort_id == cohort.pk:
+        remaining = (
+            CohortMembership.objects.filter(student=student, end_date__isnull=True)
+            .exclude(pk=membership.pk)
+            .order_by("-start_date")
+            .first()
+        )
+        student.current_cohort_id = remaining.cohort_id if remaining else None
+        student.save(update_fields=["current_cohort", "updated_at"])
+    return membership
+
+
+def assign_cohort_teacher(*, cohort: Cohort, teacher, role: str) -> tuple[CohortTeacher, bool]:
+    """Assign a teacher as a co-teacher/assistant on the cohort (F4 — multiple teachers +
+    assistants per group). Idempotent upsert keyed on the (cohort, teacher) unique pair:
+    re-assigning the same teacher just updates their role, so the frontend never has to
+    reconcile a 409. Returns (row, created)."""
+    if role not in CohortTeacher.TeachRole.values:
+        raise ValidationException(
+            _("Invalid teaching role."),
+            code="validation_error",
+            fields={"role": [f"Must be one of {list(CohortTeacher.TeachRole.values)}."]},
+        )
+    ct, created = CohortTeacher.objects.update_or_create(
+        cohort=cohort, teacher=teacher, defaults={"role": role}
+    )
+    return ct, created
+
+
+def remove_cohort_teacher(*, cohort: Cohort, teacher_id: int) -> None:
+    """Unassign a co-teacher/assistant from the cohort (F4). A teacher who is not assigned
+    is a 404 (not a silent no-op) so the caller knows the roster is unchanged."""
+    deleted, _detail = CohortTeacher.objects.filter(cohort=cohort, teacher_id=teacher_id).delete()
+    if not deleted:
+        raise NotFoundException(_("That teacher is not assigned to this cohort."), code="not_found")

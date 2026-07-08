@@ -7,8 +7,14 @@ from typing import Any
 
 from django.db.models import QuerySet
 
-from apps.cohorts.dto.cohort_dto import CohortCreateDTO, CohortEnrollDTO, CohortMoveDTO
-from apps.cohorts.models import Cohort, CohortMembership
+from apps.cohorts.dto.cohort_dto import (
+    CohortCreateDTO,
+    CohortEnrollDTO,
+    CohortMoveDTO,
+    CohortRemoveDTO,
+    CohortTeacherDTO,
+)
+from apps.cohorts.models import Cohort, CohortMembership, CohortTeacher
 
 
 class ICohortService(ABC):
@@ -43,4 +49,22 @@ class ICohortService(ABC):
         {membership, over_capacity}."""
 
     @abstractmethod
+    def remove_member(self, cohort: Cohort, data: CohortRemoveDTO, actor) -> CohortMembership:
+        """Remove a student from ``cohort`` without moving them (groupless); history
+        preserved. Returns the end-dated membership."""
+
+    @abstractmethod
     def members(self, cohort: Cohort) -> QuerySet[CohortMembership]: ...
+
+    @abstractmethod
+    def co_teachers(self, cohort: Cohort) -> QuerySet[CohortTeacher]:
+        """The cohort's co-teacher/assistant roster (F4)."""
+
+    @abstractmethod
+    def assign_teacher(self, cohort: Cohort, data: CohortTeacherDTO) -> tuple[CohortTeacher, bool]:
+        """Assign/re-assign a co-teacher/assistant (idempotent upsert); returns
+        (row, created)."""
+
+    @abstractmethod
+    def remove_teacher(self, cohort: Cohort, teacher_id: int) -> None:
+        """Unassign a co-teacher/assistant (404 if not assigned)."""

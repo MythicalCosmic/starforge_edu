@@ -13,10 +13,16 @@ from django.db import IntegrityError
 from django.db.models import QuerySet
 from django.utils.translation import gettext_lazy as _
 
-from apps.cohorts.dto.cohort_dto import CohortCreateDTO, CohortEnrollDTO, CohortMoveDTO
+from apps.cohorts.dto.cohort_dto import (
+    CohortCreateDTO,
+    CohortEnrollDTO,
+    CohortMoveDTO,
+    CohortRemoveDTO,
+    CohortTeacherDTO,
+)
 from apps.cohorts.interfaces.cohort_service import ICohortService
 from apps.cohorts.interfaces.repositories import ICohortRepository
-from apps.cohorts.models import Cohort, CohortMembership
+from apps.cohorts.models import Cohort, CohortMembership, CohortTeacher
 from core.exceptions import ConflictException, ValidationException
 
 _SCALAR_FIELDS = ("name", "level", "start_date", "end_date", "capacity", "is_archived")
@@ -102,8 +108,29 @@ class CohortService(ICohortService):
             actor=actor,
         )
 
+    def remove_member(self, cohort: Cohort, data: CohortRemoveDTO, actor) -> CohortMembership:
+        from apps.cohorts.services import unenroll_student_from_cohort
+
+        return unenroll_student_from_cohort(
+            cohort=cohort, student=self._resolve_student(data.student_id), reason=data.reason
+        )
+
     def members(self, cohort: Cohort) -> QuerySet[CohortMembership]:
         return self._cohorts.active_members(cohort)
+
+    def co_teachers(self, cohort: Cohort) -> QuerySet[CohortTeacher]:
+        return CohortTeacher.objects.filter(cohort=cohort).order_by("teacher_id")
+
+    def assign_teacher(self, cohort: Cohort, data: CohortTeacherDTO) -> tuple[CohortTeacher, bool]:
+        from apps.cohorts.services import assign_cohort_teacher
+
+        teacher = self._resolve_teacher(data.teacher_id)  # 400 if not found
+        return assign_cohort_teacher(cohort=cohort, teacher=teacher, role=data.role)
+
+    def remove_teacher(self, cohort: Cohort, teacher_id: int) -> None:
+        from apps.cohorts.services import remove_cohort_teacher
+
+        remove_cohort_teacher(cohort=cohort, teacher_id=teacher_id)
 
     # --- helpers -----------------------------------------------------------
     @staticmethod

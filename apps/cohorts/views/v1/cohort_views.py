@@ -15,9 +15,15 @@ from typing import Any
 from django.http import HttpRequest, HttpResponse
 from django.views.decorators.csrf import csrf_exempt
 
-from apps.cohorts.dto.cohort_dto import CohortCreateDTO, CohortEnrollDTO, CohortMoveDTO
+from apps.cohorts.dto.cohort_dto import (
+    CohortCreateDTO,
+    CohortEnrollDTO,
+    CohortMoveDTO,
+    CohortRemoveDTO,
+    CohortTeacherDTO,
+)
 from apps.cohorts.interfaces.cohort_service import ICohortService
-from apps.cohorts.presenters import cohort_to_dict, membership_to_dict
+from apps.cohorts.presenters import cohort_teacher_to_dict, cohort_to_dict, membership_to_dict
 from core.api_auth import check_perm, require_auth
 from core.container import container
 from core.exceptions import NotFoundException, ValidationException
@@ -122,12 +128,63 @@ def cohort_move_student_view(request: HttpRequest, pk: int) -> HttpResponse:
 
 @csrf_exempt
 @require_auth
+def cohort_remove_student_view(request: HttpRequest, pk: int) -> HttpResponse:
+    """Remove a student FROM this cohort without moving them elsewhere (F2 "remove from
+    group" — they stay enrolled in the centre, just groupless for this course)."""
+    if request.method != "POST":
+        return error("Method not allowed.", code="method_not_allowed", status=405)
+    check_perm(request, f"{_RESOURCE}:write")
+    cohort = _get_in_scope(request, pk)
+    body = read_json(request)
+    dto = CohortRemoveDTO(
+        student_id=int_field(body, "student", required=True),  # type: ignore[arg-type]
+        reason=str_field(body, "reason"),
+    )
+    return success(membership_to_dict(_service().remove_member(cohort, dto, actor=request.user)))
+
+
+@csrf_exempt
+@require_auth
 def cohort_members_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method != "GET":
         return error("Method not allowed.", code="method_not_allowed", status=405)
     check_perm(request, f"{_RESOURCE}:read")
     cohort = _get_in_scope(request, pk)
     return success([membership_to_dict(m) for m in _service().members(cohort)])
+
+
+@csrf_exempt
+@require_auth
+def cohort_teachers_view(request: HttpRequest, pk: int) -> HttpResponse:
+    """The cohort's co-teacher/assistant roster (F4): GET lists it, POST assigns."""
+    if request.method == "GET":
+        check_perm(request, f"{_RESOURCE}:read")
+        cohort = _get_in_scope(request, pk)
+        return success([cohort_teacher_to_dict(ct) for ct in _service().co_teachers(cohort)])
+    if request.method == "POST":
+        check_perm(request, f"{_RESOURCE}:write")
+        cohort = _get_in_scope(request, pk)
+        body = read_json(request)
+        dto = CohortTeacherDTO(
+            teacher_id=int_field(body, "teacher", required=True),  # type: ignore[arg-type]
+            role=str_field(body, "role", default="co_teacher"),
+        )
+        ct, was_created = _service().assign_teacher(cohort, dto)
+        payload = cohort_teacher_to_dict(ct)
+        return created(payload) if was_created else success(payload)
+    return error("Method not allowed.", code="method_not_allowed", status=405)
+
+
+@csrf_exempt
+@require_auth
+def cohort_teacher_detail_view(request: HttpRequest, pk: int, teacher_id: int) -> HttpResponse:
+    """Unassign a co-teacher/assistant from the cohort (F4)."""
+    if request.method != "DELETE":
+        return error("Method not allowed.", code="method_not_allowed", status=405)
+    check_perm(request, f"{_RESOURCE}:write")
+    cohort = _get_in_scope(request, pk)
+    _service().remove_teacher(cohort, teacher_id)
+    return no_content()
 
 
 @csrf_exempt

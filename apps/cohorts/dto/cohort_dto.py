@@ -35,3 +35,19 @@ class CohortEnrollDTO:
 class CohortMoveDTO:
     student_id: int
     reason: str = ""
+
+
+@dataclass(frozen=True)
+class CohortRemoveDTO:
+    """Remove a student from a group without moving them elsewhere (groupless)."""
+
+    student_id: int
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class CohortTeacherDTO:
+    """Assign a co-teacher/assistant to a cohort (F4)."""
+
+    teacher_id: int
+    role: str
