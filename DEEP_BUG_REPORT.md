@@ -403,6 +403,30 @@ The owner handed back the two flagged task prompts (R2-04, R4/PLAUS1) as a go-ah
 
 ---
 
+## Feature-completeness audit + build (pipeline step 4: "finish the product")
+
+After the bug rounds converged, a **14-agent read-only audit** (6 mappers over FEATURE_LIST.md #1–24 + docs/PRODUCT_VISION.md, each gap re-verified by a 2nd agent) traced **44 features → 36 DONE, 8 confirmed gaps**. The product is overwhelmingly built; the gaps split into *safe-to-build* (additive, obviously-intended, no product decision) and *must-not-guess* (design/spec/infra decisions).
+
+**BUILT this session (3 gaps — additive, gated, no behavior change to existing paths):**
+- **F2 "remove from group"** — `POST /api/v1/cohorts/<pk>/remove-student/` unenrolls a student to *groupless* without moving them (history preserved; primary cohort recomputed from any surviving membership else cleared). Does NOT emit `cohort_member_moved` (its receivers key on a destination cohort a removal lacks). Commit `2d0599a`.
+- **F4 co-teachers/assistants** — the `CohortTeacher` model was read everywhere but had no API write path (admin-only). Added `GET/POST /api/v1/cohorts/<pk>/teachers/` (assign = idempotent upsert) + `DELETE …/teachers/<teacher_id>/`. Commit `2d0599a`.
+- **F10-1 dynamic SMS send date** — `Campaign.scheduled_at` (nullable+indexed, migration 0004) + `dispatch_due_campaigns` beat sweep (per-tenant fan-out, 5-min cadence) that auto-sends DRAFT campaigns once due, reusing the lock-claimed idempotent `send_campaign`. Null = manual send (unchanged). Commit `3b5101e`.
+
+Each: reuses the app's existing scope/permission guards, tests added (17 new), per-app + celery-registration gates green, ruff + mypy clean.
+
+**FLAGGED — not built (product decision / blocked-spec / infra; the owner's call, per "do not guess"):**
+- **F13-1 fairness/salary engine** (MISSING) — percentage-of-collected-payments payout weighted by performance/attendance + a teacher→cashier salary-prep workflow. `agents/FEATURE_BACKLOG.md` marks it **BLOCKED(spec)** and the spec is a 5-line stub. The payout formula must never be invented — needs the owner's rules.
+- **F8 reading/listening/speaking answer types** (PARTIAL) — the 3 media-based placement question types are absent (only single/multiple-choice, short-answer, true/false, writing exist). Needs media upload/storage + grading design; backlog F8-1 itself defers as "need media."
+- **F8 mobile-only test creation / web-blocked-by-tenant** (MISSING) — no client-platform detection or tenant flag anywhere; backlog F8-2 explicitly defers it as "a soft/spoofable policy gate."
+- **F3 teacher-dashboard "forms to fill" warnings** (PARTIAL) — forms have no per-recipient targeting model (only branch-scoped publish), so there is no notion of "unanswered forms for THIS teacher." Adding audience/assignment targeting is a data-model design decision.
+- **F12/F15 card↔attendance scan tie** (MISSING) — a door `CardScan` and the per-lesson `AttendanceRecord` are disconnected; a scan never marks attendance. Deliberately NOT built autonomously: attendance feeds the A-1 **absence-deduction money path**, and *which* lesson a scan attaches to (time-window / cohort matching / teacher-override precedence) is a design decision that could corrupt money if guessed.
+
+**Conclusion:** the product is feature-complete against FEATURE_LIST.md except the 5 flagged items above, every one of which requires an owner decision (a formula, a media/infra choice, a targeting model, or a money-adjacent design). The 3 unambiguous, additive gaps were built and gated.
+
+**Branch audit (pipeline step 6 — "don't miss already-built work"):** `day1-build` is a strict superset of `origin/master` (the deploy target — 0 commits on master that day1-build lacks) and of the feature content of `origin/v1-starter` (the older 20-app pre-migration foundation; day1-build has 38 apps, and every file "absent" from day1-build is an old flat `serializers.py`/`services.py`/`views.py` deliberately removed by the off-DRF layered migration). The only other branch, `origin/dependabot/…`, is a CI-config bump. No already-built feature is stranded on another branch — `day1-build` is canonical.
+
+---
+
 ## Appendix A — Refuted candidates
 
 _Populated on completion. Recorded so future passes don't re-investigate them._
