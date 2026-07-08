@@ -1,7 +1,7 @@
 # Starforge EDU — Deep Bug Report
 
-**Status:** 🔄 In progress — round 1 hunting
-**Date:** 2026-07-08 · **Branch:** `day1-build` · **Base commit:** `dce7b83`
+**Status:** 🔄 Active loop — 3 hunt rounds done, 13 fix batches committed (see "Summary of this session" at the bottom)
+**Date:** 2026-07-08 · **Branch:** `day1-build` (unpushed) · **Base commit:** `dce7b83` → latest `cf311e7`
 
 ---
 
@@ -252,9 +252,55 @@ Making `enroll` end-date prior memberships (the finding's fix) would **break the
 
 ---
 
-## Findings (round 3+ land below)
+## Round 3 — deep per-app hunt + adversarial review of this session's fixes (12 areas)
 
-_Round-2 fixes proceeding in gated batches; round-3 hunt queued after._
+13 raw → **8 CONFIRMED, 4 PLAUSIBLE, 1 refuted**. The fix-regression reviewer found **no regression** in any of the 13 committed fixes. New findings:
+
+### R3-01 · [HIGH][security] Print-job `payload_s3_key` was unvalidated → any `printing:write` staffer could mint a presigned download URL for ANY object in the shared bucket (cross-tenant + cross-permission file exfiltration) ✅ FIXED (batch J, `eb6fce5`)
+- **Where:** [apps/printing/views/v1/printing_views.py:206](apps/printing/views/v1/printing_views.py#L206) → agent-claim `presign_download`. The HTTP create path now requires the caller's `{current_schema()}/` prefix (mirrors the assignments attachment-key guard); internal hand-offs use the service layer and are unaffected. +test.
+
+### R3-02 · [MEDIUM][subscription] Reactivating a lapsed center never extended `current_period_end` → the nightly meter re-suspended it within a day (activate a no-op in prod) ✅ FIXED (batch K, `6cd7459`)
+- **Where:** [apps/billing/services/__init__.py:381](apps/billing/services/__init__.py#L381) `change_subscription`. Now grants a fresh cycle (`PLATFORM_EXTENSION_DAYS`) when reactivating a lapsed sub; a future period is untouched. +2 tests.
+
+### R3-03 · [MEDIUM][subscription] `extend_trial` pushed `Center.trial_ends_at` but never synced `Subscription.current_period_end` → billing meter suspended (402) at the ORIGINAL trial end ✅ FIXED (batch K, `6cd7459`)
+- **Where:** [apps/tenancy/services/__init__.py:209](apps/tenancy/services/__init__.py#L209). New `billing.extend_trial_period` re-establishes the invariant. +test.
+
+### R3-04 · [MEDIUM][scale] JSON grade-results endpoint accepted an uncapped array with per-row DB queries (CSV twin caps at 5000) ✅ FIXED (batch L, `cf311e7`)
+- **Where:** [apps/academics/views/v1/academics_views.py:345](apps/academics/views/v1/academics_views.py#L345). Now capped at `MAX_IMPORT_ROWS`. +test.
+
+### R3-05 · [LOW][perf/500] `submit_attempt` / writing-marking over-locked the shared `PlacementTest` row via `select_for_update().select_related(...)` → serialized concurrent submits (+ 500 on `lock_timeout`) ✅ FIXED (batch L, `cf311e7`)
+- **Where:** [apps/placement/services/__init__.py:365](apps/placement/services/__init__.py#L365),`:731`,`:781`. Now `select_for_update(of=("self",))` — locks only the attempt row.
+
+### R3-06 · [LOW][correctness] Cover-assign accepted an offboarded (login-disabled) teacher → reassigned a live lesson to someone who can't act on it ✅ FIXED (batch L, `cf311e7`)
+- **Where:** [apps/covers/services/v1/cover_service.py:91](apps/covers/services/v1/cover_service.py#L91). `_resolve_teacher` now rejects an inactive user. +test.
+
+### R3-07 · [LOW][idor] Department head resolved by pk with no branch-consistency check 🚩 DEFERRED
+- **Where:** [apps/org/services/v1/department_service.py:56](apps/org/services/v1/department_service.py#L56). A branch-scoped IT (org:write) could set a dept's head to a foreign-branch teacher. **Deferred:** the "head's branch" is ambiguous (a head may be a HOD resolved as a `User` vs a teacher with a profile branch); a wrong branch-consistency check could break legit assignments. LOW + limited reach (only branch-scoped IT; DIRECTOR is legitimately unscoped, and IT already has tenant-wide `users:read` so the oracle adds little).
+
+### R3-08 · [LOW][concurrency] `enqueue_print` idempotency is a non-locking SELECT-then-CREATE (no partial unique) → concurrent identical hand-offs double-print 🚩 DEFERRED (needs a migration)
+- **Where:** [apps/printing/services/__init__.py:175](apps/printing/services/__init__.py#L175). Fix = a partial unique constraint on open jobs (migration) — batched with the other migration-LOWs.
+
+### R3-09 · [LOW][privacy] Branch-ranking k-anonymity checks the active-student headcount, not the distinct contributing-student count per metric 🚩 DEFERRED
+- **Where:** [apps/intelligence/selectors.py:260](apps/intelligence/selectors.py#L260). A branch with ≥3 active students but only one graded student exposes that individual's exact grade behind an "aggregate". Fix needs a per-metric distinct-contributor count; subtle, deferred (LOW, scoped to staff with existing student visibility).
+
+### R3-P1 · [LOW][security] StudentProfile enumeration oracle in transcript request (400 for nonexistent vs 403 for existing-but-unauthorized) 🚩 DEFERRED (LOW; PLAUSIBLE)
+- **Where:** [apps/academics/views/v1/academics_views.py:507](apps/academics/views/v1/academics_views.py#L507). Reorder auth-before-existence (or uniform 404). LOW.
+
+### R3-P2 · [LOW][concurrency] Root-level folder name uniqueness not DB-enforced (nullable parent → NULL-distinct) 🚩 DEFERRED (needs a migration; PLAUSIBLE)
+- **Where:** [apps/content/models.py:129](apps/content/models.py#L129). Fix = a partial unique on `(library, name) WHERE parent IS NULL` — batched with the migration-LOWs.
+
+### R3-P3 · [MEDIUM][correctness] Exam-generation idempotency key omits all exam params (keyed on subject only) → a differently-parameterized second request silently returns the stale first result 🚩 FLAGGED — OWNER/AI-INFRA DECISION (PLAUSIBLE)
+- **Where:** [apps/ai/services/__init__.py:120](apps/ai/services/__init__.py#L120) `make_idempotency_key`. Real gap, but the fix touches the **shared AI budget/idempotency helper used by 7 features**; changing it alters the spend/idempotency contract engine-wide. Only PLAUSIBLE (1 refuter dissented). **Flagged rather than changed** — needs an owner call on the intended per-subject-vs-per-params idempotency + budget policy, then a surgical per-feature key extension (an optional param-hash suffix, not a signature change).
+
+---
+
+## Summary of this session
+
+**3 independent hunt rounds** (14 + 16 + 12 lens/area agents, each finding verified by 2 adversarial refuters), all disjoint from the prior 346-finding audit. **43 new findings** surfaced (36 confirmed + 7 plausible). **13 gated fix batches** committed to `day1-build` (unpushed), each green on the affected apps + ruff + mypy; **5 full-suite checkpoints** all `0 failed` (1548 → 1551 → 1560 → 1564 → final). Highlights fixed: 2 HIGH payment-loss bugs (Click/Uzum), 1 HIGH reward self-dealing, 1 HIGH webhook-retry payment-loss, 1 HIGH reschedule-notify data-loss, 1 HIGH cross-tenant file exfiltration, plus pagination row-drop, discount/invoice-integrity, IDOR scoping, N+1/OOM scale, and race/lock defects.
+
+**Flagged for the owner (not silently guessed):** R2-04 (multi-cohort enrollment — product decision, `task_a0fba4be`), R3-P3 (AI idempotency — shared-infra/spend policy). **Deferred (need a coordinated change):** R2-13 (localdate sweep), R2-14/R2-15/R3-08/R3-P2/R1-10 (DB migrations), R3-07/R3-09/R3-P1 (LOW, subtle). **Backlog correction:** two `agents/FEATURE_BACKLOG.md` "TODO"s are already implemented — F5-5 (multi-branch scope works via the membership set + unscoped DIRECTOR) and A-1 notify-on-disburse (`approval.disbursed` exists).
+
+**Not done (owner's call):** nothing was pushed/deployed — `origin/master` auto-deploys to a shared server, so that's the owner's decision. Load-testing "thousands of users" was not possible without a load environment; scale work here is code-level (N+1 elimination, row caps, pagination stability, lock-scope reduction) and is noted as such.
 
 ---
 
