@@ -475,6 +475,20 @@ class TestAuditExport:
             after = AuditLog.objects.filter(action=Action.EXPORT).count()
         assert after == before + 1
 
+    def test_export_neutralizes_csv_formula_injection(self, tenant_a, as_role):
+        """R6/PLAUS3: an attacker-controlled User-Agent / actor_repr beginning with a
+        formula char (= + - @) must be neutralized (apostrophe-prefixed) in the export so
+        it can't execute when an admin opens the spreadsheet."""
+        client, _ = as_role(Role.DIRECTOR, tenant_a)
+        with schema_context(tenant_a.schema_name):
+            AuditLogFactory(user_agent="=cmd|'/c calc'!A1", actor_repr="@SUM(A1:A9)")
+        resp = client.get(EXPORT_URL)
+        content = b"".join(resp.streaming_content).decode()
+        assert "'=cmd|" in content  # user_agent guarded
+        assert "'@SUM(" in content  # actor_repr guarded
+        assert "\n=cmd|" not in content  # never a bare formula cell at row start
+        assert ",=cmd|" not in content  # nor mid-row
+
     def test_export_over_cap_400(self, tenant_a, as_role, monkeypatch):
         import apps.audit.views.v1.audit_views as views
 

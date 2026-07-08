@@ -130,6 +130,19 @@ _CSV_HEADER = [
 ]
 
 
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _safe_cell(value):
+    """Neutralize spreadsheet formula injection. Audit cells carry attacker-controlled
+    text (User-Agent header, actor_repr, resource ids); a leading = + - @ (or tab/CR)
+    would execute as a formula when an admin opens the export. Prefix such strings with
+    an apostrophe so they render as literal text (mirrors reports.generators.safe_cell)."""
+    if isinstance(value, str) and value[:1] in _FORMULA_PREFIXES:
+        return "'" + value
+    return value
+
+
 def _csv_rows(qs):
     writer = csv.writer(_Echo())
     yield writer.writerow(_CSV_HEADER)
@@ -139,12 +152,12 @@ def _csv_rows(qs):
                 row.id,
                 row.created_at.isoformat(),
                 row.actor_id or "",
-                row.actor_repr,
-                row.action,
-                row.resource_type,
-                row.resource_id,
+                _safe_cell(row.actor_repr),
+                _safe_cell(row.action),
+                _safe_cell(row.resource_type),
+                _safe_cell(row.resource_id),
                 row.ip or "",
-                row.user_agent,
+                _safe_cell(row.user_agent),
             ]
         )
 

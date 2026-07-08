@@ -154,7 +154,12 @@ def payme_webhook_view(request: HttpRequest, center_slug: str) -> HttpResponse:
         # breaking Payme's always-HTTP-200 JSON-RPC contract. Coerce to {}.
         raw_params = body.get("params")
         params = raw_params if isinstance(raw_params, dict) else {}
-        if method in ("CreateTransaction",) and params.get("id"):
+        # WebhookEvent.event_id is CharField(max_length=128); an attacker-supplied
+        # over-long params.id would make the pre-record INSERT raise DataError, which
+        # middleware maps to HTTP 400 — breaking Payme's mandatory always-HTTP-200
+        # JSON-RPC contract before dispatch. Skip the audit pre-record for an oversized
+        # id and let client.handle validate it and return a proper JSON-RPC error (200).
+        if method in ("CreateTransaction",) and params.get("id") and len(str(params["id"])) <= 128:
             # Payme's CreateTransaction is idempotent on params.id — a repeat of the same
             # id is an EXPECTED retry, not a nonce-replay, so it must not be flagged
             # `duplicate`. The handler echoes the existing txn.

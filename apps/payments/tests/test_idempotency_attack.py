@@ -165,6 +165,35 @@ def test_cash_double_submit_same_amount_is_coalesced(invoice_a, user_in, as_user
         assert Payment.objects.filter(provider=Payment.Method.CASH, status="completed").count() == 1
 
 
+def test_cash_equal_amount_installments_in_different_windows_both_record(invoice_a, user_in, as_user):
+    """R6 (money): two legitimate EQUAL-amount cash installments toward one invoice, taken
+    in different idempotency windows (minutes apart), must BOTH record — the headerless
+    time-windowed key only coalesces a same-window resubmit, not genuine later repeats."""
+    import time_machine
+
+    from apps.finance import services as finance_services
+    from apps.org.tests.factories import BranchFactory
+    from apps.payments.models import Payment
+
+    tenant_a, inv = invoice_a
+    cashier = user_in(tenant_a, roles=["cashier"])
+    client = as_user(tenant_a, cashier)
+    body = {"invoice": inv.id, "amount_uzs": "50000.00"}
+    with time_machine.travel("2026-06-16 10:00:00 +05:00", tick=False):
+        with schema_context(tenant_a.schema_name):
+            finance_services.open_cashier_shift(
+                cashier=cashier, branch=BranchFactory(), opening_cash_uzs=Decimal("0.00")
+            )
+        r1 = client.post("/api/v1/payments/cash/", body, format="json")
+    with time_machine.travel("2026-06-16 10:05:00 +05:00", tick=False):  # 5 min later, new window
+        r2 = client.post("/api/v1/payments/cash/", body, format="json")
+    assert r1.status_code in (200, 201), r1.content
+    assert r2.status_code in (200, 201), r2.content
+    assert r1.json()["data"]["id"] != r2.json()["data"]["id"]  # both recorded, not coalesced
+    with schema_context(tenant_a.schema_name):
+        assert Payment.objects.filter(provider=Payment.Method.CASH, status="completed").count() == 2
+
+
 def _payment_id(result) -> int:
     """create_checkout may return a Payment, a dict, or an id — normalize."""
     if isinstance(result, dict):
