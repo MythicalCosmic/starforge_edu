@@ -51,8 +51,12 @@ class PaymentService(IPaymentService):
             invoice_id=invoice_id, provider=provider, idempotency_key=idempotency_key, payer=payer
         )
 
-    def cash(self, *, invoice_id: int, cashier, amount_uzs: Decimal | None) -> Payment:
-        return domain.create_cash_payment(invoice_id=invoice_id, cashier=cashier, amount_uzs=amount_uzs)
+    def cash(
+        self, *, invoice_id: int, cashier, amount_uzs: Decimal | None, idempotency_key: str | None = None
+    ) -> Payment:
+        return domain.create_cash_payment(
+            invoice_id=invoice_id, cashier=cashier, amount_uzs=amount_uzs, idempotency_key=idempotency_key
+        )
 
     def allocate(self, *, payment_id: int, allocations: list[dict[str, Any]]) -> Payment:
         return domain.allocate_manual(payment_id=payment_id, allocations=allocations)

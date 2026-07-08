@@ -174,6 +174,18 @@ class ApiRateLimitMiddleware:
                 response["Retry-After"] = str(int(exc.wait or window))
                 return response
 
+        # Payment-provider webhooks (/api/v1/webhooks/...) are unauthenticated at the
+        # HTTP layer (signature-verified in the view) and pushed from the provider's
+        # FIXED server IP(s). The blanket anon limiter runs BEFORE tenant resolution and
+        # keys on client IP, so ALL tenants' callbacks for one provider collapse into a
+        # single 60/min bucket — a payment burst 429s a provider callback (breaking
+        # Payme's always-200 contract and causing provider-side cancel/retry), silently
+        # desyncing the money path. Exempt them: they carry their own signature auth +
+        # replay dedupe (WebhookEvent) + provider retry, so IP throttling is both
+        # ineffective (spoofable) and harmful here.
+        if request.path.startswith("/api/v1/webhooks/"):
+            return self.get_response(request)
+
         if request.method != "OPTIONS" and request.path.startswith("/api/"):
             from core.exceptions import ThrottledException
             from core.ratelimit import check_rate

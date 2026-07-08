@@ -7,6 +7,7 @@ webhooks live in apps/payments/webhook_views.py (a separate public-schema surfac
 
 from __future__ import annotations
 
+import uuid
 from datetime import date
 from typing import Any
 
@@ -230,7 +231,16 @@ def payment_cash_view(request: HttpRequest) -> HttpResponse:
     data = read_json(request)
     invoice = _int(_require(data, "invoice"), "invoice")
     amount_uzs = decimal_field(data, "amount_uzs", max_digits=18, decimal_places=2)
-    payment = _payment_service().cash(invoice_id=invoice, cashier=request.user, amount_uzs=amount_uzs)
+    # A client Idempotency-Key dedupes an accidental double-submit (a POS terminal
+    # sends one per action). WITHOUT one, each POST is a DISTINCT cash payment — a
+    # cashier legitimately takes several payments toward the same invoice in one shift,
+    # so the old derived per-(invoice, shift) key silently swallowed every payment
+    # after the first (unrecorded cash, understated revenue, drawer discrepancy). Fall
+    # back to a unique key so distinct payments are never coalesced.
+    idem = request.headers.get("Idempotency-Key") or f"cash:{current_schema()}:{uuid.uuid4().hex}"
+    payment = _payment_service().cash(
+        invoice_id=invoice, cashier=request.user, amount_uzs=amount_uzs, idempotency_key=idem
+    )
     return created(payment_read_to_dict(payment))
 
 

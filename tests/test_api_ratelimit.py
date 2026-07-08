@@ -62,6 +62,21 @@ def test_non_api_paths_are_not_limited(tenant_a, client_for):
         assert client.get("/healthz/live").status_code == 200
 
 
+@override_settings(API_RATELIMIT_ANON="1/min")
+def test_payment_webhooks_are_exempt_from_the_blanket_limiter(tenant_a, client_for):
+    """R4/CONF4: provider webhooks (/api/v1/webhooks/...) are signature-authed and
+    pushed from the provider's fixed IP; the anon limiter (keyed on IP, before tenant
+    resolution) would collapse ALL tenants' callbacks into one bucket and 429 a
+    payment callback during a burst — breaking the money path. They must be exempt."""
+    client = client_for(tenant_a)
+    # Hammer a webhook path well past the 1/min anon cap; it must never 429 from the
+    # blanket limiter (an unknown center slug 404s, a bad signature is handled in-view —
+    # neither is a 429).
+    for _ in range(4):
+        resp = client.post("/api/v1/webhooks/click/nonexistent-center/", {}, format="json")
+        assert resp.status_code != 429, resp.content
+
+
 @override_settings(ADMIN_LOGIN_RATELIMIT="3/min")
 def test_admin_login_bruteforce_is_throttled(tenant_a, client_for):
     """R1-07: /admin/login/ is not under /api/, so it bypassed the blanket limiter,

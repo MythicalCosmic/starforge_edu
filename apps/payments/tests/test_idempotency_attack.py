@@ -13,6 +13,8 @@ views) is imported lazily; the orchestrator runs this on Postgres after merge.
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 from django_tenants.utils import schema_context
 
@@ -111,6 +113,31 @@ def test_checkout_endpoint_idempotency_header_one_payment(invoice_a, user_in, as
 
     with schema_context(tenant_a.schema_name):
         assert Payment.objects.filter(idempotency_key=IDEMP_KEY).count() == 1
+
+
+def test_two_cash_payments_same_invoice_are_both_recorded(invoice_a, user_in, as_user):
+    """R4/CONF6 (money): without an Idempotency-Key header, each cash POST is a DISTINCT
+    payment. A cashier legitimately takes several payments toward one invoice in a shift;
+    the old derived per-(invoice, shift) key swallowed every payment after the first
+    (silent cash loss). Two headerless POSTs must create TWO completed payments."""
+    from apps.finance import services as finance_services
+    from apps.org.tests.factories import BranchFactory
+    from apps.payments.models import Payment
+
+    tenant_a, inv = invoice_a
+    cashier = user_in(tenant_a, roles=["cashier"])
+    with schema_context(tenant_a.schema_name):
+        finance_services.open_cashier_shift(
+            cashier=cashier, branch=BranchFactory(), opening_cash_uzs=Decimal("0.00")
+        )
+    client = as_user(tenant_a, cashier)
+    r1 = client.post("/api/v1/payments/cash/", {"invoice": inv.id, "amount_uzs": "50000.00"}, format="json")
+    r2 = client.post("/api/v1/payments/cash/", {"invoice": inv.id, "amount_uzs": "30000.00"}, format="json")
+    assert r1.status_code in (200, 201), r1.content
+    assert r2.status_code in (200, 201), r2.content
+    assert r1.json()["data"]["id"] != r2.json()["data"]["id"]  # two distinct payments, not coalesced
+    with schema_context(tenant_a.schema_name):
+        assert Payment.objects.filter(provider=Payment.Method.CASH, status="completed").count() == 2
 
 
 def _payment_id(result) -> int:
