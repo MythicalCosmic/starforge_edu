@@ -21,6 +21,7 @@ def campaign_to_dict(c: Campaign) -> dict[str, Any]:
         "skipped_count": c.skipped_count,
         "created_by": c.created_by_id,
         "sent_by": c.sent_by_id,
+        "scheduled_at": c.scheduled_at.isoformat() if c.scheduled_at else None,
         "sent_at": c.sent_at.isoformat() if c.sent_at else None,
         "created_at": c.created_at.isoformat(),
     }

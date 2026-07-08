@@ -136,6 +136,7 @@ def _create_campaign(request: HttpRequest) -> HttpResponse:
         template_id=int_field(body, "template"),
         branch_id=int_field(body, "branch"),
         segment=segment,
+        scheduled_at=_datetime(body, "scheduled_at"),
     )
     is_unscoped, branch_ids = _scope(request)
     campaign = _campaign_service().create(
@@ -250,6 +251,36 @@ def template_generate_view(request: HttpRequest, pk: int) -> HttpResponse:
     ai_request = _template_service().generate(template, requested_by=request.user)
     # 202 Accepted — the body is drafted async; poll /ai/requests/{id}/.
     return success({"request_id": ai_request.pk, "status": ai_request.status}, status=202)
+
+
+def _datetime(body: dict[str, Any], name: str):
+    """Parse an optional ISO-8601 datetime field; a bad value is a 400, never a 500.
+
+    A naive value (no offset) is interpreted in the server timezone so the beat
+    dispatcher's ``scheduled_at <= now`` comparison is always tz-aware."""
+    from django.utils import timezone
+    from django.utils.dateparse import parse_datetime
+
+    raw = body.get(name)
+    if raw in (None, ""):
+        return None
+    if not isinstance(raw, str):
+        raise ValidationException(
+            "Invalid datetime.", code="validation_error", fields={name: ["Must be an ISO datetime string."]}
+        )
+    try:
+        parsed = parse_datetime(raw)
+    except ValueError:
+        parsed = None
+    if parsed is None:
+        raise ValidationException(
+            "Invalid datetime.",
+            code="validation_error",
+            fields={name: ["Must be an ISO-8601 datetime."]},
+        )
+    if timezone.is_naive(parsed):
+        parsed = timezone.make_aware(parsed, timezone.get_current_timezone())
+    return parsed
 
 
 def _template_changes(body: dict[str, Any]) -> dict[str, Any]:

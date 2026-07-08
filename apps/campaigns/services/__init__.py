@@ -56,11 +56,17 @@ def _segment_queryset(segment: dict, branch):
 
 
 @transaction.atomic
-def create_campaign(*, name: str, message: str, segment: dict | None, created_by, branch=None) -> Campaign:
+def create_campaign(
+    *, name: str, message: str, segment: dict | None, created_by, branch=None, scheduled_at=None
+) -> Campaign:
     """Freeze the audience: resolve every student in the segment to a recipient row +
     phone now, so the campaign is an exact, auditable record even if the roster changes
     later. Recipients without any phone are marked SKIPPED up front (never silently
-    dropped)."""
+    dropped).
+
+    ``scheduled_at`` (optional) defers the blast: the campaign is created DRAFT and the
+    ``dispatch_due_campaigns`` beat task sends it once the time arrives. A null means the
+    campaign is sent manually via the send endpoint (unchanged behaviour)."""
     segment = {k: v for k, v in (segment or {}).items() if k in ("status", "cohort") and v not in (None, "")}
     students = list(
         _segment_queryset(segment, branch).select_related("user").prefetch_related("guardians__parent__user")
@@ -71,6 +77,7 @@ def create_campaign(*, name: str, message: str, segment: dict | None, created_by
         segment=segment,
         branch=branch,
         created_by=created_by,
+        scheduled_at=scheduled_at,
         total=len(students),
     )
     # Consent: a phone on the do-not-contact list is suppressed up front (a recipient is
@@ -169,6 +176,30 @@ def send_campaign(*, campaign_id: int, actor=None) -> Campaign:
         update_fields=["sent_count", "failed_count", "skipped_count", "sent_at", "status", "updated_at"]
     )
     return campaign
+
+
+def dispatch_due_campaigns() -> int:
+    """Send every campaign whose scheduled send-time has arrived (F10-1 dynamic send date).
+
+    Runs inside the current tenant schema (the beat task fans it out per Center). Picks up
+    DRAFT campaigns with a non-null ``scheduled_at`` that is now in the past and sends each
+    via ``send_campaign`` — which claims the row under a lock and is idempotent, so an
+    overlapping beat cycle can't double-send. One campaign's failure never aborts the rest.
+    Returns the number of campaigns dispatched."""
+    now = timezone.now()
+    due_ids = list(
+        Campaign.objects.filter(
+            status=Campaign.Status.DRAFT, scheduled_at__isnull=False, scheduled_at__lte=now
+        ).values_list("pk", flat=True)
+    )
+    dispatched = 0
+    for campaign_id in due_ids:
+        try:
+            send_campaign(campaign_id=campaign_id)
+            dispatched += 1
+        except Exception:  # a single bad campaign must not stop the sweep
+            continue
+    return dispatched
 
 
 # ---------------------------------------------------------------------------

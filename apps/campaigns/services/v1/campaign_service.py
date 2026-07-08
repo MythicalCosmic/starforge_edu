@@ -40,7 +40,12 @@ class CampaignService(ICampaignService):
         message = self._resolve_message(data)
         self._assert_branch_in_scope(is_unscoped, branch, branch_ids)
         return create_campaign(
-            name=data.name, message=message, segment=data.segment, created_by=creator, branch=branch
+            name=data.name,
+            message=message,
+            segment=data.segment,
+            created_by=creator,
+            branch=branch,
+            scheduled_at=data.scheduled_at,
         )
 
     def send(self, *, campaign_id: int, actor) -> Campaign:

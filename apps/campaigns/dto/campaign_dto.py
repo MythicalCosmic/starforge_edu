@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 
@@ -13,6 +14,7 @@ class CreateCampaignDTO:
     template_id: int | None = None
     branch_id: int | None = None
     segment: dict[str, Any] = field(default_factory=dict)
+    scheduled_at: datetime | None = None
 
 
 @dataclass(frozen=True)

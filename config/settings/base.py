@@ -425,6 +425,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "celery_tasks.report_tasks.nightly_platform_aggregation",
         "schedule": 60 * 60 * 24,  # daily, public schema (D4-LB-7)
     },
+    "dispatch-scheduled-campaigns": {
+        "task": "celery_tasks.campaign_tasks.dispatch_scheduled_campaigns",
+        "schedule": 60 * 5,  # every 5 min — send campaigns whose scheduled_at has arrived (F10-1)
+    },
 }
 
 # ---------------------------------------------------------------------------

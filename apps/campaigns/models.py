@@ -30,6 +30,10 @@ class Campaign(models.Model):
         "org.Branch", on_delete=models.PROTECT, null=True, blank=True, related_name="campaigns"
     )
     status = models.CharField(max_length=8, choices=Status.choices, default=Status.DRAFT, db_index=True)
+    # F10-1: an optional future send time. When set, the campaign stays DRAFT and a beat
+    # task auto-sends it once `scheduled_at <= now` (a null means manual send only). Indexed
+    # because the dispatcher scans `status=DRAFT, scheduled_at__lte=now` every cycle.
+    scheduled_at = models.DateTimeField(null=True, blank=True, db_index=True)
     total = models.PositiveIntegerField(default=0)
     sent_count = models.PositiveIntegerField(default=0)
     failed_count = models.PositiveIntegerField(default=0)
