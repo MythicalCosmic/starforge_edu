@@ -324,11 +324,38 @@ Making `enroll` end-date prior memberships (the finding's fix) would **break the
 
 ---
 
+## Round 5 — money-chain E2E + adversarial re-review of this session's 16 batches + IDOR re-check (6 lenses)
+
+8 raw → **4 CONFIRMED, 3 PLAUSIBLE, 1 refuted**. The re-review caught **three incomplete edges in this session's own fixes** — exactly what it was for.
+
+### R5-01 · [HIGH][money/ledger] Refund names one invoice but the reversal released the payment's allocations across ALL invoices → a refund of A silently reopened B ✅ FIXED (batch Q, `8c57865`)
+- **Where:** [apps/finance/services/__init__.py:777](apps/finance/services/__init__.py#L777). `reverse_allocations_for_payment` now takes `invoice_id`; `register_refund_completion` scopes the reversal to the Refund's named invoice. +test.
+
+### R5-02 · [HIGH][security] rule bulk-reschedule action omitted the branch-scope guard R2-08 added to create/update/detail (gap in my own fix) ✅ FIXED (batch P, `8b8ebad`)
+- **Where:** [apps/schedule/views/v1/schedule_views.py:511](apps/schedule/views/v1/schedule_views.py#L511). Added `assert_branch_id_in_scope(request, rule.cohort.branch_id)`.
+
+### R5-03 · [MEDIUM][correctness] Auto AI-feedback fabricated a visible `score=0` grade on every ungraded submission ✅ FIXED (batch Q, `8c57865`)
+- **Where:** [apps/assignments/presenters.py:35](apps/assignments/presenters.py#L35). A not-human-graded placeholder (`graded_by=None`) now presents `score=null` + `graded=false`; a teacher's real 0 stands. +test.
+
+### R5-04 · [MEDIUM][serialization] Datetime renders `+00:00` (presenters via `.isoformat()`) vs `Z` (compute-on-read selectors via DjangoJSONEncoder) for the SAME field 🚩 FLAGGED — broad contract decision
+- **Where:** e.g. [apps/finance/presenters.py:30](apps/finance/presenters.py#L30) vs [apps/finance/selectors.py:120](apps/finance/selectors.py#L120). The pre-migration DRF contract was `Z`; the presenter-based bulk of the API diverged to `+00:00`. **Flagged, not fixed:** normalizing is a sweep across every presenter timestamp + every timestamp test assertion, and a decision on the canonical format (the frontend is a separate track) — a coordinated change like R2-13, not a safe autonomous edit.
+
+### R5-P1 · [MEDIUM] (gap in R2-05, PLAUSIBLE) A PENDING absence-deduction corrected before approval still credited the student — approve did no attendance re-check ✅ FIXED (batch P, `8b8ebad`)
+- `_apply_absence_deduction_effect` now re-asserts the locked record is still ABSENT/EXCUSED at approve time.
+
+### R5-P2 · [MEDIUM] (gap in R2-03, PLAUSIBLE) Reschedule dedupe keyed on `old_start` alone re-collided on move-back (A→B→A→B) ✅ FIXED (batch P, `8b8ebad`)
+- Emit `moved_at` (the lesson's monotonic post-save `updated_at`) and key on it. +test (3 moves, repeated old_start, 3 distinct keys).
+
+### R5-P3 · [MEDIUM] (revises R4/CONF6, PLAUSIBLE) The cash fallback key was a fresh uuid = zero double-submit protection ✅ FIXED (batch P, `8b8ebad`)
+- Fall back to an amount-derived key: a same-amount resubmit coalesces, distinct-amount partials still split. +test.
+
+---
+
 ## Summary of this session
 
-**4 independent hunt rounds** (14 + 16 + 12 + 9 lens/area agents, each finding verified by 2 adversarial refuters), all disjoint from the prior 346-finding audit. **~50 new findings** surfaced. **15 gated fix batches** committed to `day1-build` (unpushed), each green on the affected apps + ruff + mypy; **6 full-suite checkpoints** all `0 failed` (1548 → 1551 → 1560 → 1564 → 1570 → final). Highlights fixed: 2 HIGH payment-loss bugs (Click/Uzum checkout/amount), 1 HIGH reward self-dealing, 1 HIGH webhook-retry payment-loss, 1 HIGH reschedule-notify data-loss, 1 HIGH cross-tenant file exfiltration, cash double-payment loss, webhook throttling, report crash-recovery, plus pagination row-drop, discount/invoice-integrity, IDOR scoping, N+1/OOM/statement-DoS scale, and race/lock/idempotency defects.
+**5 independent hunt rounds** (14 + 16 + 12 + 9 + 6 lens/area agents, each finding verified by 2 adversarial refuters), all disjoint from the prior 346-finding audit; round 5 also **adversarially re-reviewed all of this session's own fixes** and caught 3 incomplete edges (now closed). **~55 new findings** surfaced. **19 gated fix batches** committed to `day1-build` (unpushed), each green on the affected apps + ruff + mypy; **7 full-suite checkpoints** all `0 failed` (1548 → 1551 → 1560 → 1564 → 1570 → 1572 → 1574 → final). Highlights fixed: HIGH — 2 Click/Uzum payment-loss (checkout/amount), reward self-dealing, webhook-retry payment-loss, reschedule-notify data-loss, cross-tenant file exfiltration, refund cross-invoice ledger corruption, rule bulk-reschedule cross-branch write. MEDIUM/LOW — cash double-payment loss, webhook throttling, report crash-recovery, statement DoS, pagination row-drop, stacked-discount/invoice integrity, IDOR scoping ×4, N+1/OOM, async fan-out, AI-placeholder fake grade, nightly-metering localdate, race/lock/idempotency defects.
 
-**Flagged for the owner (not silently guessed):** R2-04 (multi-cohort enrollment — product decision, `task_a0fba4be`), R3-P3 (AI idempotency — shared-infra/spend policy). **Deferred (need a coordinated change):** R2-13 (localdate sweep), R2-14/R2-15/R3-08/R3-P2/R1-10 (DB migrations), R3-07/R3-09/R3-P1 (LOW, subtle). **Backlog correction:** two `agents/FEATURE_BACKLOG.md` "TODO"s are already implemented — F5-5 (multi-branch scope works via the membership set + unscoped DIRECTOR) and A-1 notify-on-disburse (`approval.disbursed` exists).
+**Flagged for the owner (not silently guessed):** R2-04 (multi-cohort enrollment — product decision, `task_a0fba4be`), R3-P3 (AI idempotency — shared-infra/spend policy), R4-07 (duplicate nightly metering — ownership decision), R4-P1 (print-job intra-tenant IDOR — needs derive-key-from-source redesign, `task_16ac6823`), R5-04 (datetime `+00:00` vs `Z` — canonical-format contract decision + broad sweep). **Deferred (need a coordinated change):** R2-13 (localdate sweep), R2-14/R2-15/R3-08/R3-P2/R1-10 (DB migrations — uniqueness constraints carry a deploy hazard if existing prod data already violates them, so they need an owner-aware data-cleanup step; a pure additive index like R2-15 is safe), R4-06 (iCal-token access-log redaction — deploy config), R3-07/R3-09/R3-P1 (LOW, subtle). **Backlog correction:** two `agents/FEATURE_BACKLOG.md` "TODO"s are already implemented — F5-5 (multi-branch scope works via the membership set + unscoped DIRECTOR) and A-1 notify-on-disburse (`approval.disbursed` exists).
 
 **Not done (owner's call):** nothing was pushed/deployed — `origin/master` auto-deploys to a shared server, so that's the owner's decision. Load-testing "thousands of users" was not possible without a load environment; scale work here is code-level (N+1 elimination, row caps, pagination stability, lock-scope reduction) and is noted as such.
 
