@@ -217,11 +217,18 @@ def move_occurrence(lesson: Lesson, *, starts_at, ends_at, actor=None) -> Lesson
     lesson.detached_from_rule = True
     lesson.save(update_fields=["starts_at", "ends_at", "detached_from_rule", "updated_at"])
     schema = current_schema()
+    # moved_at = the lesson's post-save updated_at: a monotonic, unique-per-move,
+    # stored value. It's the notification dedupe discriminator so EVERY move notifies —
+    # old_start alone re-collides whenever a lesson returns to a previously-occupied slot
+    # (move A->B->A->B: the 3rd move's old_start=A equals the 1st's), silently dropping
+    # the notification. updated_at is bumped on every save, so it never repeats.
+    moved_at = lesson.updated_at.isoformat()
     transaction.on_commit(
         lambda: lesson_rescheduled.send(
             sender=Lesson,
             lesson_id=lesson.pk,
             old_start=old_start.isoformat(),
+            moved_at=moved_at,
             actor_id=getattr(actor, "pk", None),
             schema_name=schema,
         )
@@ -229,16 +236,18 @@ def move_occurrence(lesson: Lesson, *, starts_at, ends_at, actor=None) -> Lesson
     return lesson
 
 
-def _emit_rescheduled(*, lesson_id: int, old_start, actor_id, schema: str):
+def _emit_rescheduled(*, lesson_id: int, old_start, moved_at: str, actor_id, schema: str):
     """Build an on_commit callback that emits lesson_rescheduled with kwargs
     matching move_occurrence — a factory binds the per-lesson values cleanly
-    (avoids late-binding pitfalls of a loop lambda)."""
+    (avoids late-binding pitfalls of a loop lambda). ``moved_at`` (the moved lesson's
+    updated_at) is the per-move dedupe discriminator (see move_occurrence)."""
 
     def _send():
         lesson_rescheduled.send(
             sender=Lesson,
             lesson_id=lesson_id,
             old_start=old_start.isoformat(),
+            moved_at=moved_at,
             actor_id=actor_id,
             schema_name=schema,
         )
@@ -282,6 +291,7 @@ def bulk_reschedule(rule: RecurrenceRule, *, shift_minutes: int, actor=None) -> 
             _emit_rescheduled(
                 lesson_id=lesson.pk,
                 old_start=old_starts[lesson.id],
+                moved_at=lesson.updated_at.isoformat(),  # per-move dedupe discriminator
                 actor_id=actor_id,
                 schema=schema,
             )

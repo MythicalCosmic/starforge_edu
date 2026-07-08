@@ -116,15 +116,24 @@ def test_lesson_reschedule_dedupe_key_varies_per_move(tenant_a, monkeypatch):
     monkeypatch.setattr(receivers, "_dispatch_many", _capture)
 
     with schema_context(tenant_a.schema_name):
+        # Move A->B, back B->A, then A->B AGAIN: old_start repeats (A, B, A) but moved_at
+        # (the lesson's updated_at) is monotonic, so all three keys are distinct — the
+        # 3rd move must still notify (old_start alone would collide keys[0]==keys[2]).
         lesson_rescheduled.send(
-            sender=None, lesson_id=42, old_start="2026-01-05T10:00:00+00:00", schema_name=tenant_a.schema_name
+            sender=None, lesson_id=42, old_start="2026-01-05T10:00:00+00:00",
+            moved_at="2026-01-01T08:00:00.000001+00:00", schema_name=tenant_a.schema_name,
         )
         lesson_rescheduled.send(
-            sender=None, lesson_id=42, old_start="2026-01-12T10:00:00+00:00", schema_name=tenant_a.schema_name
+            sender=None, lesson_id=42, old_start="2026-01-12T10:00:00+00:00",
+            moved_at="2026-01-01T08:00:00.000002+00:00", schema_name=tenant_a.schema_name,
+        )
+        lesson_rescheduled.send(
+            sender=None, lesson_id=42, old_start="2026-01-05T10:00:00+00:00",  # same old_start as #1
+            moved_at="2026-01-01T08:00:00.000003+00:00", schema_name=tenant_a.schema_name,
         )
 
-    assert len(keys) == 2, "both moves must dispatch"
-    assert keys[0] != keys[1], "distinct moves must not share a dedupe key"
+    assert len(keys) == 3, "all three moves must dispatch"
+    assert len(set(keys)) == 3, "each move must get a distinct dedupe key (monotonic moved_at)"
     assert all(k.startswith("schedule.lesson_rescheduled:42:") for k in keys)
 
 

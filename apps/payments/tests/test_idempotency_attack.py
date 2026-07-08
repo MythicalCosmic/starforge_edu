@@ -140,6 +140,31 @@ def test_two_cash_payments_same_invoice_are_both_recorded(invoice_a, user_in, as
         assert Payment.objects.filter(provider=Payment.Method.CASH, status="completed").count() == 2
 
 
+def test_cash_double_submit_same_amount_is_coalesced(invoice_a, user_in, as_user):
+    """R5/PLAUS3: a headerless double-submit of the SAME cash amount (double-click /
+    network retry) must NOT double-credit the drawer. The amount-derived fallback key
+    coalesces it to ONE payment; distinct amounts (covered elsewhere) still split."""
+    from apps.finance import services as finance_services
+    from apps.org.tests.factories import BranchFactory
+    from apps.payments.models import Payment
+
+    tenant_a, inv = invoice_a
+    cashier = user_in(tenant_a, roles=["cashier"])
+    with schema_context(tenant_a.schema_name):
+        finance_services.open_cashier_shift(
+            cashier=cashier, branch=BranchFactory(), opening_cash_uzs=Decimal("0.00")
+        )
+    client = as_user(tenant_a, cashier)
+    body = {"invoice": inv.id, "amount_uzs": "50000.00"}
+    r1 = client.post("/api/v1/payments/cash/", body, format="json")  # no Idempotency-Key
+    r2 = client.post("/api/v1/payments/cash/", body, format="json")  # accidental resubmit
+    assert r1.status_code in (200, 201), r1.content
+    assert r2.status_code in (200, 201), r2.content
+    assert r1.json()["data"]["id"] == r2.json()["data"]["id"]  # coalesced, one payment
+    with schema_context(tenant_a.schema_name):
+        assert Payment.objects.filter(provider=Payment.Method.CASH, status="completed").count() == 1
+
+
 def _payment_id(result) -> int:
     """create_checkout may return a Payment, a dict, or an id — normalize."""
     if isinstance(result, dict):

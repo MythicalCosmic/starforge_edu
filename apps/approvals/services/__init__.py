@@ -559,7 +559,20 @@ def _apply_absence_deduction_effect(req: ApprovalRequest, actor) -> None:
     attendance_id = p["attendance_id"]  # always present (validated at creation)
     # Serialize concurrent approvals for the same absence on the attendance row, so the
     # "already deducted?" check below is race-free (no write-skew double credit).
-    AttendanceRecord.objects.select_for_update().filter(pk=attendance_id).first()
+    record = AttendanceRecord.objects.select_for_update().filter(pk=attendance_id).first()
+    # Re-assert the create-time invariant at APPROVE time: the record must STILL be an
+    # ABSENT/EXCUSED absence. Between request and approval the register can be corrected
+    # (absent -> present); approving a now-corrected record would credit the student for
+    # a lesson they attended. (clear_absence_deduction only retires an ALREADY-APPROVED
+    # credit, so a PENDING request corrected before approval needs this guard.)
+    if record is None or record.status not in (
+        AttendanceRecord.Status.ABSENT,
+        AttendanceRecord.Status.EXCUSED,
+    ):
+        raise UnprocessableEntity(
+            _("The cited attendance record is no longer an absence."),
+            code="absence_deduction_attendance_invalid",
+        )
     if (
         ApprovalRequest.objects.filter(
             kind=KIND_ABSENCE_DEDUCTION,

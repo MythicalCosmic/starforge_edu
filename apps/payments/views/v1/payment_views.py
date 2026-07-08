@@ -7,7 +7,6 @@ webhooks live in apps/payments/webhook_views.py (a separate public-schema surfac
 
 from __future__ import annotations
 
-import uuid
 from datetime import date
 from typing import Any
 
@@ -232,12 +231,16 @@ def payment_cash_view(request: HttpRequest) -> HttpResponse:
     invoice = _int(_require(data, "invoice"), "invoice")
     amount_uzs = decimal_field(data, "amount_uzs", max_digits=18, decimal_places=2)
     # A client Idempotency-Key dedupes an accidental double-submit (a POS terminal
-    # sends one per action). WITHOUT one, each POST is a DISTINCT cash payment — a
-    # cashier legitimately takes several payments toward the same invoice in one shift,
-    # so the old derived per-(invoice, shift) key silently swallowed every payment
-    # after the first (unrecorded cash, understated revenue, drawer discrepancy). Fall
-    # back to a unique key so distinct payments are never coalesced.
-    idem = request.headers.get("Idempotency-Key") or f"cash:{current_schema()}:{uuid.uuid4().hex}"
+    # sends one per action). WITHOUT one, fall back to a key that INCLUDES the amount:
+    # the old per-(invoice, shift) key swallowed every legitimate repeat payment toward
+    # one invoice in a shift (silent cash loss), but a fully-unique key gave ZERO
+    # protection so a double-clicked "Take cash" double-credited the drawer. Keying on
+    # the amount coalesces the accidental same-amount resubmit while still recording
+    # genuine DIFFERENT-amount partials as distinct payments. (Two identical-amount
+    # partials in one action collapse — the header is the precise fix for that.)
+    idem = request.headers.get("Idempotency-Key") or stable_hash(
+        f"cash:{current_schema()}:{invoice}:{request.user.pk}:{amount_uzs}"
+    )
     payment = _payment_service().cash(
         invoice_id=invoice, cashier=request.user, amount_uzs=amount_uzs, idempotency_key=idem
     )

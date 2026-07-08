@@ -515,6 +515,11 @@ def rule_bulk_reschedule_view(request: HttpRequest, pk: int) -> HttpResponse:
     rule = _rule_service().get(pk=pk)
     if rule is None:
         raise NotFoundException(code="not_found")
+    # Object-level branch scope, same as rule_detail_view's mutating verbs: bulk-reschedule
+    # shifts every lesson of the rule (and notifies its cohort), so a branch-scoped writer
+    # must not drive it on another branch's rule via a bare-pk fetch (cross-branch mass
+    # write + existence oracle). The rule's branch is its cohort's branch.
+    assert_branch_id_in_scope(request, rule.cohort.branch_id)
     data = read_json(request)
     # Bound the shift so an absurd value can't overflow datetime.timedelta / a lesson's
     # date arithmetic into a raw 500 (100 years in minutes — far beyond any real reschedule).
