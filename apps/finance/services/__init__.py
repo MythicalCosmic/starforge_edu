@@ -359,15 +359,24 @@ def _due_date(issue_day: date, fee_schedule: FeeSchedule | None, settings) -> da
 
 @transaction.atomic
 def void_invoice(*, invoice: Invoice, actor=None) -> Invoice:
-    if invoice.status == Invoice.Status.PAID:
+    # Re-fetch under a row lock (like extend/restore_invoice_due_date) so a concurrent
+    # allocate_payment — which locks the invoice — can't slip a PaymentAllocation in
+    # between the guard checks and the VOID write. Without the lock, void reads a
+    # pre-allocation snapshot (status not PAID, no allocations), then its UPDATE lands
+    # AFTER allocate commits, stamping VOID over a just-paid invoice and orphaning a
+    # live payment on a voided bill (check-then-act race).
+    locked = Invoice.objects.select_for_update().filter(pk=invoice.pk).first()
+    if locked is None:
+        raise NotFoundException(_("Invoice not found."), code="invoice_not_found")
+    if locked.status == Invoice.Status.PAID:
         raise ConflictException(_("A paid invoice cannot be voided."), code="invoice_paid")
-    if invoice.allocations.exists():
+    if locked.allocations.exists():
         raise ConflictException(
             _("An invoice with payments cannot be voided; refund first."), code="invoice_has_payments"
         )
-    invoice.status = Invoice.Status.VOID
-    invoice.save(update_fields=["status", "updated_at"])
-    return invoice
+    locked.status = Invoice.Status.VOID
+    locked.save(update_fields=["status", "updated_at"])
+    return locked
 
 
 @transaction.atomic

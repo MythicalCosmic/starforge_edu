@@ -273,14 +273,20 @@ def _connect_schedule() -> None:
         )
 
     @receiver(lesson_rescheduled, dispatch_uid="notifications.lesson_rescheduled", weak=False)
-    def on_lesson_rescheduled(sender, *, lesson_id, schema_name="", **kwargs):
+    def on_lesson_rescheduled(sender, *, lesson_id, old_start="", schema_name="", **kwargs):
         from apps.notifications.models import EventType
 
+        # Include the pre-move time in the dedupe key. A lesson can be rescheduled
+        # more than once (move A->B, then B->C), and every move must notify.
+        # Keying on lesson_id alone permanently suppresses every reschedule after the
+        # first — the exact anti-pattern on_grade_changed / on_submission_graded avoid
+        # by appending a per-event discriminator (score / new value). old_start is
+        # distinct per move (microsecond-precision ISO), so each move gets its own key.
         _dispatch_many(
             user_ids=_lesson_recipients(lesson_id),
             event_type=EventType.SCHEDULE_LESSON_REMINDER,
-            context={"lesson_id": lesson_id, "kind": "rescheduled"},
-            dedupe_prefix=f"schedule.lesson_rescheduled:{lesson_id}",
+            context={"lesson_id": lesson_id, "kind": "rescheduled", "old_start": old_start},
+            dedupe_prefix=f"schedule.lesson_rescheduled:{lesson_id}:{old_start}",
         )
 
 

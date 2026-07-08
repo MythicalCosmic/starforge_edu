@@ -73,6 +73,37 @@ def test_in_app_group_send_is_schema_prefixed(tenant_a, monkeypatch, django_capt
 
 
 # --------------------------------------------------------------------------- #
+# Repeat lesson reschedules must each notify (dedupe key includes the move)
+# --------------------------------------------------------------------------- #
+def test_lesson_reschedule_dedupe_key_varies_per_move(tenant_a, monkeypatch):
+    """R2-03: a lesson rescheduled twice (move A->B, then B->C) must notify BOTH
+    times. Keying the dedupe on lesson_id alone collapsed every reschedule after the
+    first into one suppressed notification — the highest-impact (latest) move went
+    silent. The key must include the per-move discriminator (old_start)."""
+    from apps.notifications import receivers
+    from apps.schedule.services import lesson_rescheduled
+
+    keys: list[str] = []
+
+    def _capture(*, user_ids, event_type, context, dedupe_prefix, **kw):
+        keys.append(dedupe_prefix)
+
+    monkeypatch.setattr(receivers, "_dispatch_many", _capture)
+
+    with schema_context(tenant_a.schema_name):
+        lesson_rescheduled.send(
+            sender=None, lesson_id=42, old_start="2026-01-05T10:00:00+00:00", schema_name=tenant_a.schema_name
+        )
+        lesson_rescheduled.send(
+            sender=None, lesson_id=42, old_start="2026-01-12T10:00:00+00:00", schema_name=tenant_a.schema_name
+        )
+
+    assert len(keys) == 2, "both moves must dispatch"
+    assert keys[0] != keys[1], "distinct moves must not share a dedupe key"
+    assert all(k.startswith("schedule.lesson_rescheduled:42:") for k in keys)
+
+
+# --------------------------------------------------------------------------- #
 # Realtime push is best-effort: a channel-layer (Redis) outage must not raise
 # --------------------------------------------------------------------------- #
 def test_group_send_swallows_channel_layer_failure(monkeypatch):

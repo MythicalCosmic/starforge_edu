@@ -154,6 +154,26 @@ class ApiRateLimitMiddleware:
         self.get_response = get_response
 
     def __call__(self, request: HttpRequest) -> HttpResponse:
+        # The Django admin credential form (/admin/login/) is NOT under /api/, so it
+        # bypasses the blanket limiter below — leaving it open to unlimited password
+        # brute-force / credential-stuffing against staff & superuser accounts on
+        # every tenant subdomain and the apex. Throttle the POST by client IP.
+        if request.method == "POST" and request.path.endswith("/admin/login/"):
+            from core.exceptions import ThrottledException
+            from core.ratelimit import check_rate
+            from core.utils import client_ip
+
+            ident = client_ip(request) or "anon"
+            limit, window = _parse_rate(getattr(settings, "ADMIN_LOGIN_RATELIMIT", "10/min"))
+            try:
+                check_rate(scope="admin_login", key=ident, limit=limit, window=window)
+            except ThrottledException as exc:
+                response = JsonResponse(
+                    {"success": False, "code": exc.code, "message": str(exc.detail)}, status=429
+                )
+                response["Retry-After"] = str(int(exc.wait or window))
+                return response
+
         if request.method != "OPTIONS" and request.path.startswith("/api/"):
             from core.exceptions import ThrottledException
             from core.ratelimit import check_rate

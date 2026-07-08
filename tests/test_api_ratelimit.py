@@ -62,6 +62,21 @@ def test_non_api_paths_are_not_limited(tenant_a, client_for):
         assert client.get("/healthz/live").status_code == 200
 
 
+@override_settings(ADMIN_LOGIN_RATELIMIT="3/min")
+def test_admin_login_bruteforce_is_throttled(tenant_a, client_for):
+    """R1-07: /admin/login/ is not under /api/, so it bypassed the blanket limiter,
+    leaving staff/superuser credentials open to unlimited brute-force. The dedicated
+    admin-login throttle must cap the POST (429 with the standard envelope)."""
+    client = client_for(tenant_a)
+    for _ in range(3):
+        resp = client.post("/admin/login/", {"username": "root", "password": "x"})
+        assert resp.status_code != 429  # under the cap (auth fails, but not throttled yet)
+    throttled = client.post("/admin/login/", {"username": "root", "password": "x"})
+    assert throttled.status_code == 429
+    assert throttled.json()["code"] == "throttled"
+    assert throttled["Retry-After"]
+
+
 @override_settings(API_RATELIMIT_ANON="1/min")
 def test_options_preflight_is_exempt(tenant_a, client_for):
     client = client_for(tenant_a)
