@@ -33,14 +33,22 @@ def assignment_to_dict(a: Assignment) -> dict[str, Any]:
 
 
 def grade_to_dict(g: SubmissionGrade) -> dict[str, Any]:
+    # The auto AI-feedback pipeline creates a SubmissionGrade placeholder with score=0
+    # and graded_by=None the moment a submission arrives (score is NOT-NULL), purely to
+    # carry ai_feedback. That placeholder must NOT surface as an official 0.00 mark to
+    # the student. graded_by=None => not human-graded => the score is a placeholder, so
+    # present score/graded_at as null and flag graded=False; the advisory ai_feedback
+    # still shows. A teacher legitimately grading 0 sets graded_by, so real zeros stand.
+    human_graded = g.graded_by_id is not None
     return {
         "submission": g.submission_id,
-        "score": _money(g.score),
+        "score": _money(g.score) if human_graded else None,
+        "graded": human_graded,
         "rubric_scores": g.rubric_scores,
         "feedback": g.feedback,
         "ai_feedback": g.ai_feedback,
         "graded_by": g.graded_by_id,
-        "graded_at": g.graded_at.isoformat() if g.graded_at else None,
+        "graded_at": g.graded_at.isoformat() if (human_graded and g.graded_at) else None,
     }
 
 

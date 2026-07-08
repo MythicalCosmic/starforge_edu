@@ -774,28 +774,40 @@ def register_refund_completion(refund_id: int, payment_id: int | None = None) ->
     # as fully paid (the money was returned). Scope to the refund amount so a
     # partial refund only releases that much.
     if refund.payment_id is not None:
-        reverse_allocations_for_payment(payment_id=refund.payment_id, amount_uzs=refund.amount_uzs)
+        # Scope the reversal to the invoice the Refund NAMES. A single payment can be
+        # manually allocated across several invoices; without this scope the reversal
+        # released the payment's allocations newest-first across ALL invoices, so a
+        # refund attributed to invoice A could silently reopen invoice B (and leave A's
+        # recorded balance inconsistent with its Refund). The invoice-level refund
+        # ceiling already counts only this invoice's allocations, so releasing only this
+        # invoice's allocation of the payment keeps the two consistent.
+        reverse_allocations_for_payment(
+            payment_id=refund.payment_id, amount_uzs=refund.amount_uzs, invoice_id=refund.invoice_id
+        )
     return refund
 
 
 @transaction.atomic
-def reverse_allocations_for_payment(*, payment_id: int, amount_uzs: Decimal | None = None) -> Decimal:
+def reverse_allocations_for_payment(
+    *, payment_id: int, amount_uzs: Decimal | None = None, invoice_id: int | None = None
+) -> Decimal:
     """Release (up to) `amount_uzs` of a payment's allocations and refresh the
     affected invoices' statuses.
 
     Deletes whole `PaymentAllocation` rows newest-first; the final row touched by
     a partial reversal is shrunk in place (its CheckConstraint forbids a non-
     positive amount, so a fully-consumed row is deleted instead). `amount_uzs=None`
-    reverses the entire payment. Returns the total UZS actually released. Each
+    reverses the entire payment. `invoice_id` (when set) restricts the reversal to that
+    ONE invoice's allocation of the payment (invoice-scoped refund); None reverses
+    across all of the payment's invoices. Returns the total UZS actually released. Each
     affected invoice is re-evaluated via `_refresh_invoice_status`, flipping a
     previously PAID invoice back to PARTIALLY_PAID/ISSUED so
     `outstanding_balance` is restored. Idempotent: once the rows are gone a re-call
     releases nothing."""
-    allocations = list(
-        PaymentAllocation.objects.select_for_update()
-        .filter(payment_id=payment_id)
-        .order_by("-created_at", "-id")
-    )
+    qs = PaymentAllocation.objects.select_for_update().filter(payment_id=payment_id)
+    if invoice_id is not None:
+        qs = qs.filter(invoice_id=invoice_id)
+    allocations = list(qs.order_by("-created_at", "-id"))
     if not allocations:
         return _ZERO
 

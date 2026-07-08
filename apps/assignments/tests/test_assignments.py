@@ -37,6 +37,30 @@ def _aware(y, m, d, hh, mm=0):
     return timezone.make_aware(datetime(y, m, d, hh, mm))
 
 
+def test_ai_placeholder_grade_is_not_presented_as_a_score():
+    """R5/CONF4: the auto AI-feedback pipeline creates a SubmissionGrade(score=0,
+    graded_by=None) on every submission just to carry ai_feedback. The presenter must
+    NOT show that placeholder as an official 0.00 mark — a student would see a fake 0
+    for work the teacher never graded. A real human 0 (graded_by set) is still shown."""
+    from apps.assignments.models import SubmissionGrade
+    from apps.assignments.presenters import grade_to_dict
+
+    placeholder = SubmissionGrade(
+        submission_id=1, score=Decimal("0"), graded_by_id=None, ai_feedback="Nice intro", feedback=""
+    )
+    d = grade_to_dict(placeholder)
+    assert d["score"] is None  # not a real mark
+    assert d["graded"] is False
+    assert d["ai_feedback"] == "Nice intro"  # advisory feedback still surfaces
+
+    human_zero = SubmissionGrade(
+        submission_id=1, score=Decimal("0"), graded_by_id=42, ai_feedback="", feedback="redo"
+    )
+    d2 = grade_to_dict(human_zero)
+    assert d2["score"] == "0.00"  # a teacher's real 0 stands
+    assert d2["graded"] is True
+
+
 def _set_knob(**kwargs) -> None:
     from django.core.cache import cache
 

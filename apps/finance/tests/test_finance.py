@@ -552,6 +552,42 @@ def test_refund_exceeds_single_payment_contribution_rejected(tenant_a):
         assert ok.amount_uzs == Decimal("50000.00")
 
 
+def test_refund_reversal_is_scoped_to_the_named_invoice(tenant_a):
+    """R5/CONF1 (money): one payment split across invoices A+B; a refund attributed to
+    A must release ONLY A's allocation, leaving B's allocation (and PAID status) intact.
+    The reversal was payment-scoped (newest-first across all invoices), so a refund of A
+    silently reopened B."""
+    from datetime import date
+
+    from apps.payments.models import Payment
+
+    with schema_context(tenant_a.schema_name):
+        student = StudentProfileFactory()
+        inv_a = InvoiceFactory(student=student, total_uzs=Decimal("100000.00"), due_date=date(2026, 1, 1))
+        inv_b = InvoiceFactory(student=student, total_uzs=Decimal("60000.00"), due_date=date(2026, 2, 1))
+        pay = Payment.objects.create(
+            provider="cash", amount_uzs=Decimal("160000.00"), status="completed", idempotency_key="r5c1"
+        )
+        services.allocate_payment(
+            payment_id=pay.pk, invoice_ids=[inv_a.pk, inv_b.pk], amount_uzs=Decimal("160000.00")
+        )
+        inv_a.refresh_from_db()
+        inv_b.refresh_from_db()
+        assert inv_a.status == Invoice.Status.PAID
+        assert inv_b.status == Invoice.Status.PAID
+
+        # Refund A's full 100000 via the payment; only A must reopen.
+        refund = services.request_refund(invoice=inv_a, amount_uzs=Decimal("100000.00"), payment_id=pay.pk)
+        services.register_refund_completion(refund.pk, payment_id=pay.pk)
+
+        inv_a.refresh_from_db()
+        inv_b.refresh_from_db()
+        assert inv_a.status != Invoice.Status.PAID  # A reopened (its allocation released)
+        assert inv_b.status == Invoice.Status.PAID  # B UNTOUCHED (not silently reopened)
+        assert PaymentAllocation.objects.filter(payment_id=pay.pk, invoice=inv_b).exists()
+        assert not PaymentAllocation.objects.filter(payment_id=pay.pk, invoice=inv_a).exists()
+
+
 def test_register_refund_completion_reverses_allocation_and_status(tenant_a):
     """BLOCKER fix: completing a refund must delete the PaymentAllocation rows and
     flip the invoice off PAID, restoring the outstanding balance."""
