@@ -588,6 +588,42 @@ def test_refund_reversal_is_scoped_to_the_named_invoice(tenant_a):
         assert not PaymentAllocation.objects.filter(payment_id=pay.pk, invoice=inv_a).exists()
 
 
+def test_refund_ceiling_is_payment_intersect_invoice_not_payment_wide(tenant_a):
+    """R6-01 (money): the per-payment refund ceiling must equal what the invoice-scoped
+    reversal can actually release — the payment's allocation TO THIS invoice. A
+    payment-wide ceiling passed a refund larger than the payment's share of the invoice,
+    but the reversal released only that share => money out with no restored receivable."""
+    from datetime import date
+
+    from apps.payments.models import Payment
+
+    with schema_context(tenant_a.schema_name):
+        student = StudentProfileFactory()
+        inv_a = InvoiceFactory(student=student, total_uzs=Decimal("150000.00"), due_date=date(2026, 1, 1))
+        inv_b = InvoiceFactory(student=student, total_uzs=Decimal("60000.00"), due_date=date(2026, 2, 1))
+        p = Payment.objects.create(
+            provider="cash", amount_uzs=Decimal("160000.00"), status="completed", idempotency_key="r6p"
+        )
+        q = Payment.objects.create(
+            provider="cash", amount_uzs=Decimal("50000.00"), status="completed", idempotency_key="r6q"
+        )
+        # Manual split: P 100000 -> A, 60000 -> B; Q 50000 -> A. Invoice A is PAID (150000).
+        services.allocate_payment_lines(
+            payment_id=p.pk,
+            lines=[{"invoice": inv_a.pk, "amount": "100000.00"}, {"invoice": inv_b.pk, "amount": "60000.00"}],
+        )
+        services.allocate_payment_lines(payment_id=q.pk, lines=[{"invoice": inv_a.pk, "amount": "50000.00"}])
+        # A refund citing P on A for 150000 must be REJECTED — P only contributed 100000
+        # to A, and the invoice-scoped reversal could release only that 100000.
+        with pytest.raises(ValidationException) as exc:
+            services.request_refund(invoice=inv_a, amount_uzs=Decimal("150000.00"), payment_id=p.pk)
+        assert exc.value.code == "refund_exceeds_payment"
+        # A refund up to P's contribution TO A (100000) is allowed and fully reverses.
+        refund = services.request_refund(invoice=inv_a, amount_uzs=Decimal("100000.00"), payment_id=p.pk)
+        services.register_refund_completion(refund.pk, payment_id=p.pk)
+        assert not PaymentAllocation.objects.filter(payment_id=p.pk, invoice=inv_a).exists()
+
+
 def test_register_refund_completion_reverses_allocation_and_status(tenant_a):
     """BLOCKER fix: completing a refund must delete the PaymentAllocation rows and
     flip the invoice off PAID, restoring the outstanding balance."""

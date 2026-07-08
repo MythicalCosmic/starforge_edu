@@ -573,6 +573,19 @@ def _apply_absence_deduction_effect(req: ApprovalRequest, actor) -> None:
             _("The cited attendance record is no longer an absence."),
             code="absence_deduction_attendance_invalid",
         )
+    # Re-assert the excused-only policy too (mirrors create-time): if the excuse was
+    # revoked (EXCUSED -> ABSENT) between request and approval, an excused-only center
+    # must not credit the now-unexcused absence.
+    from apps.org.selectors import get_center_settings
+
+    if (
+        get_center_settings().absence_deduction_excused_only
+        and record.status != AttendanceRecord.Status.EXCUSED
+    ):
+        raise UnprocessableEntity(
+            _("This center only deducts for excused (reasoned) absences."),
+            code="absence_deduction_requires_excuse",
+        )
     if (
         ApprovalRequest.objects.filter(
             kind=KIND_ABSENCE_DEDUCTION,

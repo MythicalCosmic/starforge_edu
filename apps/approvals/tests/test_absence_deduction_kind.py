@@ -194,6 +194,26 @@ def test_correcting_the_absence_retires_the_unclaimed_credit(tenant_a, as_role):
         assert clear_absence_deduction(attendance_id=aid) is False
 
 
+def test_approve_re_enforces_excused_only_after_excuse_revoked(tenant_a, as_role):
+    """R6-02: an excused-only center creates a deduction for an EXCUSED record; if the
+    excuse is revoked (EXCUSED->ABSENT) before approval, approving must be rejected — the
+    approve-time re-check enforces the excused-only policy, not just absence-ness."""
+    _set_policy(tenant_a, enabled=True, excused_only=True)
+    teacher, _ = as_role(Role.TEACHER)
+    director, _ = as_role(Role.DIRECTOR)
+    sid = _student_id(tenant_a)
+    aid = _absence(tenant_a, student_id=sid, status=AttendanceRecord.Status.EXCUSED)
+    rid = _request(teacher, student_id=sid, attendance_id=aid).json()["data"]["id"]
+
+    # Excuse revoked: EXCUSED -> ABSENT (an unexcused absence under an excused-only policy).
+    with schema_context(tenant_a.schema_name):
+        AttendanceRecord.objects.filter(pk=aid).update(status=AttendanceRecord.Status.ABSENT)
+
+    resp = director.post(f"{REQ}{rid}/approve/", {}, format="json")
+    assert resp.status_code == 422, resp.content
+    assert resp.json()["code"] == "absence_deduction_requires_excuse"
+
+
 def test_credit_applies_to_one_invoice_then_retires(tenant_a, as_role):
     """The defining property of an absence deduction: it credits the ONE missed lesson
     exactly once. A single-use Discount reduces the next invoice and then retires, so it

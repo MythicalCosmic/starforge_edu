@@ -683,26 +683,31 @@ def request_refund(
         raise ValidationException(
             _("Refund exceeds the amount paid on this invoice."), code="refund_exceeds_paid"
         )
-    # Per-payment ceiling: when refunding a specific payment, it can never be
-    # refunded for more than IT contributed. The invoice-level net_paid check
-    # above is not enough — on a multi-payment invoice it would let one payment be
-    # refunded against the WHOLE invoice's paid total (over-credit), while
-    # reverse_allocations_for_payment can only release that payment's own rows.
+    # Per-(payment, THIS invoice) ceiling: when refunding a specific payment against
+    # this invoice, it can never be refunded for more than that payment contributed TO
+    # THIS INVOICE. This must be scoped to the invoice to match what register_refund_
+    # completion actually reverses — reverse_allocations_for_payment(payment_id,
+    # invoice_id) releases only the payment's allocation to THIS invoice. A payment-wide
+    # ceiling here would pass a refund larger than the payment's share of this invoice,
+    # yet the reversal can release only that share -> money out with no matching restored
+    # receivable (ledger shortfall). Filtering by invoice keeps the ceiling == releasable.
     if payment_id is not None:
         pay_allocated = (
-            PaymentAllocation.objects.filter(payment_id=payment_id).aggregate(s=Sum("amount_uzs"))["s"]
+            PaymentAllocation.objects.filter(payment_id=payment_id, invoice=invoice).aggregate(
+                s=Sum("amount_uzs")
+            )["s"]
             or _ZERO
         )
         pay_in_flight = (
-            Refund.objects.filter(payment_id=payment_id, state__in=in_flight_states).aggregate(
-                s=Sum("amount_uzs")
-            )["s"]
+            Refund.objects.filter(
+                payment_id=payment_id, invoice=invoice, state__in=in_flight_states
+            ).aggregate(s=Sum("amount_uzs"))["s"]
             or _ZERO
         )
         pay_refundable = (pay_allocated - pay_in_flight).quantize(_CENT)
         if amount > pay_refundable:
             raise ValidationException(
-                _("Refund exceeds the amount this payment contributed."),
+                _("Refund exceeds the amount this payment contributed to this invoice."),
                 code="refund_exceeds_payment",
             )
     return Refund.objects.create(
