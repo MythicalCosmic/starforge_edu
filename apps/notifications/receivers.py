@@ -99,14 +99,37 @@ def _push_cohort_attendance(*, lesson_id: int, payload: dict) -> None:
     services.push_cohort_attendance(cohort_id=cohort_id, payload=payload)
 
 
+# Above this many recipients, a fan-out is offloaded to chunked Celery tasks instead
+# of dispatched inline: a cohort-wide event (lesson reschedule/cancel, assignment
+# publish) for a large class would otherwise block the triggering HTTP request on
+# O(recipients) x ~3-4 queries each. Small fan-outs (a single student's guardians)
+# stay inline — low latency, no worker round-trip.
+_FANOUT_INLINE_MAX = 25
+_FANOUT_CHUNK = 100
+
+
 def _dispatch_many(*, user_ids, event_type: str, context: dict, dedupe_prefix: str | None = None) -> None:
-    seen: set[int] = set()
-    for uid in user_ids:
-        if uid is None or uid in seen:
-            continue
-        seen.add(uid)
-        dedupe_key = f"{dedupe_prefix}:{uid}" if dedupe_prefix else None
-        services.dispatch(event_type=event_type, recipient_id=uid, context=context, dedupe_key=dedupe_key)
+    unique = list(dict.fromkeys(uid for uid in user_ids if uid is not None))  # de-dupe, preserve order
+    if len(unique) <= _FANOUT_INLINE_MAX:
+        for uid in unique:
+            dedupe_key = f"{dedupe_prefix}:{uid}" if dedupe_prefix else None
+            services.dispatch(
+                event_type=event_type, recipient_id=uid, context=context, dedupe_key=dedupe_key
+            )
+        return
+    # Large fan-out -> chunked Celery (mirrors announce_cohort); same dedupe contract.
+    from celery_tasks.notification_tasks import dispatch_many_chunk
+    from core.utils import current_schema
+
+    schema = current_schema()
+    for i in range(0, len(unique), _FANOUT_CHUNK):
+        dispatch_many_chunk.delay(
+            user_ids=unique[i : i + _FANOUT_CHUNK],
+            event_type=event_type,
+            context=context,
+            dedupe_prefix=dedupe_prefix,
+            _schema_name=schema,
+        )
 
 
 # ---------------------------------------------------------------------------

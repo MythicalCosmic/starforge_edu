@@ -73,6 +73,31 @@ def test_in_app_group_send_is_schema_prefixed(tenant_a, monkeypatch, django_capt
 
 
 # --------------------------------------------------------------------------- #
+# Large cohort fan-out offloads to chunked Celery but still reaches everyone
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("n", [3, 30])
+def test_dispatch_many_reaches_all_recipients_inline_and_offloaded(tenant_a, monkeypatch, n):
+    """R2-11: a small fan-out dispatches inline; a large one (> _FANOUT_INLINE_MAX)
+    offloads to chunked Celery — but every recipient must still be dispatched exactly
+    once (eager Celery runs the chunk synchronously). Same delivered set either way."""
+    from apps.notifications import receivers
+
+    calls: list[int] = []
+    monkeypatch.setattr(
+        "apps.notifications.services.dispatch",
+        lambda *, event_type, recipient_id, context, dedupe_key=None: calls.append(recipient_id),
+    )
+    with schema_context(tenant_a.schema_name):
+        receivers._dispatch_many(
+            user_ids=list(range(1, n + 1)),
+            event_type="attendance.absent",
+            context={"lesson_id": 1},
+            dedupe_prefix="t",
+        )
+    assert sorted(calls) == list(range(1, n + 1))  # all reached, no drops/dupes
+
+
+# --------------------------------------------------------------------------- #
 # Repeat lesson reschedules must each notify (dedupe key includes the move)
 # --------------------------------------------------------------------------- #
 def test_lesson_reschedule_dedupe_key_varies_per_move(tenant_a, monkeypatch):

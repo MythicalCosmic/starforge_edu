@@ -367,3 +367,24 @@ def announce_cohort_chunk(
         if result is not None:
             sent += 1
     return sent
+
+
+@app.task(rate_limit="25/s")
+def dispatch_many_chunk(
+    *, user_ids: list[int], event_type: str, context: dict, dedupe_prefix: str | None = None
+) -> int:
+    """Dispatch one event to a chunk of recipients off the request thread (D3-C).
+
+    The offloaded form of receivers._dispatch_many for LARGE cohort fan-outs
+    (lesson reschedule/cancel, assignment publish): looping dispatch() inline in the
+    triggering HTTP request costs O(recipients) x ~3-4 queries each, saturating a DB
+    connection and timing out a bulk reschedule for a big cohort. Same dedupe contract
+    as the inline path (`{dedupe_prefix}:{uid}`)."""
+    from apps.notifications.services import dispatch
+
+    sent = 0
+    for uid in user_ids:
+        dedupe_key = f"{dedupe_prefix}:{uid}" if dedupe_prefix else None
+        if dispatch(event_type=event_type, recipient_id=uid, context=context, dedupe_key=dedupe_key) is not None:
+            sent += 1
+    return sent
