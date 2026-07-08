@@ -364,6 +364,50 @@ def test_subscription_patch_invalid_status(public_tenant, api_client, tenant_a):
     assert resp.status_code == 400
 
 
+def test_reactivating_lapsed_center_extends_period(public_tenant, tenant_a):
+    """R3/CONF6: reactivating a center whose period has lapsed must push
+    current_period_end into the future, else the nightly meter re-suspends it within a
+    day (activate would be a no-op)."""
+    from apps.billing.services import change_subscription
+
+    # A genuinely lapsed suspended center: period_end in the past.
+    _set_subscription(
+        tenant_a,
+        status=Subscription.Status.SUSPENDED,
+        period_end=timezone.now() - timedelta(days=5),
+    )
+    sub = change_subscription(center_id=tenant_a.pk, status="active")
+    assert sub.status == "active"
+    assert sub.current_period_end > timezone.now()  # period extended, not left stale
+
+
+def test_reactivating_active_center_does_not_shorten_future_period(public_tenant, tenant_a):
+    """The extension only kicks in for a LAPSED period — an already-active center with
+    a future period keeps it (no accidental reset)."""
+    from apps.billing.services import change_subscription
+
+    future = timezone.now() + timedelta(days=20)
+    _set_subscription(tenant_a, status=Subscription.Status.ACTIVE, period_end=future)
+    sub = change_subscription(center_id=tenant_a.pk, status="active")
+    assert abs((sub.current_period_end - future).total_seconds()) < 5  # unchanged
+
+
+def test_extend_trial_syncs_subscription_period(public_tenant, tenant_a):
+    """R3/CONF7: extending a center's trial must also push the subscription's
+    current_period_end, else the billing meter suspends (402) the tenant at the
+    ORIGINAL trial end despite the extension."""
+    from apps.tenancy.services import extend_trial
+
+    original_end = timezone.now() + timedelta(days=2)
+    _set_subscription(tenant_a, status=Subscription.Status.TRIALING, period_end=original_end)
+    tenant_a.trial_ends_at = original_end
+    tenant_a.save(update_fields=["trial_ends_at"])
+
+    extend_trial(tenant_a, days=30)
+    sub = Subscription.objects.get(center=tenant_a)
+    assert sub.current_period_end > original_end + timedelta(days=20)  # tracks the new trial end
+
+
 def test_usage_endpoint(public_tenant, api_client, tenant_a):
     _set_subscription(tenant_a, status=Subscription.Status.ACTIVE)
     from apps.billing.tests.factories import UsageSnapshotFactory

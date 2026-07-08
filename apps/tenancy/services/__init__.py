@@ -218,6 +218,11 @@ def extend_trial(center: Center, *, days: int, actor=None) -> Center:
     center.trial_ends_at = base + timedelta(days=days)
     center.on_trial = True
     center.save(update_fields=["trial_ends_at", "on_trial", "updated_at"])
+    # Keep the billing subscription's trial period in lock-step with the trial end,
+    # else the nightly meter suspends (402) the tenant at the ORIGINAL trial end even
+    # though the InactiveTenant 503 gate honours the extension — the two gates would
+    # disagree and the extension would be defeated. No-op if no/non-trialing sub.
+    _extend_subscription_trial(center, new_trial_ends_at=center.trial_ends_at)
     record_platform_event(
         actor=actor,
         center=center,
@@ -240,6 +245,17 @@ def _set_subscription_status(center: Center, *, status: str) -> None:
         change_subscription(center_id=center.pk, status=status)
     except NotFoundException:
         return  # no subscription row → nothing to flip (paywall passes through)
+
+
+def _extend_subscription_trial(center: Center, *, new_trial_ends_at) -> None:
+    """Sync the billing subscription's trial period to the center's new trial end.
+    Lazy import (billing is a sibling SHARED app); no-op if there is no subscription."""
+    from apps.billing.services import extend_trial_period
+
+    try:
+        extend_trial_period(center_id=center.pk, new_trial_ends_at=new_trial_ends_at)
+    except NotFoundException:
+        return
 
 
 # ---------------------------------------------------------------------------

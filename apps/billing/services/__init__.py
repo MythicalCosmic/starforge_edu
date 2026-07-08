@@ -393,6 +393,7 @@ def change_subscription(
                 _("Unknown plan code."), code="unknown_plan", fields={"plan": [plan_code]}
             )
         sub.plan = plan
+    fields = ["plan", "status", "updated_at"]
     if status is not None:
         if status not in (Subscription.Status.ACTIVE, Subscription.Status.SUSPENDED):
             raise ValidationException(
@@ -402,10 +403,38 @@ def change_subscription(
             )
         old = sub.status
         sub.status = status
+        # Reactivating a LAPSED center must also extend the billing period. A center
+        # reaches suspended precisely because current_period_end is in the past; if
+        # activate only flips the status, the nightly meter re-flips ACTIVE->PAST_DUE
+        # (now > current_period_end) on its next run and re-suspends it — making
+        # activate a no-op in production. Grant a fresh cycle, the same convention the
+        # mock-payment path uses (PLATFORM_EXTENSION_DAYS).
+        if status == Subscription.Status.ACTIVE and sub.current_period_end <= timezone.now():
+            sub.current_period_end = timezone.now() + timedelta(days=PLATFORM_EXTENSION_DAYS)
+            fields.append("current_period_end")
         if old != status:
             _audit_subscription_change(center=sub.center, old_status=old, new_status=status)
-    sub.save(update_fields=["plan", "status", "updated_at"])
+    sub.save(update_fields=fields)
     transaction.on_commit(partial(_invalidate_subscription_cache, sub.center.schema_name))
+    return sub
+
+
+@transaction.atomic
+def extend_trial_period(*, center_id: int, new_trial_ends_at) -> Subscription | None:
+    """Sync a TRIALING subscription's period to a newly-extended trial end.
+
+    create_trial_subscription sets current_period_end == Center.trial_ends_at, but a
+    later tenancy.extend_trial only moved trial_ends_at — leaving the subscription's
+    stale period_end, so the nightly meter suspended (402) the tenant at the ORIGINAL
+    trial end despite the extension. Re-establish the invariant. No-op if there is no
+    subscription or it is no longer trialing (a converted/suspended sub isn't a trial)."""
+    sub = Subscription.objects.filter(center_id=center_id).first()
+    if sub is None or sub.status != Subscription.Status.TRIALING:
+        return sub
+    if new_trial_ends_at and new_trial_ends_at > sub.current_period_end:
+        sub.current_period_end = new_trial_ends_at
+        sub.save(update_fields=["current_period_end", "updated_at"])
+        transaction.on_commit(partial(_invalidate_subscription_cache, sub.center.schema_name))
     return sub
 
 
