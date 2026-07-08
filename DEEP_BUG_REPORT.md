@@ -360,9 +360,33 @@ The owner handed back the two flagged task prompts (R2-04, R4/PLAUS1) as a go-ah
 
 ---
 
+## Round 6 — re-review of latest fixes + final money/webhook/authz/tenancy/endpoint sweep (6 lenses)
+
+8 raw → **4 CONFIRMED, 3 PLAUSIBLE, 1 refuted**. This round re-reviewed batches 15–20 (not covered by round 5's re-review) and **caught a HIGH money regression I introduced in batch Q**, plus the cash-idempotency tuning that had ping-ponged across rounds 4→5.
+
+### R6-01 · [HIGH][money] Refund per-payment ceiling was payment-wide but the reversal (batch Q) is invoice-scoped → a refund > the payment's share of the named invoice under-released → cash out with no restored receivable ✅ FIXED (batch S, `after 1530f21`)
+- **Where:** [apps/finance/services/__init__.py:691](apps/finance/services/__init__.py#L691). The per-payment ceiling (allocated + in-flight) is now scoped to `(payment, invoice)`, matching exactly what `reverse_allocations_for_payment(payment_id, invoice_id)` releases. +test. (A regression from my own R5-01 fix — the round-5 re-review had approved R5-01; round 6 caught the ceiling mismatch it left.)
+
+### R6-02 · [MEDIUM][money] Absence-deduction approve-time re-check ignored the excused-only policy → an EXCUSED→ABSENT excuse-revocation before approval let an excused-only center credit an unexcused absence ✅ FIXED (batch S)
+- **Where:** [apps/approvals/services/__init__.py](apps/approvals/services/__init__.py) `_apply_absence_deduction_effect`. Approve now re-enforces `absence_deduction_excused_only` (mirrors create-time). +test. (Gap in my batch-P R5-P1 fix.)
+
+### Cash idempotency — resolved with a time window (ended the R4→R5→R6 flip-flop) ✅ FIXED (batch T)
+- The three rounds each caught the previous heuristic: unique key → double-click double-credit (R5); amount-only key → silent loss of equal-amount installments (R6/PLAUS1+PLAUS2). A headerless cash POST now keys on `(invoice, cashier, amount, 60s bucket)` — a same-second resubmit coalesces, genuine later repeats record. The precise dedupe remains a **client `Idempotency-Key`** (the correct contract — a frontend-coordination note, not silently imposed).
+
+### R6-04 · [LOW][contract] Payme `params.id` > 128 chars → `DataError` on the audit pre-record → HTTP 400, breaking the always-200 JSON-RPC contract ✅ FIXED (batch T)
+- **Where:** [apps/payments/webhook_views.py:157](apps/payments/webhook_views.py#L157). Skip the pre-record for an oversized id; `client.handle` returns a proper JSON-RPC error at 200.
+
+### R6/PLAUS3 · [LOW][injection] Audit CSV export wrote attacker User-Agent/actor_repr verbatim → spreadsheet formula injection (== prior #97 class) ✅ FIXED (batch T)
+- **Where:** [apps/audit/views/v1/audit_views.py:133](apps/audit/views/v1/audit_views.py#L133). Added `_safe_cell` (apostrophe-prefix leading `= + - @ \t \r`), mirroring `reports.generators.safe_cell`. +test.
+
+### R6-03 · [MEDIUM][DoS] Every inbound webhook inserts a `WebhookEvent` row before the signature gate (attacker-controlled `event_id`), and batch-M (R4-02) removed the rate limit → unauthenticated unbounded storage flood 🚩 FLAGGED — ops decision (`task_48799d5e`)
+- **Where:** [apps/payments/webhook_views.py](apps/payments/webhook_views.py) + [core/middleware.py](core/middleware.py) webhook exemption. In direct tension with the R4-02 exemption (which fixed legit-provider throttling). Fully fixing it needs a rate-limit value / event retention / provider IP allowlist decision that could re-break the money path if guessed — flagged rather than risked.
+
+---
+
 ## Summary of this session
 
-**5 independent hunt rounds** (14 + 16 + 12 + 9 + 6 lens/area agents, each finding verified by 2 adversarial refuters), all disjoint from the prior 346-finding audit; round 5 also **adversarially re-reviewed all of this session's own fixes** and caught 3 incomplete edges (now closed). **~55 new findings** surfaced. **19 gated fix batches** committed to `day1-build` (unpushed), each green on the affected apps + ruff + mypy; **7 full-suite checkpoints** all `0 failed` (1548 → 1551 → 1560 → 1564 → 1570 → 1572 → 1574 → final). Highlights fixed: HIGH — 2 Click/Uzum payment-loss (checkout/amount), reward self-dealing, webhook-retry payment-loss, reschedule-notify data-loss, cross-tenant file exfiltration, refund cross-invoice ledger corruption, rule bulk-reschedule cross-branch write. MEDIUM/LOW — cash double-payment loss, webhook throttling, report crash-recovery, statement DoS, pagination row-drop, stacked-discount/invoice integrity, IDOR scoping ×4, N+1/OOM, async fan-out, AI-placeholder fake grade, nightly-metering localdate, race/lock/idempotency defects.
+**6 independent hunt rounds** (14 + 16 + 12 + 9 + 6 + 6 lens/area agents, each finding verified by 2 adversarial refuters), all disjoint from the prior 346-finding audit; rounds 5 **and 6 adversarially re-reviewed this session's own fixes** and caught incomplete edges + one HIGH regression (all closed) — the re-review loop is what keeps the fixes honest. **~60 new findings** surfaced. **21 gated fix batches** committed to `day1-build` (unpushed), each green on the affected apps + ruff + mypy; **8 full-suite checkpoints** all `0 failed` (1548 → … → 1579). Highlights fixed: HIGH — 2 Click/Uzum payment-loss (checkout/amount), reward self-dealing, webhook-retry payment-loss, reschedule-notify data-loss, cross-tenant file exfiltration, refund cross-invoice ledger corruption, rule bulk-reschedule cross-branch write. MEDIUM/LOW — cash double-payment loss, webhook throttling, report crash-recovery, statement DoS, pagination row-drop, stacked-discount/invoice integrity, IDOR scoping ×4, N+1/OOM, async fan-out, AI-placeholder fake grade, nightly-metering localdate, race/lock/idempotency defects.
 
 **Owner-handed & implemented this session:** R2-04 (multi-cohort — implemented, see above; owner also has a parallel session on `task_a0fba4be`), R4/PLAUS1 (owning-read-permission gate landed; object-level redesign still tracked in `task_16ac6823`). **Still flagged for the owner (not silently guessed):** R3-P3 (AI idempotency — shared-infra/spend policy), R4-07 (duplicate nightly metering — ownership decision), R5-04 (datetime `+00:00` vs `Z` — canonical-format contract decision + broad sweep). **Deferred (need a coordinated change):** R2-13 (localdate sweep), R2-14/R2-15/R3-08/R3-P2/R1-10 (DB migrations — uniqueness constraints carry a deploy hazard if existing prod data already violates them, so they need an owner-aware data-cleanup step; a pure additive index like R2-15 is safe), R4-06 (iCal-token access-log redaction — deploy config), R3-07/R3-09/R3-P1 (LOW, subtle). **Backlog correction:** two `agents/FEATURE_BACKLOG.md` "TODO"s are already implemented — F5-5 (multi-branch scope works via the membership set + unscoped DIRECTOR) and A-1 notify-on-disburse (`approval.disbursed` exists).
 
