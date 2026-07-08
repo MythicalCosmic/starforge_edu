@@ -294,9 +294,39 @@ Making `enroll` end-date prior memberships (the finding's fix) would **break the
 
 ---
 
+## Round 4 — celery/config/core/money-resweep hunt (9 lenses)
+
+8 raw → **7 CONFIRMED, 1 PLAUSIBLE, 0 refuted**. New findings:
+
+### R4-01 · [MEDIUM][money-loss] Cash-payment endpoint passed no idempotency key → a second legitimate cash payment on the same invoice in one shift was silently swallowed ✅ FIXED (batch M, `25140d4`)
+- **Where:** [apps/payments/views/v1/payment_views.py:226](apps/payments/views/v1/payment_views.py#L226) → `create_cash_payment` derived key `cash:{schema}:{invoice}:{shift}`. Now honours an `Idempotency-Key` header, else a unique key per call. +test.
+
+### R4-02 · [MEDIUM][money-path] Blanket anon rate limiter throttled payment webhooks (all a provider's callbacks share one IP-keyed 60/min bucket) → 429 broke the always-200 contract ✅ FIXED (batch M, `25140d4`)
+- **Where:** [core/middleware.py:177](core/middleware.py#L177). Webhook paths (`/api/v1/webhooks/`) now exempt (signature-authed + provider-retried). +test.
+
+### R4-03 · [MEDIUM][reliability] `build_report` acks_late but `build_report_run` early-returned on non-QUEUED → a hard worker crash mid-render stranded the run in RUNNING forever ✅ FIXED (batch N, `36840f4`)
+- **Where:** [apps/reports/services.py:104](apps/reports/services.py#L104). A RUNNING run is now re-driven on redelivery (idempotent render); only DONE/FAILED short-circuit.
+
+### R4-04 · [MEDIUM][cost/DoS] Statement-PDF endpoint had no rate limit or dedupe (unbounded WeasyPrint+S3 per POST) ✅ FIXED (batch N, `36840f4`)
+- **Where:** [apps/finance/views/v1/finance_views.py:688](apps/finance/views/v1/finance_views.py#L688). Added a per-(schema,user) 10/min `check_rate`, mirroring the sibling expensive enqueues.
+
+### R4-05 · [MEDIUM][correctness] Nightly `meter_center`/`aggregate_center` stamped `UsageSnapshot` with the UTC date while the read side uses `localdate()` → off-by-one dashboard/DAU in the 00:00–05:00 Tashkent window ✅ FIXED (batch N, `36840f4`)
+- **Where:** [celery_tasks/billing_tasks.py:68](celery_tasks/billing_tasks.py#L68), [celery_tasks/report_tasks.py:103](celery_tasks/report_tasks.py#L103). Both use `timezone.localdate()` now (consistent with readers + the AI-overage charge). NOTE: isolated fix (read side already localdate) — distinct from the deferred R2-13 which needs a coordinated sweep.
+
+### R4-06 · [LOW][secret-exposure] 7-day signed iCal token is a URL-path credential, logged plaintext by gunicorn's access log 🚩 DEFERRED (deploy-config mitigation)
+- **Where:** [apps/schedule/urls.py:26](apps/schedule/urls.py#L26) + `docker/entrypoint.sh`. Fix = redact the access-log path / shorter-lived opaque token — a deploy-config change, deferred.
+
+### R4-07 · [MEDIUM][scale/race] Two daily beat tasks both meter every tenant and upsert the same `UsageSnapshot(center,date)` → duplicated full cross-tenant scan (2N) 🚩 FLAGGED — ownership decision
+- **Where:** `config/settings/base.py` `run-nightly-metering` + `nightly-platform-aggregation`. Post-R4-05 the two writes agree (same value, same local date) so it's not corruption, but it's 2× the nightly metering load. Deduping requires deciding which task owns the snapshot (meter_center also does the AI-overage charge). Flagged, not silently changed.
+
+### R4-P1 · [MEDIUM][idor] Print-job key guard enforces the tenant prefix but not object ownership → a branch `printing:write` holder + agent token can presign-download any in-tenant transcript/receipt/statement/report 🚩 FLAGGED — needs redesign (`task_16ac6823`)
+- **Where:** [apps/printing/views/v1/printing_views.py:206](apps/printing/views/v1/printing_views.py#L206). The R3-01 fix closed the cross-tenant HIGH; this intra-tenant cross-permission residual needs the HTTP create path to **derive** the S3 key from an authorized `source_id` rather than trust a client-supplied key (no dedicated printing prefix exists to restrict to). Flagged for the owner.
+
+---
+
 ## Summary of this session
 
-**3 independent hunt rounds** (14 + 16 + 12 lens/area agents, each finding verified by 2 adversarial refuters), all disjoint from the prior 346-finding audit. **43 new findings** surfaced (36 confirmed + 7 plausible). **13 gated fix batches** committed to `day1-build` (unpushed), each green on the affected apps + ruff + mypy; **5 full-suite checkpoints** all `0 failed` (1548 → 1551 → 1560 → 1564 → final). Highlights fixed: 2 HIGH payment-loss bugs (Click/Uzum), 1 HIGH reward self-dealing, 1 HIGH webhook-retry payment-loss, 1 HIGH reschedule-notify data-loss, 1 HIGH cross-tenant file exfiltration, plus pagination row-drop, discount/invoice-integrity, IDOR scoping, N+1/OOM scale, and race/lock defects.
+**4 independent hunt rounds** (14 + 16 + 12 + 9 lens/area agents, each finding verified by 2 adversarial refuters), all disjoint from the prior 346-finding audit. **~50 new findings** surfaced. **15 gated fix batches** committed to `day1-build` (unpushed), each green on the affected apps + ruff + mypy; **6 full-suite checkpoints** all `0 failed` (1548 → 1551 → 1560 → 1564 → 1570 → final). Highlights fixed: 2 HIGH payment-loss bugs (Click/Uzum checkout/amount), 1 HIGH reward self-dealing, 1 HIGH webhook-retry payment-loss, 1 HIGH reschedule-notify data-loss, 1 HIGH cross-tenant file exfiltration, cash double-payment loss, webhook throttling, report crash-recovery, plus pagination row-drop, discount/invoice-integrity, IDOR scoping, N+1/OOM/statement-DoS scale, and race/lock/idempotency defects.
 
 **Flagged for the owner (not silently guessed):** R2-04 (multi-cohort enrollment — product decision, `task_a0fba4be`), R3-P3 (AI idempotency — shared-infra/spend policy). **Deferred (need a coordinated change):** R2-13 (localdate sweep), R2-14/R2-15/R3-08/R3-P2/R1-10 (DB migrations), R3-07/R3-09/R3-P1 (LOW, subtle). **Backlog correction:** two `agents/FEATURE_BACKLOG.md` "TODO"s are already implemented — F5-5 (multi-branch scope works via the membership set + unscoped DIRECTOR) and A-1 notify-on-disburse (`approval.disbursed` exists).
 
