@@ -472,7 +472,7 @@ def test_staff_create_job_director(as_role, tenant_a):
         {
             "source": "report",
             "source_id": 5,
-            "payload_s3_key": "demo/r/5.pdf",
+            "payload_s3_key": f"{tenant_a.schema_name}/r/5.pdf",
             "branch": branch.pk,
             "pages": 2,
             "copies": 1,
@@ -481,6 +481,28 @@ def test_staff_create_job_director(as_role, tenant_a):
     )
     assert resp.status_code == 201
     assert resp.json()["data"]["status"] == "queued"
+
+
+def test_create_job_rejects_foreign_tenant_payload_key(as_role, tenant_a):
+    """R3/CONF2 (HIGH): the payload key is echoed into a presigned S3 GET at claim
+    time; a key outside the caller's tenant prefix must be rejected so a staffer can't
+    mint a download URL for another tenant's (or a cross-permission) object."""
+    client, _user = as_role(Role.DIRECTOR)
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+    resp = client.post(
+        JOBS_URL,
+        {
+            "source": "report",
+            "source_id": 5,
+            "payload_s3_key": "tenant_b/finance/payroll.pdf",  # a foreign-tenant key
+            "branch": branch.pk,
+            "pages": 2,
+        },
+        format="json",
+    )
+    assert resp.status_code == 400, resp.content
+    assert resp.json()["code"] == "validation_error"
 
 
 def test_staff_create_job_teacher_allowed(as_role, tenant_a, user_in, as_user):
@@ -494,7 +516,7 @@ def test_staff_create_job_teacher_allowed(as_role, tenant_a, user_in, as_user):
         {
             "source": "assignment",
             "source_id": 6,
-            "payload_s3_key": "demo/a/6.pdf",
+            "payload_s3_key": f"{tenant_a.schema_name}/a/6.pdf",
             "branch": branch_id,
             "pages": 1,
         },

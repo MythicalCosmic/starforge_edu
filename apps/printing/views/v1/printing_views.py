@@ -204,6 +204,8 @@ def agent_job_status_view(request: HttpRequest, job_id: int) -> HttpResponseBase
 
 # --- helpers ---------------------------------------------------------------
 def _create_job(request: HttpRequest) -> HttpResponse:
+    from core.utils import current_schema
+
     body = read_json(request)
     payload_key = str_field(body, "payload_s3_key", max_length=512).strip()
     if not payload_key:
@@ -211,6 +213,20 @@ def _create_job(request: HttpRequest) -> HttpResponse:
             "payload_s3_key is required.",
             code="validation_error",
             fields={"payload_s3_key": ["This field is required."]},
+        )
+    # Tenant isolation: this key is echoed into a presigned S3 GET at agent-claim time
+    # (agent_claim_view -> presign_download), against the ONE shared bucket keyed only by
+    # a "{schema}/..." prefix convention. An unvalidated client key lets a branch-scoped
+    # staffer mint a working presigned download URL for ANY object in the bucket —
+    # cross-tenant AND cross-permission file exfiltration. Require the caller's own tenant
+    # prefix, mirroring the assignments attachment-key guard. (Internal transcript/receipt/
+    # report hand-offs call enqueue_print at the service layer, bypassing this HTTP path.)
+    prefix = f"{current_schema()}/"
+    if not payload_key.startswith(prefix):
+        raise ValidationException(
+            "payload_s3_key is not valid for this tenant.",
+            code="validation_error",
+            fields={"payload_s3_key": [f"Key must start with '{prefix}'."]},
         )
     branch_id = _required_pos_int(body, "branch")
     _assert_branch_write(request, branch_id)
