@@ -72,6 +72,24 @@ def test_request_then_assign_reassigns_the_lesson(tenant_a, user_in, as_user):
         assert s["lesson"].teacher_id == s["b_prof"].id  # the cover actually took effect
 
 
+def test_assign_to_an_offboarded_teacher_is_rejected(tenant_a, user_in, as_user):
+    """R3/CONF1: assigning a cover to an offboarded teacher (login disabled) would
+    reassign a live lesson to someone who can't act on it. The assign path must reject
+    an inactive teacher, matching the pool path (which only surfaces active staff)."""
+    s = _setup(tenant_a, user_in, as_user)
+    cid = s["a_client"].post(COVER, {"lesson": s["lesson"].id, "reason": "sick"}, format="json").json()[
+        "data"
+    ]["id"]
+    # Offboard teacher B: disable their login (the TeacherProfile row survives).
+    with schema_context(tenant_a.schema_name):
+        b_user = s["b_prof"].user
+        b_user.is_active = False
+        b_user.save(update_fields=["is_active"])
+    resp = s["manager"].post(f"{COVER}{cid}/assign/", {"cover_teacher": s["b_prof"].id}, format="json")
+    assert resp.status_code == 400, resp.content
+    assert resp.json()["code"] == "validation_error"
+
+
 def test_pool_then_claim_reassigns(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     cid = s["a_client"].post(COVER, {"lesson": s["lesson"].id}, format="json").json()["data"]["id"]

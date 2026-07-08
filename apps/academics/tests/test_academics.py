@@ -494,6 +494,29 @@ def test_exam_results_write_path_teacher_cohort_scoped(tenant_a, user_in, as_use
     assert director_client.post(f"{base}/results/", [], format="json").status_code == 200
 
 
+def test_json_results_array_is_capped(tenant_a, user_in, as_user, monkeypatch):
+    """R3/PLAUS1: the JSON results array must be bounded like the CSV import (which
+    caps at MAX_IMPORT_ROWS) — an uncapped array means a per-row student lookup + a
+    per-row upsert inside one long transaction. Cap lowered so a tiny array trips it."""
+    from apps.academics import services as academics_services
+
+    monkeypatch.setattr(academics_services, "MAX_IMPORT_ROWS", 2)
+    director = user_in(tenant_a, roles=["director"])
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        exam: Any = ExamFactory(
+            subject=SubjectFactory(), cohort=CohortFactory(branch=branch), term=TermFactory(),
+            max_score=Decimal("100"),
+        )
+        students = [StudentProfileFactory(branch=branch).id for _ in range(3)]
+    rows = [{"student": sid, "score": "80"} for sid in students]  # 3 rows > cap of 2
+    resp = as_user(tenant_a, director).post(
+        f"/api/v1/academics/exams/{exam.id}/results/", rows, format="json"
+    )
+    assert resp.status_code == 400, resp.content
+    assert resp.json()["code"] == "validation_error"
+
+
 def test_exam_list_teacher_cohort_scoped(tenant_a, user_in, as_user):
     """List is scoped too: a teacher sees only exams of cohorts they teach."""
     teacher_user = user_in(tenant_a, roles=["teacher"])

@@ -92,12 +92,17 @@ class CoverService(ICoverService):
     def _resolve_teacher(teacher_id: int):
         from apps.teachers.models import TeacherProfile
 
-        teacher = TeacherProfile.objects.filter(pk=teacher_id).first()
-        if teacher is None:  # mirrors the old AssignCoverSerializer PK field -> 400
-            raise ValidationException(
+        teacher = TeacherProfile.objects.select_related("user").filter(pk=teacher_id).first()
+        # Liveness: an offboarded teacher's login is disabled (User.is_active=False)
+        # but the OneToOne TeacherProfile row survives. Assigning them a cover would
+        # reassign a live lesson to someone who can't log in / take attendance / be
+        # re-covered by the pool — the pool path already filters active staff only, so
+        # match that intent on the explicit-assign path. Treat inactive as not-found.
+        if teacher is None or not getattr(teacher.user, "is_active", False):
+            raise ValidationException(  # mirrors the old AssignCoverSerializer PK field -> 400
                 _("Invalid cover teacher."),
                 code="validation_error",
-                fields={"cover_teacher": ["Not found."]},
+                fields={"cover_teacher": ["Not an active teacher."]},
             )
         return teacher
 

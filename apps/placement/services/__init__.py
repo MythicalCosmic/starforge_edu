@@ -362,8 +362,13 @@ def assign_test(*, test: PlacementTest, student, assigned_by=None) -> PlacementA
 def submit_attempt(*, attempt: PlacementAttempt, answers: list[dict]) -> PlacementAttempt:
     """Record + auto-grade a lead's answers, set the level on their profile, and
     freeze the attempt. The row is locked so it can't be double-submitted."""
+    # of=("self",): lock ONLY the attempt row. A bare FOR UPDATE with select_related
+    # JOINs also locks the joined PlacementTest + StudentProfile rows on Postgres —
+    # PlacementTest is a SHARED parent (one approved test, many attempts), so every
+    # lead's concurrent submit would serialize on that one row (and 500 on a
+    # lock_timeout, unmapped by middleware). We only need to guard double-submit.
     attempt = (
-        PlacementAttempt.objects.select_for_update()
+        PlacementAttempt.objects.select_for_update(of=("self",))
         .select_related("test", "student")
         .get(pk=attempt.pk)
     )
@@ -723,7 +728,7 @@ def apply_writing_marks(*, attempt_id: int, output_text: str) -> int:
     answers' marks (a retry can't double-count). Returns the count of answers marked."""
     try:
         attempt = (
-            PlacementAttempt.objects.select_for_update()
+            PlacementAttempt.objects.select_for_update(of=("self",))
             .select_related("test", "student")
             .get(pk=attempt_id)
         )
@@ -773,7 +778,7 @@ def mark_writing_manually(*, attempt: PlacementAttempt, marks: list[dict]) -> Pl
     overwrites its previous mark; partial marking is allowed (unmarked writing stays
     uncounted). The row is locked so two markers can't race."""
     attempt = (
-        PlacementAttempt.objects.select_for_update()
+        PlacementAttempt.objects.select_for_update(of=("self",))
         .select_related("test", "student")
         .get(pk=attempt.pk)
     )

@@ -354,6 +354,14 @@ def _parse_result_rows(request: HttpRequest) -> list[dict]:
         raise _reject("rows", "Request body must be a JSON array.") from None
     if not isinstance(raw, list):
         raise _reject("rows", "Request body must be a JSON array.")
+    # Bound the batch (parity with the CSV import's MAX_IMPORT_ROWS): each row does a
+    # StudentProfile lookup here + per-row existing/upsert queries inside record_results'
+    # single transaction, so an uncapped array (a ~2.5MB body is ~80k rows) means ~240k
+    # queries in one long-held atomic — a DB/connection-pool hazard the CSV twin caps.
+    from apps.academics.services import MAX_IMPORT_ROWS
+
+    if len(raw) > MAX_IMPORT_ROWS:
+        raise _reject("rows", f"Too many rows (max {MAX_IMPORT_ROWS}).")
     rows: list[dict] = []
     for index, item in enumerate(raw):
         if not isinstance(item, dict):
