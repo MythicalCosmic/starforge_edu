@@ -101,9 +101,14 @@ def build_report_run(run_id: int) -> str | None:
     from infrastructure.storage import s3_client
 
     run = ReportRun.objects.select_related("report", "requested_by").get(pk=run_id)
-    if run.status != ReportRun.Status.QUEUED:
-        # Already running/done/failed — re-delivery no-op (idempotent).
+    if run.status in (ReportRun.Status.DONE, ReportRun.Status.FAILED):
+        # Terminal — a re-delivery is a no-op (idempotent).
         return run.s3_key or None
+    # QUEUED or RUNNING: RUNNING means a prior worker was hard-killed (OOM/SIGKILL)
+    # mid-render before its `except` could reset the run — build_report is acks_late,
+    # so the broker redelivers the task. Re-DRIVE it (render is idempotent: it
+    # overwrites the same S3 key), rather than early-returning and stranding the run
+    # in RUNNING forever with no file, no notification, no failure, no retry.
 
     run.status = ReportRun.Status.RUNNING
     run.started_at = timezone.now()

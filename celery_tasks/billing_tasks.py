@@ -65,7 +65,11 @@ def meter_center(*, center_id: int) -> None:
 
     from apps.billing.selectors import center_dau
 
-    today = timezone.now().date()
+    # Center-LOCAL calendar date. timezone.now().date() is the UTC date (USE_TZ=True);
+    # the read side (center_dau / usage_series) keys on timezone.localdate(), and the
+    # AI-overage charge below already uses localdate — so a UTC snapshot date is off by
+    # one in the 00:00-05:00 Tashkent window and diverges from every reader.
+    today = timezone.localdate()
     students_count = _students_count(center.schema_name)
     storage_bytes = _storage_bytes(center.schema_name)
     ai_tokens = _ai_tokens(center.schema_name)

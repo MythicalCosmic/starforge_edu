@@ -627,7 +627,7 @@ def test_aggregation_writes_both_centers_no_bleed(tenant_a, tenant_b, monkeypatc
 
     from apps.billing.models import UsageSnapshot
 
-    today = timezone.now().date()
+    today = timezone.localdate()  # aggregate_center now stamps the LOCAL date (R4/CONF1)
     snap_a = UsageSnapshot.objects.get(center=tenant_a, date=today)
     snap_b = UsageSnapshot.objects.get(center=tenant_b, date=today)
     assert snap_a.students_count == 2

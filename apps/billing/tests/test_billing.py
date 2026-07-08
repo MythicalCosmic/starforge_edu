@@ -212,7 +212,7 @@ def test_metering_snapshot_idempotent(tenant_a):
 
     meter_center(center_id=tenant_a.pk)
     meter_center(center_id=tenant_a.pk)
-    today = timezone.now().date()
+    today = timezone.localdate()  # meter_center now stamps the LOCAL date (R4/CONF1)
     assert UsageSnapshot.objects.filter(center=tenant_a, date=today).count() == 1
 
 
@@ -225,7 +225,7 @@ def test_metering_snapshot_records_student_count(tenant_a):
     from celery_tasks.billing_tasks import meter_center
 
     meter_center(center_id=tenant_a.pk)
-    snap = UsageSnapshot.objects.get(center=tenant_a, date=timezone.now().date())
+    snap = UsageSnapshot.objects.get(center=tenant_a, date=timezone.localdate())
     assert snap.students_count == 3
 
 

@@ -100,7 +100,9 @@ def aggregate_center(*, center_id: int) -> None:
     if center is None:
         return
 
-    today = timezone.now().date()
+    # Center-LOCAL date (usage_series / center_dau read by localdate; a UTC .date() is
+    # off by one in the 00:00-05:00 Tashkent window — see billing_tasks.meter_center).
+    today = timezone.localdate()
     students = _students_count(center.schema_name)
     dau = _dau(center.schema_name, today)
     storage_bytes = _storage_bytes(center.schema_name)

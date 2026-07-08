@@ -691,9 +691,16 @@ def statement_request_view(request: HttpRequest, student_id: int) -> HttpRespons
     if request.method != "POST":
         return _method_not_allowed()
     check_perm(request, "finance:read")
+    from core.ratelimit import check_rate
+    from core.utils import current_schema
+
+    # Per-request cap (mirrors the other expensive async enqueues — AI generation,
+    # bulk-import, announcements): each POST spawns an unbounded WeasyPrint render + a
+    # fresh S3 object with NO budget cap or dedupe, so an unthrottled finance:read
+    # holder could flood the shared Celery pool and grow storage without bound.
+    check_rate(scope="finance_statement", key=f"{current_schema()}:{request.user.pk}", limit=10, window=60)
     locale = _choice(read_json(request).get("locale", "en"), "locale", _LOCALES)
     from celery_tasks.finance_tasks import generate_statement_pdf
-    from core.utils import current_schema
 
     result = generate_statement_pdf.delay(int(student_id), locale=locale, _schema_name=current_schema())
     return success({"task_id": result.id}, status=202)
