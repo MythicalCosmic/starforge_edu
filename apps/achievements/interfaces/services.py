@@ -31,8 +31,11 @@ class IAchievementService(ABC):
 
     @abstractmethod
     def grant(
-        self, achievement: Achievement, data: GrantAchievementDTO, *, granted_by
+        self, achievement: Achievement, data: GrantAchievementDTO, *, granted_by, student=None
     ) -> AchievementGrant: ...
+
+    @abstractmethod
+    def resolve_student(self, student_id: int): ...
 
     @abstractmethod
     def wall_for(self, user) -> QuerySet[AchievementGrant]: ...

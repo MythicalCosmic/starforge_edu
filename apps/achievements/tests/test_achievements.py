@@ -111,6 +111,26 @@ def test_cross_branch_group_create_blocked(tenant_a, user_in, as_user):
     assert r.json()["code"] == "cross_branch"
 
 
+def test_cross_branch_global_grant_blocked(tenant_a, user_in, as_user, as_role):
+    """R2-07: a branch-scoped teacher must not grant a GLOBAL achievement to another
+    branch's student (cross-branch write + student-pk oracle). The recipient is
+    resolved unscoped, so the view must branch-check it like sales/cards/compliance."""
+    from apps.org.tests.factories import BranchFactory
+    from apps.students.tests.factories import StudentProfileFactory
+
+    director, _ = as_role(Role.DIRECTOR)
+    with schema_context(tenant_a.schema_name):
+        branch_a = BranchFactory.create()
+        branch_b = BranchFactory.create()
+        student_b = StudentProfileFactory.create(branch=branch_b)
+    # a director creates an ACTIVE global achievement (visible to all write-holders)
+    aid = director.post(ACH, {"name": "School Star", "scope": "global"}, format="json").json()["data"]["id"]
+    teacher_a = _teacher_in_branch(tenant_a, user_in, as_user, branch_a)
+    r = teacher_a.post(f"{ACH}{aid}/grant/", {"student": student_b.id}, format="json")
+    assert r.status_code == 403, r.content
+    assert r.json()["code"] == "branch_out_of_scope"
+
+
 def test_grant_guards(tenant_a, user_in, as_user, as_role):
     from apps.cohorts.tests.factories import CohortFactory
     from apps.org.tests.factories import BranchFactory

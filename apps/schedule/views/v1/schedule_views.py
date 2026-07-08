@@ -434,6 +434,31 @@ def _rule_write_data(request: HttpRequest, *, partial: bool) -> dict[str, Any]:
     return changes
 
 
+def _assert_rule_branch_scope(request: HttpRequest, changes: dict[str, Any]) -> None:
+    """A RecurrenceRule has no branch column of its own — its branch is implied by its
+    cohort/teacher/room FKs. A schedule:write holder may only author rules within their
+    OWN branch, and those FKs must all resolve to ONE branch. Without this a branch-A
+    writer could POST a rule naming branch-B's cohort/teacher/room (resolved by bare pk),
+    materializing lessons + downstream attendance/absence-deduction rows in a branch they
+    don't control, and use the endpoint as a cross-branch pk existence oracle. Mirrors the
+    TimeSlot assert_branch_id_in_scope guard in this same file."""
+    from apps.cohorts.models import Cohort
+    from apps.org.models import Room
+    from apps.teachers.models import TeacherProfile
+
+    branches: set[int | None] = set()
+    for field, model in (("cohort", Cohort), ("teacher", TeacherProfile), ("room", Room)):
+        if field not in changes or changes[field] is None:
+            continue
+        obj = model.objects.filter(pk=changes[field]).first()
+        if obj is None:
+            raise _reject(field, f"{field} does not exist.")
+        assert_branch_id_in_scope(request, obj.branch_id)
+        branches.add(obj.branch_id)
+    if len(branches) > 1:
+        raise _reject("cohort", "cohort, teacher and room must belong to the same branch.")
+
+
 @csrf_exempt
 @require_auth
 def rules_collection_view(request: HttpRequest) -> HttpResponse:
@@ -450,7 +475,9 @@ def rules_collection_view(request: HttpRequest) -> HttpResponse:
         return paginated([rule_to_dict(r) for r in items], total=total, page=page, page_size=size)
     if request.method == "POST":
         check_perm(request, "schedule:write")
-        rule = _rule_service().create(data=_rule_write_data(request, partial=False), created_by=request.user)
+        data = _rule_write_data(request, partial=False)
+        _assert_rule_branch_scope(request, data)
+        rule = _rule_service().create(data=data, created_by=request.user)
         return created(rule_to_dict(rule))
     return _method_not_allowed()
 
@@ -465,8 +492,13 @@ def rule_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
         raise NotFoundException(code="not_found")
     if read:
         return success(rule_to_dict(rule))
+    # A branch-scoped writer may only mutate a rule in their own branch (the rule's
+    # branch is its cohort's branch) — else a bare-pk detail fetch is a cross-branch
+    # write/delete + existence oracle.
+    assert_branch_id_in_scope(request, rule.cohort.branch_id)
     if request.method in ("PUT", "PATCH"):
         changes = _rule_write_data(request, partial=(request.method == "PATCH"))
+        _assert_rule_branch_scope(request, changes)
         return success(rule_to_dict(_rule_service().update(rule, changes=changes)))
     if request.method == "DELETE":
         _rule_service().delete(rule)

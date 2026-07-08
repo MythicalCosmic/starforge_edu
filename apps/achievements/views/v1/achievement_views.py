@@ -21,7 +21,7 @@ from apps.achievements.models import Achievement
 from apps.achievements.presenters import achievement_grant_to_dict, achievement_to_dict
 from core.api_auth import check_perm, require_auth
 from core.container import container
-from core.exceptions import NotFoundException, ValidationException
+from core.exceptions import NotFoundException, PermissionException, ValidationException
 from core.http import int_field, read_json, str_field
 from core.listing import apply_filters, paginate
 from core.permissions import (
@@ -32,6 +32,7 @@ from core.permissions import (
     has_permission_code,
 )
 from core.responses import created, error, paginated, success
+from core.scoping import branch_ids, is_unscoped
 
 _RESOURCE = "achievements"
 
@@ -124,11 +125,22 @@ def achievement_grant_view(request: HttpRequest, pk: int) -> HttpResponse:
     check_perm(request, f"{_RESOURCE}:write")
     achievement = _get_visible(request, pk)
     body = read_json(request)
-    dto = GrantAchievementDTO(
-        student_id=int_field(body, "student", required=True),  # type: ignore[arg-type]
-        note=str_field(body, "note", max_length=255),
-    )
-    grant = _service().grant(achievement, dto, granted_by=request.user)
+    student = _service().resolve_student(int_field(body, "student", required=True))  # type: ignore[arg-type]
+    if student is None:
+        raise ValidationException(
+            "Invalid student.", code="validation_error", fields={"student": ["Not found."]}
+        )
+    # Object-level scope: the recipient must be in the caller's branch (unless the
+    # caller is unscoped — director/superuser). Without this a branch-scoped teacher
+    # could grant a GLOBAL achievement to another branch's student (cross-branch write)
+    # and use the endpoint as a student-pk existence oracle. Mirrors the sales / cards /
+    # compliance student-write paths.
+    if not is_unscoped(request) and student.branch_id not in branch_ids(request):
+        raise PermissionException(
+            "You can only grant to a student in your own branch.", code="branch_out_of_scope"
+        )
+    dto = GrantAchievementDTO(student_id=student.pk, note=str_field(body, "note", max_length=255))
+    grant = _service().grant(achievement, dto, granted_by=request.user, student=student)
     return created(achievement_grant_to_dict(grant))
 
 

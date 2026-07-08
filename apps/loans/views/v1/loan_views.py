@@ -25,6 +25,7 @@ from core.http import decimal_field, int_field, read_json, str_field
 from core.listing import apply_filters, paginate
 from core.permissions import Role, get_role_memberships, get_user_roles, has_permission_code
 from core.responses import created, error, paginated, success
+from core.scoping import assert_branch_id_in_scope
 
 _RESOURCE = "loan"
 _MIN_AMOUNT = Decimal("0.01")
@@ -160,6 +161,11 @@ def _resolve_branch(request: HttpRequest, body: dict[str, Any]):
             code="validation_error",
             fields={"branch": ["No such active branch."]},
         )
+    # A loans:write holder may only attribute a loan (and its OUT disbursement +
+    # repayments) to their OWN branch — every read path here is branch-scoped, so
+    # accepting an arbitrary branch on the write path mis-attributes the money and
+    # leaks a branch-id existence oracle. No-op for an unscoped caller (director).
+    assert_branch_id_in_scope(request, branch.id)
     return branch
 
 

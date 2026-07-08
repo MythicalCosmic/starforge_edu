@@ -70,15 +70,27 @@ class AchievementService(IAchievementService):
 
         return decide_achievement(achievement_id=achievement_id, approve=approve, actor=actor)
 
-    def grant(self, achievement: Achievement, data: GrantAchievementDTO, *, granted_by) -> AchievementGrant:
+    def grant(
+        self, achievement: Achievement, data: GrantAchievementDTO, *, granted_by, student=None
+    ) -> AchievementGrant:
         from apps.achievements.services import grant_achievement
 
+        # The view resolves + branch-scope-checks the recipient (object-level IDOR
+        # guard); accept that instance. Fall back to resolving by id for any internal
+        # caller that passes only the dto.
         return grant_achievement(
             achievement=achievement,
-            student=self._resolve_student(data.student_id),
+            student=student if student is not None else self._resolve_student(data.student_id),
             granted_by=granted_by,
             note=data.note,
         )
+
+    def resolve_student(self, student_id: int):
+        """Public resolver for the view's object-level scope check (returns the
+        StudentProfile or None; the view decides 400-invalid vs 403-out-of-branch)."""
+        from apps.students.models import StudentProfile
+
+        return StudentProfile.objects.filter(pk=student_id).first()
 
     def wall_for(self, user) -> QuerySet[AchievementGrant]:
         return self._grants.wall_for(user)

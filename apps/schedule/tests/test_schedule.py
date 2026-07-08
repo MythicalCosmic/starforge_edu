@@ -519,6 +519,36 @@ def test_rules_create_requires_write(tenant_a, as_role):
     assert resp.status_code == 403
 
 
+def test_rules_create_cross_branch_blocked(tenant_a, user_in, as_user):
+    """R2-08: a branch-scoped schedule:write holder must not author a rule naming
+    another branch's cohort/teacher/room (cross-branch injection + pk oracle). The
+    rule has no branch column of its own, so the FK branches are scope-checked."""
+    from core.permissions import Role
+
+    with schema_context(tenant_a.schema_name):
+        ctx_a = _setup()
+        ctx_b = _setup()  # a DIFFERENT branch's cohort/teacher/room
+    writer = as_user(tenant_a, user_in(tenant_a, roles=[Role.HEAD_OF_DEPT], branch=ctx_a["branch"]))
+    resp = writer.post(
+        "/api/v1/schedule/rules/",
+        {
+            "term": ctx_b["term"].id,
+            "cohort": ctx_b["cohort"].id,
+            "teacher": ctx_b["teacher"].id,
+            "room": ctx_b["room"].id,
+            "title": "Injected",
+            "rrule": "FREQ=WEEKLY;BYDAY=MO",
+            "start_date": ctx_b["anchor"].isoformat(),
+            "end_date": (ctx_b["anchor"] + timedelta(days=_WINDOW_DAYS)).isoformat(),
+            "start_time": "14:00",
+            "end_time": "15:30",
+        },
+        format="json",
+    )
+    assert resp.status_code == 403, resp.content
+    assert resp.json()["code"] == "out_of_scope"
+
+
 def test_rules_create_reversed_times_is_400_not_500(tenant_a, as_role):
     """A rule whose start_time > end_time is regex-valid but violates the
     rule_times_ordered CheckConstraint; full_clean() raises Django's ValidationError.
