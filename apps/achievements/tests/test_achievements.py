@@ -111,6 +111,25 @@ def test_cross_branch_group_create_blocked(tenant_a, user_in, as_user):
     assert r.json()["code"] == "cross_branch"
 
 
+def test_grants_list_is_query_bounded(tenant_a, as_role, django_assert_max_num_queries):
+    """R2-10: GET /achievements/<pk>/grants/ must not issue one query PER grant. The
+    presenter dereferences g.achievement, so grants_of must select_related it — else a
+    school-wide achievement granted to many students blows the query count linearly."""
+    from apps.students.tests.factories import StudentProfileFactory
+
+    director, _ = as_role(Role.DIRECTOR)
+    aid = director.post(ACH, {"name": "Bounded", "scope": "global"}, format="json").json()["data"]["id"]
+    with schema_context(tenant_a.schema_name):
+        student_ids = [StudentProfileFactory.create().id for _ in range(6)]
+    for sid in student_ids:
+        assert director.post(f"{ACH}{aid}/grant/", {"student": sid}, format="json").status_code == 201
+    # Constant regardless of the 6 grants on the page (base + one page query with the
+    # FK joins) — the pre-fix N+1 would add one SELECT per grant row.
+    with django_assert_max_num_queries(12):
+        body = director.get(f"{ACH}{aid}/grants/").json()
+    assert len(_rows(body)) == 6
+
+
 def test_cross_branch_global_grant_blocked(tenant_a, user_in, as_user, as_role):
     """R2-07: a branch-scoped teacher must not grant a GLOBAL achievement to another
     branch's student (cross-branch write + student-pk oracle). The recipient is

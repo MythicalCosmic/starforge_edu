@@ -10,7 +10,12 @@ from __future__ import annotations
 from typing import Any
 
 from apps.academics.models import Grade
-from apps.reports.generators.base import ReportGenerator, is_full_scope, teacher_cohort_ids
+from apps.reports.generators.base import (
+    ReportGenerator,
+    enforce_report_row_cap,
+    is_full_scope,
+    teacher_cohort_ids,
+)
 
 
 class GradesGenerator(ReportGenerator):
@@ -38,6 +43,7 @@ class GradesGenerator(ReportGenerator):
                 student__cohort_memberships__end_date__isnull=True,
             ).distinct()
 
+        enforce_report_row_cap(qs)
         rows = [
             {
                 "student": g.student.user.get_full_name() or g.student.user.username,

@@ -30,4 +30,8 @@ class AchievementGrantRepository(BaseRepository[AchievementGrant], IAchievementG
         return self.get_queryset().filter(student_id__in=student_ids).order_by("-granted_at")
 
     def grants_of(self, achievement: Achievement) -> QuerySet[AchievementGrant]:
-        return achievement.grants.select_related("student", "granted_by")
+        # achievement_grant_to_dict dereferences g.achievement (a full object, for
+        # achievement_detail); without select_related("achievement") that is one extra
+        # SELECT per grant row (N+1) — a school-wide achievement granted to thousands
+        # renders 1 + page_size queries. student/granted_by are read only as ids.
+        return achievement.grants.select_related("achievement", "student", "granted_by")

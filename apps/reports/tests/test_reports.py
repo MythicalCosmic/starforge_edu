@@ -113,6 +113,29 @@ def test_attendance_generator_status_counts(tenant_a, user_in):
     assert data["by_status"] == {"present": 1, "absent": 1}
 
 
+def test_report_row_cap_refuses_oversized_report(tenant_a, user_in, monkeypatch):
+    """R2-06: a report generator must refuse (not OOM) an oversized result set — it
+    materializes every row into a list + an in-memory doc. With the cap lowered, an
+    unfiltered full-scope collect raises report_too_large instead of loading all rows."""
+    from apps.reports.generators import base
+    from core.exceptions import ValidationException
+
+    monkeypatch.setattr(base, "MAX_REPORT_ROWS", 1)
+    with schema_context(tenant_a.schema_name):
+        director = user_in(tenant_a, roles=[Role.DIRECTOR])
+        branch = BranchFactory()
+        cohort = CohortFactory(branch=branch)
+        teacher = TeacherProfileFactory(branch=branch)
+        lesson = _make_lesson(branch=branch, teacher=teacher, cohort=cohort)
+        for _ in range(2):  # 2 rows > cap of 1
+            AttendanceRecord.objects.create(
+                student=StudentProfileFactory(branch=branch), lesson=lesson, status="present"
+            )
+        with pytest.raises(ValidationException) as exc:
+            get_generator("attendance").collect({}, user=director, roles={Role.DIRECTOR})
+        assert exc.value.code == "report_too_large"
+
+
 def test_grades_generator_published_only(tenant_a, user_in):
     from apps.academics.tests.factories import GradeFactory
 

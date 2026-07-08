@@ -30,6 +30,29 @@ STAFF_ROLES = {Role.DIRECTOR, Role.HEAD_OF_DEPT}
 # Locale set every report template ships (TD-14).
 TEMPLATE_LOCALES = ("uz", "ru", "en")
 
+# A report generator materializes every matching row into a Python list AND an
+# in-memory HTML/openpyxl document, so an unbounded result set (a director running
+# attendance/grades/enrollment with no date filter over a multi-year center) OOM-kills
+# the SHARED tenant Celery worker, taking co-running tenants' tasks down with it.
+# Refuse above this many rows (mirrors apps/audit's MAX_EXPORT_ROWS) — the caller
+# narrows by date range / cohort. build_report catches the raise and marks the run
+# FAILED with the message, instead of flapping on repeated OOMs.
+MAX_REPORT_ROWS = 50_000
+
+
+def enforce_report_row_cap(qs) -> None:
+    """Raise a clean ValidationException if ``qs`` would exceed MAX_REPORT_ROWS, before
+    the caller materializes it. Counts at the DB (cheap) rather than loading rows."""
+    from core.exceptions import ValidationException
+
+    total = qs.count()
+    if total > MAX_REPORT_ROWS:
+        raise ValidationException(
+            "This report matches too many rows; narrow the date range or cohort.",
+            code="report_too_large",
+            fields={"rows": [f"{total} rows match (max {MAX_REPORT_ROWS})."]},
+        )
+
 # Characters that make Excel/LibreOffice treat a cell as a formula. Report cells
 # carry tenant-user-controlled strings (student/cohort/library names), so any of
 # these as a leading char must be neutralized to block CSV/XLSX formula injection.

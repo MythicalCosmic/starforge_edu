@@ -10,7 +10,12 @@ from datetime import date
 from typing import Any
 
 from apps.attendance.models import AttendanceRecord
-from apps.reports.generators.base import ReportGenerator, is_full_scope, teacher_cohort_ids
+from apps.reports.generators.base import (
+    ReportGenerator,
+    enforce_report_row_cap,
+    is_full_scope,
+    teacher_cohort_ids,
+)
 
 
 def _parse_date(value: str | None) -> date | None:
@@ -43,6 +48,7 @@ class AttendanceGenerator(ReportGenerator):
         if not is_full_scope(user=user, roles=roles):
             qs = qs.filter(lesson__cohort_id__in=teacher_cohort_ids(user))
 
+        enforce_report_row_cap(qs)
         rows = []
         by_status: dict[str, int] = {}
         for rec in qs:

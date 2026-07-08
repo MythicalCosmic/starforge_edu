@@ -8,7 +8,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from apps.reports.generators.base import ReportGenerator, is_full_scope, teacher_cohort_ids
+from apps.reports.generators.base import (
+    ReportGenerator,
+    enforce_report_row_cap,
+    is_full_scope,
+    teacher_cohort_ids,
+)
 from apps.students.models import StudentProfile
 
 _SEAT_STATUSES = (StudentProfile.Status.ENROLLED, StudentProfile.Status.ACTIVE)
@@ -34,6 +39,7 @@ class EnrollmentGenerator(ReportGenerator):
             # Teacher (or any non-staff) sees only students in cohorts they own.
             qs = qs.filter(current_cohort_id__in=teacher_cohort_ids(user))
 
+        enforce_report_row_cap(qs)
         rows = [
             {
                 "student_id": s.student_id,
