@@ -232,6 +232,67 @@ def test_standing_discount_materializes(tenant_a):
         assert inv.total_uzs == Decimal("400000.00")
 
 
+def test_stacked_discounts_are_capped_at_the_charge(tenant_a):
+    """R1-04: discounts summing beyond 100% must floor the bill at 0 without driving
+    the persisted InvoiceLine rows negative — total_uzs and sum(lines) must agree."""
+    from apps.finance.models import InvoiceLine
+
+    with schema_context(tenant_a.schema_name):
+        student = StudentProfileFactory()
+        # Two 60%-of-gross discounts = 120% > 100%; the aggregate must cap at the charge.
+        DiscountFactory(student=student, percent=Decimal("60.00"), fixed_amount_uzs=None)
+        DiscountFactory(student=student, percent=Decimal("60.00"), fixed_amount_uzs=None)
+        fs = FeeScheduleFactory(amount_uzs=Decimal("500000.00"))
+        inv = services.issue_invoice(student_id=student.pk, fee_schedule_id=fs.pk)
+        assert inv.total_uzs == Decimal("0.00")
+        line_sum = sum(
+            (line.amount_uzs for line in InvoiceLine.objects.filter(invoice=inv)), Decimal("0")
+        )
+        assert line_sum == inv.total_uzs  # invariant holds: no negative persisted balance
+
+
+def test_partial_payment_on_past_due_invoice_reaches_overdue_via_beat(tenant_a):
+    """R2-P2: a past-due invoice that takes a partial payment must still be able to
+    reach OVERDUE. Previously the beat's overdue flip targeted only ISSUED, so a
+    partially-paid delinquent invoice was stuck at PARTIALLY_PAID forever and dropped
+    out of every ?status=overdue aging/dunning view. The beat now includes past-due
+    PARTIALLY_PAID."""
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from apps.payments.models import Payment
+
+    with schema_context(tenant_a.schema_name):
+        student = StudentProfileFactory()
+        inv = services.issue_invoice(
+            student_id=student.pk,
+            lines=[
+                {
+                    "description": "Tuition",
+                    "line_type": "tuition",
+                    "quantity": "1",
+                    "unit_price_uzs": "1000000",
+                }
+            ],
+        )
+        past = timezone.now().date() - timedelta(days=10)
+        Invoice.objects.filter(pk=inv.pk).update(due_date=past)
+        pay = Payment.objects.create(
+            provider="cash",
+            amount_uzs=Decimal("300000.00"),
+            status="completed",
+            idempotency_key="r2p2-partial-overdue",
+        )
+        services.allocate_payment(payment_id=pay.pk, invoice_ids=[inv.pk], amount_uzs=Decimal("300000.00"))
+        inv.refresh_from_db()
+        assert inv.status == Invoice.Status.PARTIALLY_PAID  # payment-time semantics unchanged
+        # The dunning beat re-flips a still-owing past-due partially-paid bill to overdue.
+        services.emit_payment_reminders()
+        inv.refresh_from_db()
+        assert inv.status == Invoice.Status.OVERDUE
+
+
 # --------------------------------------------------------------------------- #
 # auto-issue on enrollment (idempotent / fires once)
 # --------------------------------------------------------------------------- #

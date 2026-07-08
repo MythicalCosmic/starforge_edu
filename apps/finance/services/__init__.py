@@ -295,20 +295,31 @@ def _build_discount_lines(*, student, base_uzs: Decimal, on: date, settings) -> 
     """Negative discount lines to materialize: standing discounts + an auto
     sibling discount when configured and the student has an enrolled sibling."""
     lines: list[dict] = []
+    # Aggregate discount is capped at the charge (base_uzs): stacking discounts that
+    # sum beyond 100% must floor the bill at zero, NOT drive the persisted lines below
+    # zero. Without the cap, total_uzs clamps to 0 while sum(InvoiceLine) goes negative,
+    # breaking the sum(lines) == total_uzs invariant (silent negative-balance corruption).
+    remaining = base_uzs
     for discount in _active_discounts(student, on=on):
+        if remaining <= _ZERO:
+            break  # invoice already fully discounted — further discounts can't apply
         amount = _discount_amount(discount, base_uzs)
         if amount <= _ZERO:
             continue
+        amount = min(amount, remaining)  # cap so cumulative discount never exceeds the charge
         # F23-1: a one-time credit (an absence deduction) credits exactly ONE invoice, then
         # retires — so a single missed lesson is never credited twice. Claim it with a
         # conditional UPDATE (short-circuited so it only runs for single_use discounts): it
         # matches 0 rows — and we skip the line — if a concurrent invoice already consumed
         # it, since the row lock serialises the two issuers inside issue_invoice's
-        # transaction. So it can't double-credit even under concurrent issuance.
+        # transaction. So it can't double-credit even under concurrent issuance. The claim
+        # runs only once we KNOW a positive amount applies (after the cap), so a credit is
+        # never consumed on an already-zeroed invoice.
         if discount.single_use and not Discount.objects.filter(
             pk=discount.pk, is_active=True
         ).update(is_active=False):
             continue
+        remaining -= amount
         lines.append(
             {
                 "description": str(_("Discount: %(t)s")) % {"t": discount.get_discount_type_display()},
@@ -320,8 +331,8 @@ def _build_discount_lines(*, student, base_uzs: Decimal, on: date, settings) -> 
         )
 
     sibling_pct = getattr(settings, "sibling_discount_percent", None) or _ZERO
-    if sibling_pct > _ZERO and _has_enrolled_sibling(student):
-        amount = (base_uzs * Decimal(str(sibling_pct)) / _HUNDRED).quantize(_CENT)
+    if remaining > _ZERO and sibling_pct > _ZERO and _has_enrolled_sibling(student):
+        amount = min((base_uzs * Decimal(str(sibling_pct)) / _HUNDRED).quantize(_CENT), remaining)
         if amount > _ZERO:
             lines.append(
                 {
@@ -948,9 +959,11 @@ def emit_payment_reminders(*, today: date | None = None) -> int:
         emitted += 1
 
     # Mark them overdue (separate UPDATE, after the scan, so iteration is stable).
+    # PARTIALLY_PAID past-due bills are included: a partial payment must not park a
+    # delinquent invoice out of the OVERDUE state (R2-P2). PAID is excluded (settled).
     Invoice.objects.filter(
         due_date__lt=today,
-        status=Invoice.Status.ISSUED,
+        status__in=(Invoice.Status.ISSUED, Invoice.Status.PARTIALLY_PAID),
     ).update(status=Invoice.Status.OVERDUE)
     return emitted
 
