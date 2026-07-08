@@ -49,6 +49,34 @@ def test_listing_filter_search_order_paginate(tenant_a):
         assert (page, size) == (1, 2)
 
 
+def test_paginate_is_stable_across_pages_on_a_non_unique_sort(tenant_a):
+    """Regression (R1-08): offset pagination over a column with ties silently
+    drops and duplicates rows across page boundaries unless a unique pk tiebreaker
+    is appended. Walk every page of a set that all shares ONE sort value and assert
+    the union is the full set with no duplicates."""
+    from apps.org.models import Branch
+
+    with schema_context(tenant_a.schema_name):
+        # 10 branches with an IDENTICAL sort key (same is_active) — the ordering is
+        # non-unique, so without a pk tiebreaker the DB may return rows in a
+        # different order per query, dropping/duplicating across page slices.
+        for i in range(10):
+            Branch.objects.create(name=f"PGDUP-{i:02d}", slug=f"pgdup-{i:02d}", is_active=True)
+        mine = Branch.objects.filter(slug__startswith="pgdup-").order_by("is_active")
+
+        seen: list[int] = []
+        for page_no in range(1, 6):  # 5 pages of 2 = 10 rows
+            items, total, _, _ = paginate(
+                _RF.get("/", {"page": str(page_no), "page_size": "2"}), mine
+            )
+            assert total == 10
+            seen.extend(b.pk for b in items)
+
+        assert len(seen) == 10, "a row was dropped or the last page under-filled"
+        assert len(set(seen)) == 10, "a row appeared on two pages (duplicate across boundary)"
+        assert set(seen) == set(mine.values_list("pk", flat=True))
+
+
 # --- branch scoping --------------------------------------------------------
 def test_branch_scoping_filters_and_guards(tenant_a, user_in):
     from apps.org.tests.factories import BranchFactory

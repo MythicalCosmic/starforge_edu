@@ -89,6 +89,27 @@ def apply_filters(
     return queryset
 
 
+def _ensure_total_order(queryset: QuerySet) -> QuerySet:
+    """Guarantee a deterministic TOTAL order before OFFSET/LIMIT slicing.
+
+    Offset pagination over a non-unique sort column silently drops AND duplicates
+    rows across page boundaries: two rows sharing the sort value can swap places
+    between the two SELECTs that fetch consecutive pages, so one is returned on both
+    pages and another on neither. Appending the primary key as a final tiebreaker
+    makes the order total and the paging stable. The pk is indexed, so the extra
+    sort key is effectively free even at scale.
+    """
+    pk_name = queryset.model._meta.pk.name
+    ordering = list(queryset.query.order_by) or list(queryset.model._meta.ordering)
+    for term in ordering:
+        # Only a bare string term can BE the primary key; expression terms
+        # (OrderBy/F) and traversals (``author__id``) never guarantee row-uniqueness
+        # for THIS model, so they don't count as a tiebreaker.
+        if isinstance(term, str) and term.lstrip("-") in (pk_name, "pk", "id"):
+            return queryset  # already totally ordered
+    return queryset.order_by(*ordering, "pk")
+
+
 def paginate(
     request: HttpRequest, queryset: QuerySet, *, default_size: int = DEFAULT_PAGE_SIZE
 ) -> tuple[list[Any], int, int, int]:
@@ -103,6 +124,7 @@ def paginate(
         # Past-the-end (a giant ?page): return an empty page instead of overflowing
         # the DB's bigint OFFSET with a 500.
         return [], total, page, size
+    queryset = _ensure_total_order(queryset)
     return list(queryset[start : start + size]), total, page, size
 
 

@@ -152,9 +152,102 @@ test_deactivating_rule_clears_future_lessons_and_stops_regeneration
 
 ---
 
-## Findings (round 2+ land below)
+## Round 2 — deeper cross-cutting hunt (16 lenses: money-flow tracing, cross-app integrity, scale)
 
-_Round 1 fixes committed in batches; round 2 hunt queued next._
+19 raw → **17 CONFIRMED, 2 PLAUSIBLE, 0 refuted**. CONF #1 and CONF #7 are the same bug found by two lenses (merged as **R2-01**). PLAUS #1/#2 substantially match prior-audit #109/#110 (known, still unfixed — fixing anyway). **Status** tracks fix state.
+
+### R2-01 · [HIGH][security/money] Reward-kind self-dealing: a cash reward's recipient can approve **and** disburse their own payout — the beneficiary maker-checker guard is gated to `KIND_LOAN` only ⏳ TODO
+
+- **Where:** [apps/approvals/services/__init__.py:715](apps/approvals/services/__init__.py#L715) (`_assert_not_loan_self_dealing`, called at approve `:735` + disburse `:809`); reward request built at [apps/rewards/services/__init__.py:72](apps/rewards/services/__init__.py#L72).
+- **Root cause:** `_assert_not_self_approval` blocks only the *requester*. `_assert_not_loan_self_dealing` — the *beneficiary* guard — is hard-coded `if req.kind == KIND_LOAN and req.payload["borrower_id"] == actor.id`. A cash reward is economically identical (money-OUT to a named staff user via `payload["recipient_id"]`/`party_label`) but `kind="reward"`, so the guard is a no-op. `scoped_requests` exposes every request to any `approvals:approve`/`approvals:disburse` holder, so the recipient reaches their own reward request. Manager grants → recipient (if they hold approve/disburse) self-approves and self-pays. The exact self-dealing the loan guard exists to prevent, rewards silently exempt.
+- **Fix plan:** generalize the beneficiary guard — block the actor from approving/disbursing any request whose beneficiary (`borrower_id`/`recipient_id`/whatever the kind pins as payee) is the actor, for every money-OUT-to-named-party kind (loan, reward, and any future one).
+
+### R2-02 · [HIGH][transaction-boundary] `WebhookEvent` is committed as `RECEIVED` before side effects run; a non-`ValidationException` failure during processing makes the provider's retry get dedup-swallowed as `DUPLICATE` → permanent payment loss ⏳ TODO
+
+- **Where:** [apps/payments/webhook_views.py:96](apps/payments/webhook_views.py#L96) (click) / `:187` (uzum); `record_webhook_event` at [apps/payments/services/__init__.py:394](apps/payments/services/__init__.py#L394).
+- **Root cause:** `record_webhook_event` is its own atomic and commits `WebhookEvent(status=RECEIVED)` before `process_*_complete` runs (a separate atomic; no `ATOMIC_REQUESTS`). The view catches only `except ValidationException → mark_webhook_rejected`. Any other exception (a Postgres deadlock/serialization error on the `select_for_update` in `mark_payment_completed`, or a non-`ValidationException` from `allocate_payment`) propagates; the `RECEIVED` event stays committed. On the provider's retry, `record_webhook_event` sees `existing.status == RECEIVED` → flips to `DUPLICATE` → view returns "Already processed". The provider marks the order paid and stops retrying, but no Payment was ever created. **Customer paid, invoice unpaid forever.**
+- **Fix plan:** broaden the webhook views' `except` to any exception → `mark_webhook_rejected` (so a retry reprocesses), and/or only mark the event terminal after the side effect commits.
+
+### R2-03 · [HIGH][data-loss] Repeat lesson-reschedule notifications silently suppressed by a lesson-id-only dedupe key — students/parents never told the lesson moved *again* ⏳ TODO
+
+- **Where:** [apps/notifications/receivers.py:283](apps/notifications/receivers.py#L283) (`on_lesson_rescheduled`), dedupe at `services/__init__.py:123`.
+- **Root cause:** dispatches `dedupe_prefix=f"schedule.lesson_rescheduled:{lesson_id}"` → key has only `lesson_id + uid`, no time/version discriminator. `dispatch()` does `get_or_create(dedupe_key=...)` and on a hit returns the existing row without re-queuing. This is the exact anti-pattern the sibling receivers avoid — `on_grade_changed` appends `new_score`, `on_submission_graded` appends `score`. A lesson moved twice: the second move hits the stale key and is dropped. The highest-impact reschedule (the latest) goes silent.
+- **Fix plan:** append the new `starts_at` (ISO) to the dedupe key so each distinct move notifies.
+
+### R2-04 · [MEDIUM][concurrency/money] `enroll_student_in_cohort` never enforces the F2-6 single-active-cohort invariant → a student accumulates multiple simultaneous active memberships **and** double finance auto-issue ⏳ TODO
+
+- **Where:** [apps/cohorts/services/__init__.py:28](apps/cohorts/services/__init__.py#L28) (enroll guard at `:36`); contrast `move_student` lock at `:72` + end-date-all at `:82`.
+- **Root cause:** enroll's only duplicate guard is per-cohort (`filter(cohort=cohort, student=student, end_date__isnull=True)`). It never checks/ends active memberships in OTHER cohorts and never takes the F2-6 student lock. The DB partial-unique is also per-cohort. Enrolling S (active in A) into B leaves two active memberships, overwrites `current_cohort`, and `finance.auto_issue_on_enrollment` bills BOTH cohorts (dedupe is per fee_schedule+period).
+- **Fix plan:** decide semantics with owner-sensible default — enroll should end-date prior active memberships under the same student lock `move_student` uses (single active cohort is the modeled invariant), OR 409 if already active elsewhere. Default: mirror `move_student` (lock + end-date others).
+
+### R2-05 · [MEDIUM][money] A post-approval attendance correction (absent→present) leaves the materialized single-use absence-deduction `Discount` active → student silently credited for a lesson they attended ⏳ TODO
+
+- **Where:** [apps/attendance/services/__init__.py:132](apps/attendance/services/__init__.py#L132) (`mark_attendance`) vs `_apply_absence_deduction_effect` at `apps/approvals/services/__init__.py:535`.
+- **Root cause:** the deduction materializes a standing `Discount(single_use=True)` at approve time; the only back-link is `payload__attendance_id` (used only for the create/approve dup guard). Re-marking the record present mutates `status` but nothing reads it afterward — no receiver deactivates the discount. Directors can re-mark past the correction window. The credit auto-applies to the next invoice with no audit trail. (Distinct from prior #21 which is about a *deleted* record at approve time.)
+- **Fix plan:** on absent→present correction, deactivate any active single-use discount linked to that attendance record (add the back-link + a correction hook).
+
+### R2-06 · [MEDIUM][scale] Report generators materialize an entire unbounded table into memory (no row cap) before rendering PDF/XLSX → OOM-kills the shared Celery worker ⏳ TODO
+
+- **Where:** [apps/reports/generators/attendance.py:46](apps/reports/generators/attendance.py#L46) (+ grades.py, enrollment.py); driven by `celery_tasks/report_tasks.py`.
+- **Root cause:** `collect()` does `for rec in qs:` with OPTIONAL date filters; a full-scope director with no dates loads EVERY attendance record (millions over a center's life) into a list of dicts, then renders a giant HTML/openpyxl in memory. Contrast `apps/audit` export which caps at `MAX_EXPORT_ROWS` + streams via `iterator()`. Worker OOMs; being tenant-shared, co-running tenant tasks die too; 3 retries each re-OOM.
+- **Fix plan:** cap rows (refuse/paginate over a limit) + stream with `iterator()`, mirroring the audit export. NOTE: `apps/reports` is the one DRF app — fix stays inside it.
+
+### R2-07 · [MEDIUM][idor] Achievement grant resolves the recipient student unscoped → a branch-scoped teacher can grant a GLOBAL achievement to another branch's student (cross-branch write + student-pk oracle) ⏳ TODO
+
+- **Where:** [apps/achievements/services/v1/achievement_service.py:104](apps/achievements/services/v1/achievement_service.py#L104) (`_resolve_student`), via `achievement_grant_view`.
+- **Root cause:** the achievement is fetched branch-scoped, but the recipient comes straight from the body: `StudentProfile.objects.filter(pk=student_id).first()` with no branch check. A GLOBAL (branch=None) achievement has no cohort/branch guard, and `achievements:write` is a branch-scoped role (TEACHER/HOD). Every sibling student-write path (sales, cards, compliance) enforces `student.branch_id in branch_ids`; this one omits it.
+- **Fix plan:** scope `_resolve_student` to the actor's branches (404 out-of-branch), mirroring the sales/cards/compliance pattern.
+
+### R2-08 · [MEDIUM][security] `RecurrenceRule` create/update resolves term/cohort/teacher/room/lesson_type by pk only → cross-branch schedule injection + existence oracle ⏳ TODO
+
+- **Where:** [apps/schedule/services/v1/schedule_service.py:148](apps/schedule/services/v1/schedule_service.py#L148) (`_resolve_fks`); view only checks `schedule:write`.
+- **Root cause:** `filter(pk=value).first()` for each FK with no branch-consistency check; `TimeSlot` in the same file DOES `assert_branch_id_in_scope`, proving intent. A branch-A writer can create a rule under branch-B's cohort/teacher/room, materializing lessons (and downstream attendance/absence-deduction rows) in a branch they don't control.
+- **Fix plan:** assert the resolved cohort/teacher/room belong to the actor's branch scope (and are mutually consistent), 400/403 otherwise.
+
+### R2-09 · [MEDIUM][data-loss] Click/Uzum Complete callback for an **unresolved** invoice is ACKed as SUCCESS and marked PROCESSED with no Payment → captured money silently lost, retry blocked ⏳ TODO
+
+- **Where:** [apps/payments/webhook_views.py:96](apps/payments/webhook_views.py#L96) (click) / `:187` (uzum).
+- **Root cause:** `if invoice is not None:` — when the lookup misses (invoice deleted/renumbered after checkout), the block is skipped and control falls to `mark_webhook_processed` + success. No Payment, and the PROCESSED event blocks any corrective retry. (R1-01 fixed the *common* cause of the miss; this is the residual genuine-miss handling.)
+- **Fix plan:** when a Complete callback can't resolve its invoice, `mark_webhook_rejected` (retryable) rather than mark processed + success.
+
+### R2-10 · [MEDIUM][n+1] `grants_of()` eager-loads the wrong FKs → a per-row query for the achievement on `GET /achievements/<pk>/grants/` ⏳ TODO
+
+- **Where:** [apps/achievements/repositories/achievement_grant_repository.py:33](apps/achievements/repositories/achievement_grant_repository.py#L33).
+- **Root cause:** returns `achievement.grants.select_related("student","granted_by")` but the presenter reads those only as ids and dereferences `g.achievement` (NOT select_related) as a full object → one SELECT per grant. Sibling `grants_for_students()` correctly `select_related("achievement",...)`. For a school-wide achievement granted to thousands, page renders 1 + page_size queries.
+- **Fix plan:** `select_related("achievement")` (drop student/granted_by — read as ids), or reuse the loaded `achievement` instance.
+
+### R2-11 · [MEDIUM][scale] Cohort notification fan-out runs synchronously in the request thread — `bulk_reschedule` issues O(lessons × members) inline `dispatch()` queries per HTTP request ⏳ TODO
+
+- **Where:** [apps/notifications/receivers.py:102](apps/notifications/receivers.py#L102) (`_dispatch_many`), driven by `bulk_reschedule` on_commit loop.
+- **Root cause:** one `on_commit` emit per shifted lesson, each looping every active cohort member calling `dispatch()` inline (~3-4 queries/recipient). Unlike `announce_cohort` which offloads to chunked Celery. N=50 lessons × M=30 members ≈ 1500 dispatches / 4500+ queries in one request → connection saturation + timeout at scale.
+- **Fix plan:** offload cohort fan-out to a chunked Celery task like `announce_cohort`.
+
+### R2-12 · [LOW][security] Loan-request creation resolves the branch FK by pk with no branch-scope check → cross-branch money-request attribution ⏳ TODO
+- **Where:** [apps/loans/views/v1/loan_views.py:151](apps/loans/views/v1/loan_views.py#L151). Every READ path here is branch-scoped; the write path accepts an arbitrary branch. Mis-attributes the OUT disbursement + repayments to another branch's books; branch-id oracle. **Fix:** `assert_branch_id_in_scope` on the supplied branch.
+
+### R2-13 · [LOW][boundary] membership-as-of-date uses `lesson.starts_at.date()` (UTC) instead of center-local → off-by-one for lessons in the 00:00–04:59 Asia/Tashkent window ⏳ TODO
+- **Where:** [apps/attendance/services/__init__.py:113](apps/attendance/services/__init__.py#L113) + `:168`. `USE_TZ=True` so `.date()` is the UTC date; use `timezone.localtime(...).date()`. Can auto-mark a departed student absent (→ spurious absence-deduction) at the boundary. **Fix:** localtime before `.date()`.
+
+### R2-14 · [LOW][migration-drift] `RoleMembership` uniqueness silently unenforced for branch-level grants (nullable `department` in `unique_together` → NULL != NULL) ⏳ TODO
+- **Where:** [apps/users/models.py:208](apps/users/models.py#L208). Branch-level grants (the common case, `department=None`) fall outside the unique constraint → duplicate role rows possible; a single-row revoke leaves the role live via the survivor. Admin/ORM-only reachable today (no HTTP create path). **Fix:** partial unique constraints (one for `department IS NULL`, one for NOT NULL) or a functional unique.
+
+### R2-15 · [LOW][scale] `_consecutive_push_failures` scans an unbounded, growing set of PUSH deliveries on every push failure (no usable index) ⏳ TODO
+- **Where:** [celery_tasks/notification_tasks.py:311](celery_tasks/notification_tasks.py#L311). Filters `channel + notification__user_id + provider_response__device_id` (JSON key, unindexable) sorting all matching PUSH rows; the `(notification, channel)` index is unusable (no notification pk in the filter). A push storm to stale tokens degrades superlinearly as history grows. **Fix:** add a targeted index (e.g. on `(channel, created_at)` + a stored `device_id` column) or bound the scan window by time.
+
+### R2-16 · [LOW][money-consistency] Click/Uzum record & fiscalize the exact fractional invoice total, but the customer is charged the HALF_UP whole-soum amount — a reconciliation-invisible charged-vs-recorded tiyin divergence ⏳ TODO
+- **Where:** [apps/payments/services/__init__.py:712](apps/payments/services/__init__.py#L712) (record) vs `:350` (charge). Sub-soum per txn (defunct tiyin) so LOW, and my R1-02 fix does NOT create a stuck invoice (the fractional total is recorded and marks PAID). But charged (whole soum) ≠ recorded/fiscalized (fractional). **Fix (deferred, needs finance decision):** either record the amount actually charged, or quantize invoice totals to whole soum at issue.
+
+### R2-P1 · [HIGH][concurrency] (PLAUSIBLE; ≈ prior-audit #109) `void_invoice` is a check-then-act race with `allocate_payment` — a concurrent payment lands on an invoice that then gets marked VOID, orphaning a live allocation on a voided bill ⏳ TODO
+- **Where:** [apps/finance/services/__init__.py:360](apps/finance/services/__init__.py#L360). `void_invoice` doesn't `select_for_update` the invoice (siblings `extend/restore_invoice_due_date` do). **Fix:** lock + re-check status/allocations inside the transaction. Known (prior #109), still unfixed — will fix.
+
+### R2-P2 · [MEDIUM][state-machine] (PLAUSIBLE; ≈ prior-audit #110) A partially-paid invoice can never reach OVERDUE — `_refresh_invoice_status` downgrades OVERDUE→PARTIALLY_PAID and the beat's overdue-flip only targets `status=ISSUED` ⏳ TODO
+- **Where:** [apps/finance/services/__init__.py:474](apps/finance/services/__init__.py#L474) + `:942`. A `?status=overdue` filter silently omits delinquent partially-paid bills. **Fix:** extend the overdue-flip to past-due `PARTIALLY_PAID` too. Known (prior #110), still unfixed — will fix.
+
+---
+
+## Findings (round 3+ land below)
+
+_Round-2 fixes proceeding in gated batches; round-3 hunt queued after._
 
 ---
 
