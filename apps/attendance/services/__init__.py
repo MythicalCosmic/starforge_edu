@@ -126,6 +126,17 @@ def mark_attendance(*, lesson: Lesson, entries: list[dict], actor) -> dict:
             fields={"students": not_members},
         )
 
+    # Snapshot prior statuses in ONE query so we can detect an absent -> present
+    # CORRECTION below (update_or_create doesn't return the pre-image). A record that
+    # leaves the absent set must retire any single-use absence-deduction credit it
+    # spawned, or the student is credited for a lesson they actually attended.
+    _ABSENT_LIKE = (AttendanceRecord.Status.ABSENT, AttendanceRecord.Status.EXCUSED)
+    prior_status = dict(
+        AttendanceRecord.objects.filter(lesson=lesson, student_id__in=student_ids).values_list(
+            "student_id", "status"
+        )
+    )
+
     schema = current_schema()
     created = updated = 0
     records: list[AttendanceRecord] = []
@@ -147,6 +158,16 @@ def mark_attendance(*, lesson: Lesson, entries: list[dict], actor) -> dict:
         records.append(record)
         if status_value == AttendanceRecord.Status.ABSENT:
             _emit_absent(record, auto=False, schema=schema)
+        elif (
+            status_value not in _ABSENT_LIKE
+            and prior_status.get(entry["student"].pk) in _ABSENT_LIKE
+        ):
+            # Correction: this record was absent/excused and is now present/late. Retire
+            # any approved single-use absence-deduction credit tied to it (no-op if none,
+            # or if the credit was already applied to an invoice).
+            from apps.approvals.services import clear_absence_deduction
+
+            clear_absence_deduction(attendance_id=record.pk, actor=actor)
     return {"created": created, "updated": updated, "records": records}
 
 

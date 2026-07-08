@@ -164,6 +164,36 @@ def test_approving_materializes_a_credit_discount(tenant_a, as_role):
         assert d.single_use is True  # a one-time credit, not a standing scholarship
 
 
+def test_correcting_the_absence_retires_the_unclaimed_credit(tenant_a, as_role):
+    """R2-05: if the absence is later CORRECTED (student was actually present), the
+    single-use credit must be retired so the student isn't credited for a lesson they
+    attended. clear_absence_deduction (called by mark_attendance on an absent->present
+    transition) retires a still-active credit and stamps the audit trail."""
+    _set_policy(tenant_a, enabled=True, excused_only=True)
+    teacher, _ = as_role(Role.TEACHER)
+    director, _ = as_role(Role.DIRECTOR)
+    sid = _student_id(tenant_a)
+    aid = _absence(tenant_a, student_id=sid)
+    rid = _request(teacher, student_id=sid, attendance_id=aid, amount="45000").json()["data"]["id"]
+    discount_id = director.post(f"{REQ}{rid}/approve/", {}, format="json").json()["data"]["payload"][
+        "discount_id"
+    ]
+
+    with schema_context(tenant_a.schema_name):
+        from apps.approvals.models import ApprovalRequest
+        from apps.approvals.services import clear_absence_deduction
+        from apps.finance.models import Discount
+
+        assert Discount.objects.get(pk=discount_id).is_active is True
+        retired = clear_absence_deduction(attendance_id=aid)
+        assert retired is True
+        assert Discount.objects.get(pk=discount_id).is_active is False  # credit retired
+        # audit trail links the retirement back to the correction
+        assert ApprovalRequest.objects.get(pk=rid).payload.get("credit_cleared") == "attendance_corrected"
+        # idempotent: a second correction is a no-op (credit already retired)
+        assert clear_absence_deduction(attendance_id=aid) is False
+
+
 def test_credit_applies_to_one_invoice_then_retires(tenant_a, as_role):
     """The defining property of an absence deduction: it credits the ONE missed lesson
     exactly once. A single-use Discount reduces the next invoice and then retires, so it

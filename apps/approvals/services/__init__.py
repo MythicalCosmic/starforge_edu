@@ -584,6 +584,40 @@ def _apply_absence_deduction_effect(req: ApprovalRequest, actor) -> None:
     req.payload = {**p, "discount_id": discount.pk}
 
 
+@transaction.atomic
+def clear_absence_deduction(*, attendance_id: int, actor=None) -> bool:
+    """Retire the single-use credit an approved absence_deduction materialized, when
+    that absence is later CORRECTED (the student was actually present). Without this,
+    a post-approval attendance fix (absent -> present) leaves the standing single-use
+    Discount active and finance credits the student for a lesson they attended, with no
+    trail linking the loss back to the correction.
+
+    No-op when there is no approved deduction for this attendance, or its credit was
+    already applied + retired (is_active=False) — reversing an already-billed credit
+    needs an invoice adjustment, which is out of scope here. Returns True iff a
+    still-active (unclaimed) credit was retired. Called by attendance.mark_attendance
+    on an absent->present transition (lazy import to avoid a hard app dependency)."""
+    from apps.finance.models import Discount
+
+    req = ApprovalRequest.objects.filter(
+        kind=KIND_ABSENCE_DEDUCTION,
+        status=ApprovalRequest.Status.APPROVED,
+        payload__attendance_id=attendance_id,
+    ).first()
+    if req is None:
+        return False
+    discount_id = (req.payload or {}).get("discount_id")
+    if not discount_id:
+        return False
+    # Conditional UPDATE: only retire a still-active credit (matches _build_discount_lines'
+    # single_use consumption). An already-consumed credit is left as-is.
+    retired = bool(Discount.objects.filter(pk=discount_id, is_active=True).update(is_active=False))
+    if retired:
+        req.payload = {**(req.payload or {}), "credit_cleared": "attendance_corrected"}
+        req.save(update_fields=["payload", "updated_at"])
+    return retired
+
+
 def _apply_payment_delay_effect(req: ApprovalRequest, actor) -> None:
     """On approval, a payment-delay request pushes its target invoice's due date
     via the finance service (which re-validates + un-overdues atomically). The
