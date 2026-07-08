@@ -47,8 +47,17 @@ def enroll_student_in_cohort(*, cohort: Cohort, student, start_date=None) -> Coh
         raise ConflictException(
             _("Student is already active in this cohort."), code="already_enrolled"
         ) from exc
-    student.current_cohort = cohort
-    student.save(update_fields=["current_cohort", "updated_at"])
+    # Multi-cohort enrollment IS a supported feature (a student may take e.g. English AND
+    # Math simultaneously — see apps/schedule/tests test_student_sees_lessons_from_both_
+    # active_cohorts, and attendance/content scoping joins active memberships plural). So
+    # each cohort keeps its own active CohortMembership and bills per its own fee schedule
+    # (auto_issue_on_enrollment). `current_cohort` is the student's PRIMARY cohort: set it
+    # on the FIRST enrollment but do NOT let a secondary enroll silently reassign it (a
+    # MOVE, via move_student, is the explicit way to change the primary). This keeps the
+    # primary stable for dashboards/reports while allowing multiple active memberships.
+    if student.current_cohort_id is None:
+        student.current_cohort = cohort
+        student.save(update_fields=["current_cohort", "updated_at"])
 
     schema = current_schema()
     transaction.on_commit(

@@ -230,8 +230,23 @@ def _create_job(request: HttpRequest) -> HttpResponse:
         )
     branch_id = _required_pos_int(body, "branch")
     _assert_branch_write(request, branch_id)
+    source = _choice(body, "source", _SOURCES)
+    # Cross-permission guard (R4/PLAUS1): the payload key is echoed into a presigned
+    # download at claim time, so a print job for a sensitive server-generated document
+    # (transcript / payment receipt / report) discloses that document to whoever claims
+    # it. Require the caller to hold the OWNING resource's READ permission — printing:write
+    # alone must not let e.g. a registrar/security/librarian pull finance receipts or
+    # academic transcripts they cannot otherwise read. (Object-level scope + deriving the
+    # key from source_id instead of trusting the client key is the tracked follow-up.)
+    _source_read_perm: dict[str, str] = {
+        PrintJob.Source.TRANSCRIPT: "academics:read",
+        PrintJob.Source.REPORT: "reports:read",
+        PrintJob.Source.RECEIPT: "finance:read",
+        PrintJob.Source.ASSIGNMENT: "assignments:read",
+    }
+    check_perm(request, _source_read_perm[source])
     data = {
-        "source": _choice(body, "source", _SOURCES),
+        "source": source,
         "source_id": _required_pos_int(body, "source_id"),
         "payload_s3_key": payload_key,
         "branch": branch_id,

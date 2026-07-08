@@ -525,6 +525,27 @@ def test_staff_create_job_teacher_allowed(as_role, tenant_a, user_in, as_user):
     assert resp.status_code == 201
 
 
+def test_create_job_requires_owning_read_permission_for_the_source(tenant_a, user_in, as_user):
+    """R4/PLAUS1: printing:write alone must not let a role pull a sensitive document it
+    cannot otherwise read. A registrar holds printing:write but NOT academics:read, so a
+    transcript print job (whose key is presign-downloaded at claim time) is forbidden."""
+    registrar = user_in(tenant_a, roles=[Role.REGISTRAR])
+    with schema_context(tenant_a.schema_name):
+        branch_id = next(m.branch_id for m in registrar.role_memberships.all() if m.role == Role.REGISTRAR)
+    resp = as_user(tenant_a, registrar).post(
+        JOBS_URL,
+        {
+            "source": "transcript",
+            "source_id": 1,
+            "payload_s3_key": f"{tenant_a.schema_name}/transcripts/1.pdf",
+            "branch": branch_id,
+            "pages": 1,
+        },
+        format="json",
+    )
+    assert resp.status_code == 403, resp.content
+
+
 @pytest.mark.parametrize("role", [Role.STUDENT, Role.PARENT])
 def test_student_parent_cannot_create_job(as_role, tenant_a, role):
     client, _ = as_role(role)

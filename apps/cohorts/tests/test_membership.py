@@ -22,6 +22,46 @@ def director(as_role):
     return as_role(Role.DIRECTOR)[0]
 
 
+def test_multi_cohort_enrollment_keeps_stable_primary_and_bills_each(
+    tenant_a, django_capture_on_commit_callbacks
+):
+    """R2-04 (product decision — multi-cohort IS a feature): a student may hold multiple
+    simultaneous active cohort memberships (e.g. English + Math). A secondary enroll adds
+    a membership and bills that cohort's own fee schedule, but does NOT silently reassign
+    current_cohort — the PRIMARY stays the first enrollment (a MOVE is the explicit way to
+    change it)."""
+    from decimal import Decimal
+
+    from apps.finance.models import Invoice
+    from apps.finance.tests.factories import FeeScheduleFactory
+
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory.create()
+        cohort_a = CohortFactory.create(branch=branch)
+        cohort_b = CohortFactory.create(branch=branch)
+        FeeScheduleFactory(cohort=cohort_a, amount_uzs=Decimal("100000.00"))
+        FeeScheduleFactory(cohort=cohort_b, amount_uzs=Decimal("60000.00"))
+        student = StudentProfileFactory.create(branch=branch)
+        # execute=True runs the on_commit auto-issue so per-cohort invoices materialize.
+        with django_capture_on_commit_callbacks(execute=True):
+            enroll_student_in_cohort(cohort=cohort_a, student=student)
+        with django_capture_on_commit_callbacks(execute=True):
+            enroll_student_in_cohort(cohort=cohort_b, student=student)
+
+        # BOTH memberships are active (multi-cohort feature).
+        active = set(
+            CohortMembership.objects.filter(student=student, end_date__isnull=True).values_list(
+                "cohort_id", flat=True
+            )
+        )
+        assert active == {cohort_a.id, cohort_b.id}
+        # PRIMARY stays the first cohort — a secondary enroll must not silently flip it.
+        student.refresh_from_db()
+        assert student.current_cohort_id == cohort_a.id
+        # Each cohort billed on its own fee schedule (per-course billing is intended).
+        assert Invoice.objects.filter(student=student).count() == 2
+
+
 def test_cohort_move_keeps_history(director, tenant_a):
     with schema_context(tenant_a.schema_name):
         branch = BranchFactory.create()
