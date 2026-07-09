@@ -362,6 +362,11 @@ class JsonErrorResponseMiddleware:
 
         response.content = json.dumps(_error_envelope(response.status_code)).encode("utf-8")
         response["Content-Type"] = "application/json"
+        # CommonMiddleware already stamped Content-Length from the ORIGINAL (longer) HTML body
+        # — e.g. Django's DEBUG technical-404 page — so we MUST re-stamp it to the rewritten
+        # JSON length. Otherwise the response declares more bytes than it sends: HTTP/2 aborts
+        # the stream (ERR_HTTP2_PROTOCOL_ERROR) and HTTP/1.1 clients hang waiting for the rest.
+        response["Content-Length"] = str(len(response.content))
         return response
 
 

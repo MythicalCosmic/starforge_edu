@@ -21,6 +21,23 @@ def test_unmatched_url_is_json_404_not_html(tenant_a, client_for):
     assert body["code"] == "not_found"
 
 
+def test_debug_html_error_rewrite_fixes_content_length(tenant_a, client_for, settings):
+    """Under DEBUG, Django serves an HTML technical-404/500 page; JsonErrorResponseMiddleware
+    rewrites it to the short JSON envelope and MUST re-stamp Content-Length. Otherwise the
+    response declares the ORIGINAL (longer) HTML length but sends the short JSON body — HTTP/2
+    aborts the stream (ERR_HTTP2_PROTOCOL_ERROR) and HTTP/1.1 clients hang. Regression for the
+    root-path outage on the DEBUG test server."""
+    settings.DEBUG = True
+    resp = client_for(tenant_a).get("/definitely-not-a-real-root-endpoint/")
+    assert resp.status_code == 404
+    assert resp["Content-Type"].startswith("application/json")
+    # The declared length MUST equal the actual body length (the bug: it was the HTML length).
+    assert int(resp["Content-Length"]) == len(resp.content)
+    body = resp.json()
+    assert body["success"] is False
+    assert body["code"] == "not_found"
+
+
 def test_unauthenticated_request_is_json_401(tenant_a, client_for):
     resp = client_for(tenant_a).get("/api/v1/users/me/")
     assert resp.status_code == 401
