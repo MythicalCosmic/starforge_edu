@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from apps.students.models import EnrollmentEvent, StudentProfile
+from apps.students.models import EnrollmentEvent, EnrollmentReason, StudentProfile
 from core.permissions import Role, get_user_roles
 
 # Roles allowed to read decrypted medical_notes (health data, TD-11 / DoD #4).
@@ -68,6 +68,16 @@ def student_detail_to_dict(s: StudentProfile, *, medical: bool) -> dict[str, Any
     """Retrieve/update payload (StudentDetailSerializer): adds medical_notes,
     decrypted only when ``medical`` (the caller passed the role gate)."""
     return {**student_to_dict(s), "medical_notes": s.medical_notes if medical else None}
+
+
+def enrollment_reason_to_dict(r: EnrollmentReason) -> dict[str, Any]:
+    return {
+        "id": r.id,
+        "name": r.name,
+        "slug": r.slug,
+        "color": r.color,
+        "is_active": r.is_active,
+    }
 
 
 def enrollment_event_to_dict(e: EnrollmentEvent) -> dict[str, Any]:

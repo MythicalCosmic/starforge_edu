@@ -8,7 +8,7 @@ from __future__ import annotations
 import factory
 
 from apps.org.tests.factories import BranchFactory
-from apps.students.models import StudentProfile
+from apps.students.models import EnrollmentReason, StudentProfile
 from apps.users.tests.factories import UserFactory
 
 
@@ -20,3 +20,11 @@ class StudentProfileFactory(factory.django.DjangoModelFactory[StudentProfile]):
     branch = factory.SubFactory(BranchFactory)
     student_id = factory.Sequence(lambda n: f"STU-{n:05d}")
     status = StudentProfile.Status.ACTIVE
+
+
+class EnrollmentReasonFactory(factory.django.DjangoModelFactory[EnrollmentReason]):
+    class Meta:
+        model = EnrollmentReason
+
+    name = factory.Sequence(lambda n: f"Reason {n}")
+    slug = factory.Sequence(lambda n: f"reason-{n}")

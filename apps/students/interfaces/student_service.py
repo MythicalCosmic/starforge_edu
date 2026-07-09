@@ -8,7 +8,27 @@ from typing import Any
 from django.db.models import QuerySet
 
 from apps.students.dto.student_dto import StudentCreateDTO, TransitionDTO
-from apps.students.models import EnrollmentEvent, StudentProfile
+from apps.students.models import EnrollmentEvent, EnrollmentReason, StudentProfile
+
+
+class IEnrollmentReasonService(ABC):
+    @abstractmethod
+    def list_reasons(self) -> QuerySet[EnrollmentReason]: ...
+
+    @abstractmethod
+    def get(self, *, pk: int) -> EnrollmentReason | None: ...
+
+    @abstractmethod
+    def create(self, *, data: dict[str, Any]) -> EnrollmentReason: ...
+
+    @abstractmethod
+    def update(self, reason: EnrollmentReason, *, changes: dict[str, Any]) -> EnrollmentReason: ...
+
+    @abstractmethod
+    def delete(self, reason: EnrollmentReason) -> None: ...
+
+    @abstractmethod
+    def active_slugs(self) -> set[str]: ...
 
 
 class IStudentService(ABC):

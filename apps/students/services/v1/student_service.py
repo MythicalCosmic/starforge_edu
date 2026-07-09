@@ -11,13 +11,56 @@ from __future__ import annotations
 from typing import Any
 
 from django.db.models import QuerySet
+from django.utils.text import slugify
 from django.utils.translation import gettext_lazy as _
 
 from apps.students.dto.student_dto import StudentCreateDTO, TransitionDTO
-from apps.students.interfaces.repositories import IStudentRepository
-from apps.students.interfaces.student_service import IStudentService
-from apps.students.models import EnrollmentEvent, StudentProfile
+from apps.students.interfaces.repositories import (
+    IEnrollmentReasonRepository,
+    IStudentRepository,
+)
+from apps.students.interfaces.student_service import (
+    IEnrollmentReasonService,
+    IStudentService,
+)
+from apps.students.models import EnrollmentEvent, EnrollmentReason, StudentProfile
 from core.exceptions import NotFoundException, ValidationException
+
+
+def _reject(field: str, message: str) -> ValidationException:
+    return ValidationException(_("Invalid input."), code="validation_error", fields={field: [message]})
+
+
+class EnrollmentReasonService(IEnrollmentReasonService):
+    def __init__(self, reasons: IEnrollmentReasonRepository) -> None:
+        self._reasons = reasons
+
+    def list_reasons(self) -> QuerySet[EnrollmentReason]:
+        return self._reasons.list_reasons()
+
+    def get(self, *, pk: int) -> EnrollmentReason | None:
+        return self._reasons.get(pk=pk)
+
+    def create(self, *, data: dict[str, Any]) -> EnrollmentReason:
+        data = dict(data)
+        if not data.get("slug"):
+            data["slug"] = slugify(data.get("name", ""))[:64]
+        if not data["slug"]:
+            raise _reject("slug", "Could not derive a slug; provide one explicitly.")
+        if self._reasons.slug_taken(slug=data["slug"]):
+            raise _reject("slug", "An enrollment reason with this slug already exists.")
+        return self._reasons.add(data=data)
+
+    def update(self, reason: EnrollmentReason, *, changes: dict[str, Any]) -> EnrollmentReason:
+        if "slug" in changes and self._reasons.slug_taken(slug=changes["slug"], exclude_pk=reason.pk):
+            raise _reject("slug", "An enrollment reason with this slug already exists.")
+        return self._reasons.apply_changes(reason, changes=changes)
+
+    def delete(self, reason: EnrollmentReason) -> None:
+        self._reasons.remove(reason)
+
+    def active_slugs(self) -> set[str]:
+        return self._reasons.active_slugs()
 
 # Direct-edit fields only (StudentUpdateSerializer): current_cohort/branch/status
 # are deliberately NOT here — those change via the cohort move / transfer / transition

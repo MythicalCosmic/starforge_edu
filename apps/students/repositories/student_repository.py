@@ -2,11 +2,48 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from django.db.models import QuerySet
 
-from apps.students.interfaces.repositories import IStudentRepository
-from apps.students.models import StudentProfile
+from apps.students.interfaces.repositories import (
+    IEnrollmentReasonRepository,
+    IStudentRepository,
+)
+from apps.students.models import EnrollmentReason, StudentProfile
 from core.repositories import BaseRepository
+
+
+class EnrollmentReasonRepository(BaseRepository[EnrollmentReason], IEnrollmentReasonRepository):
+    model = EnrollmentReason
+
+    def list_reasons(self) -> QuerySet[EnrollmentReason]:
+        return EnrollmentReason.objects.all()
+
+    def get(self, *, pk: int) -> EnrollmentReason | None:
+        return EnrollmentReason.objects.filter(pk=pk).first()
+
+    def add(self, *, data: dict[str, Any]) -> EnrollmentReason:
+        return EnrollmentReason.objects.create(**data)
+
+    def apply_changes(self, reason: EnrollmentReason, *, changes: dict[str, Any]) -> EnrollmentReason:
+        for field, value in changes.items():
+            setattr(reason, field, value)
+        if changes:
+            reason.save(update_fields=[*changes.keys(), "updated_at"])
+        return reason
+
+    def remove(self, reason: EnrollmentReason) -> None:
+        reason.delete()
+
+    def slug_taken(self, *, slug: str, exclude_pk: int | None = None) -> bool:
+        qs = EnrollmentReason.objects.filter(slug=slug)
+        if exclude_pk is not None:
+            qs = qs.exclude(pk=exclude_pk)
+        return qs.exists()
+
+    def active_slugs(self) -> set[str]:
+        return set(EnrollmentReason.objects.filter(is_active=True).values_list("slug", flat=True))
 
 
 class StudentRepository(BaseRepository[StudentProfile], IStudentRepository):

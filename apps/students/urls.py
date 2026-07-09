@@ -10,6 +10,8 @@ from __future__ import annotations
 from django.urls import path
 
 from apps.students.views.v1.student_views import (
+    enrollment_reason_detail_view,
+    enrollment_reasons_collection_view,
     student_block_view,
     student_dashboard_view,
     student_detail_view,
@@ -33,6 +35,9 @@ urlpatterns = [
     path("birthdays/", students_birthdays_view, name="students-birthdays"),
     path("stats/", students_stats_view, name="students-stats"),
     path("comparison/", students_comparison_view, name="students-comparison"),
+    # Enrollment reasons (per-Center configurable) — literal segment, before <int:pk>.
+    path("enrollment-reasons/", enrollment_reasons_collection_view, name="enrollment-reason-list"),
+    path("enrollment-reasons/<int:pk>/", enrollment_reason_detail_view, name="enrollment-reason-detail"),
     # Collection + detail.
     path("", students_collection_view, name="students-collection"),
     path("<int:pk>/", student_detail_view, name="students-detail"),

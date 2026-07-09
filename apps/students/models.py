@@ -62,19 +62,38 @@ class StudentProfile(models.Model):
         return self.blocked_at is not None
 
 
-class EnrollmentEvent(models.Model):
-    class ReasonCode(models.TextChoices):
-        COMPLETED = "completed", _("Completed")
-        MOVED_CITY = "moved_city", _("Moved city")
-        FINANCIAL = "financial", _("Financial")
-        BEHAVIOR = "behavior", _("Behavior")
-        SCHEDULE_CONFLICT = "schedule_conflict", _("Schedule conflict")
-        OTHER = "other", _("Other")
+class EnrollmentReason(models.Model):
+    """Per-Center configurable reason for an enrollment status change (why a lead
+    dropped, why a student withdrew, …). Every center categorizes differently, so
+    the reasons are data, not a hardcoded enum. Seeded per tenant with the defaults
+    (completed/moved_city/financial/behavior/schedule_conflict/other). Mirrors
+    schedule.LessonType / academics.ExamType.
 
+    An EnrollmentEvent stores the reason as a denormalized ``reason_code`` SLUG (not
+    an FK) so the historical log keeps the reason even if the center later renames or
+    retires it — the config table is the source of *valid* reasons at write time."""
+
+    name = models.CharField(max_length=64)
+    slug = models.SlugField(max_length=64, unique=True)
+    color = models.CharField(max_length=16, blank=True)  # optional UI hint, e.g. "#3b82f6"
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("name",)
+
+    def __str__(self) -> str:  # pragma: no cover
+        return self.name
+
+
+class EnrollmentEvent(models.Model):
     student = models.ForeignKey(StudentProfile, on_delete=models.CASCADE, related_name="enrollment_events")
     from_status = models.CharField(max_length=16)
     to_status = models.CharField(max_length=16)
-    reason_code = models.CharField(max_length=32, choices=ReasonCode.choices, blank=True)
+    # A slug validated at write time against the active EnrollmentReason rows (kept
+    # denormalized so history survives a reason being renamed/retired).
+    reason_code = models.CharField(max_length=32, blank=True)
     note = models.TextField(blank=True)
     actor = models.ForeignKey(
         "users.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"

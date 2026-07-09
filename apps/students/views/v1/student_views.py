@@ -18,18 +18,19 @@ from django.http import HttpRequest, HttpResponse
 from django.views.decorators.csrf import csrf_exempt
 
 from apps.students.dto.student_dto import StudentCreateDTO, TransitionDTO
-from apps.students.interfaces.student_service import IStudentService
-from apps.students.models import EnrollmentEvent, StudentProfile
+from apps.students.interfaces.student_service import IEnrollmentReasonService, IStudentService
+from apps.students.models import StudentProfile
 from apps.students.presenters import (
     can_see_medical_notes,
     enrollment_event_to_dict,
+    enrollment_reason_to_dict,
     student_detail_to_dict,
     student_to_dict,
 )
 from core.api_auth import check_perm, require_auth
 from core.container import container
 from core.exceptions import NotFoundException, ValidationException
-from core.http import int_field, read_json, str_field
+from core.http import bool_field, int_field, read_json, str_field
 from core.listing import apply_filters, paginate
 from core.permissions import get_user_roles
 from core.ratelimit import check_rate
@@ -44,6 +45,10 @@ _ORDERING = ("created_at", "enrollment_date", "student_id")
 
 def _service() -> IStudentService:
     return container.resolve(IStudentService)  # type: ignore[type-abstract]
+
+
+def _reason_service() -> IEnrollmentReasonService:
+    return container.resolve(IEnrollmentReasonService)  # type: ignore[type-abstract]
 
 
 def _get_in_scope(request: HttpRequest, pk: int) -> StudentProfile:
@@ -99,7 +104,9 @@ def student_transition_view(request: HttpRequest, pk: int) -> HttpResponse:
     body = read_json(request)
     dto = TransitionDTO(
         to_status=_choice(body, "to_status", StudentProfile.Status.values, required=True),
-        reason_code=_choice(body, "reason_code", EnrollmentEvent.ReasonCode.values, allow_blank=True),
+        # Validated against the center's active, configurable EnrollmentReason slugs
+        # (was the hardcoded ReasonCode enum). Blank stays allowed.
+        reason_code=_choice(body, "reason_code", _reason_service().active_slugs(), allow_blank=True),
         note=str_field(body, "note"),
     )
     return success(student_to_dict(_service().transition(student, dto, actor=request.user)))
@@ -134,6 +141,97 @@ def student_events_view(request: HttpRequest, pk: int) -> HttpResponse:
     check_perm(request, f"{_RESOURCE}:read")
     student = _get_in_scope(request, pk)
     return success([enrollment_event_to_dict(e) for e in _service().events(student)])
+
+
+# --- enrollment reasons (per-Center configurable) --------------------------
+def _reason_reject(field: str, message: str) -> ValidationException:
+    return ValidationException("Invalid input.", code="validation_error", fields={field: [message]})
+
+
+def _reason_slug(body: dict[str, Any], *, required: bool) -> str | None:
+    import re
+
+    raw = body.get("slug")
+    if raw in (None, ""):
+        if required:
+            raise _reason_reject("slug", "This field is required.")
+        return None
+    value = str_field(body, "slug", max_length=64)
+    if not re.fullmatch(r"[-a-zA-Z0-9_]+", value):
+        raise _reason_reject("slug", "Enter a valid slug (letters, numbers, hyphens, underscores).")
+    return value
+
+
+def _reason_create_data(body: dict[str, Any]) -> dict[str, Any]:
+    name = str_field(body, "name", max_length=64)
+    if not name:
+        raise _reason_reject("name", "This field is required.")
+    out: dict[str, Any] = {
+        "name": name,
+        "color": str_field(body, "color", max_length=16),
+        "is_active": bool_field(body, "is_active", default=True),
+    }
+    slug = _reason_slug(body, required=False)
+    if slug:
+        out["slug"] = slug
+    return out
+
+
+def _reason_changes(body: dict[str, Any]) -> dict[str, Any]:
+    changes: dict[str, Any] = {}
+    if "name" in body:
+        name = str_field(body, "name", max_length=64)
+        if not name:
+            raise _reason_reject("name", "This field may not be blank.")
+        changes["name"] = name
+    if "slug" in body:
+        changes["slug"] = _reason_slug(body, required=True)
+    if "color" in body:
+        changes["color"] = str_field(body, "color", max_length=16)
+    if "is_active" in body:
+        changes["is_active"] = bool_field(body, "is_active")
+    return changes
+
+
+@csrf_exempt
+@require_auth
+def enrollment_reasons_collection_view(request: HttpRequest) -> HttpResponse:
+    if request.method in ("GET", "HEAD"):
+        check_perm(request, f"{_RESOURCE}:read")
+        qs = apply_filters(
+            request,
+            _reason_service().list_reasons(),
+            filter_fields=("is_active",),
+            search_fields=("name", "slug"),
+            ordering_fields=("name",),
+            default_ordering="name",
+        )
+        items, total, page, size = paginate(request, qs)
+        return paginated([enrollment_reason_to_dict(r) for r in items], total=total, page=page, page_size=size)
+    if request.method == "POST":
+        check_perm(request, f"{_RESOURCE}:write")
+        reason = _reason_service().create(data=_reason_create_data(read_json(request)))
+        return created(enrollment_reason_to_dict(reason))
+    return error("Method not allowed.", code="method_not_allowed", status=405)
+
+
+@csrf_exempt
+@require_auth
+def enrollment_reason_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
+    read = request.method in ("GET", "HEAD")
+    check_perm(request, f"{_RESOURCE}:read" if read else f"{_RESOURCE}:write")
+    reason = _reason_service().get(pk=pk)
+    if reason is None:
+        raise NotFoundException(code="not_found")
+    if read:
+        return success(enrollment_reason_to_dict(reason))
+    if request.method in ("PUT", "PATCH"):
+        updated = _reason_service().update(reason, changes=_reason_changes(read_json(request)))
+        return success(enrollment_reason_to_dict(updated))
+    if request.method == "DELETE":
+        _reason_service().delete(reason)
+        return no_content()
+    return error("Method not allowed.", code="method_not_allowed", status=405)
 
 
 # --- collection actions ----------------------------------------------------
