@@ -103,3 +103,23 @@ def test_healthz_ready_200_when_all_healthy():
         response = HealthCheckMiddleware(_boom)(RequestFactory().get("/healthz/ready"))
     assert response.status_code == 200
     assert json.loads(response.content) == {"status": "ready"}
+
+
+def test_redis_url_setting_defined_so_get_redis_constructs():
+    """Regression (found deploying): the readiness probe + task DLQ go through the REAL
+    (unmocked) get_redis(), which reads settings.REDIS_URL — but nothing defined it, so it
+    raised AttributeError → /healthz/ready always 503 'Cache unavailable' + the observability
+    DLQ push 500'd. The other health tests mock get_redis, hiding it. Assert the setting
+    resolves and a real client constructs (lazy — no connection needed)."""
+    from django.conf import settings
+
+    from infrastructure.cache.redis_client import get_redis
+
+    assert isinstance(settings.REDIS_URL, str)
+    assert settings.REDIS_URL  # non-empty
+    get_redis.cache_clear()
+    try:
+        client = get_redis()  # must NOT raise AttributeError on settings.REDIS_URL
+        assert client is not None
+    finally:
+        get_redis.cache_clear()

@@ -345,6 +345,13 @@ SPECTACULAR_SETTINGS = {
 # False to force subprotocol-only auth (keeps tokens out of proxy/access logs).
 WEBSOCKET_ALLOW_QUERY_TOKEN = env.bool("WEBSOCKET_ALLOW_QUERY_TOKEN", default=True)
 
+# The Redis connection URL as a SETTING (not just an env read at each use site): the
+# readiness probe + task dead-letter queue go through infrastructure.cache.redis_client.
+# get_redis(), which reads `settings.REDIS_URL` — but nothing defined it, so `settings.
+# REDIS_URL` raised AttributeError → /healthz/ready always 503 "Cache unavailable" and the
+# observability DLQ push 500'd. Same env() call the cache/broker already use successfully.
+REDIS_URL = env("REDIS_URL")
+
 _channel_redis = env("CHANNEL_REDIS_URL") or env("REDIS_URL")
 CHANNEL_LAYERS = {
     "default": {
