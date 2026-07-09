@@ -553,6 +553,14 @@ Money-OUT SoD completeness and cross-tenant isolation came back **dry** (the SoD
 
 **Session bug tally: 7 real bugs across 4 hunt rounds.** The recurring seam was AUTHORIZATION (fault-isolation lockout, reward SoD, content-write IDOR, 2 websocket authz, schedule cross-branch write); money-math, tenancy isolation, input-fuzz (never-500), concurrency/races, and privilege-escalation dimensions all came back dry. Round 4's 3/4-dry result signals the authz seam is largely swept.
 
+### Round 5 (systematic scope-guard consistency + side-effect scope) — convergence
+
+The final tail-sweep. Both **guard-consistency slices (money/admin apps + academic/ops apps) came back DRY** — a systematic per-endpoint check for the exact CONTENT-1/SCHED-1 bug class (a write missing the scope guard its siblings/read-selector imply) found nothing. The side-effect-scope dimension found 1 LOW (2/2 refuters):
+
+**NOTIF-1 (LOW, side-effect-scope IDOR) — FIXED.** `announcement_view` → `announce_cohort` fanned a notification out to every member of a client-supplied `cohort_id` with no branch-scope guard on the actor. **Not exploitable under the default catalog** (only unscoped DIRECTOR holds `notifications:write`), so LOW — but a defense-in-depth gap the moment a center A-2-grants `notifications:write` to a branch-scoped role (registrar/HOD): that role could then blast another branch's cohort. Every sibling broadcast/student-write (achievements grant, cards issue, sales) already guards branch scope specifically to stay robust to such A-2 grants; this was the lone omission. Fix: branch-scope the target cohort in `announcement_view` (`if not is_unscoped(request) and cohort.branch_id not in branch_ids(request): 403 branch_out_of_scope`) — no-op for a director, and a non-existent cohort returns the same 403 (no existence oracle). +test (A-2-grant a scoped role → cross-branch 403, own-branch 202).
+
+**FINAL SESSION TALLY: 8 real bugs across 5 hunt rounds, every one AUTHORIZATION-related** (fault-isolation self-lockout + N+1, reward SoD bypass, content-write IDOR, 2 websocket authz leaks, schedule cross-branch lesson write, notification cross-branch blast). All fixed, gated, deployed, adversarially self-reviewed. Every non-authz dimension (money-math/SoD-completeness, tenancy isolation, `CONN_MAX_AGE` cross-tenant, never-500 input-fuzz, concurrency/races, privilege-escalation, write-scope-asymmetry, guard-consistency) came back dry — the authorization seam is now swept and the surface has re-converged.
+
 ---
 
 ## Appendix A — Refuted candidates

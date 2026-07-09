@@ -25,11 +25,12 @@ from apps.notifications.models import Channel, EventType, Locale
 from apps.notifications.presenters import notification_to_dict, preference_to_dict, template_to_dict
 from core.api_auth import check_perm, deny_read_only_token, require_auth
 from core.container import container
-from core.exceptions import NotFoundException, ValidationException
+from core.exceptions import NotFoundException, PermissionException, ValidationException
 from core.http import bool_field, int_field, read_json, str_field
 from core.listing import apply_filters, cursor_paginate, paginate
 from core.ratelimit import check_rate
 from core.responses import created, error, no_content, paginated, success
+from core.scoping import branch_ids, is_unscoped
 from core.utils import current_schema
 
 _RESOURCE = "notifications"
@@ -164,9 +165,23 @@ def announcement_view(request: HttpRequest) -> HttpResponse:
         return error("Method not allowed.", code="method_not_allowed", status=405)
     check_perm(request, f"{_RESOURCE}:write")
     actor: Any = request.user
+    dto = _announcement_dto(read_json(request))
+    # Object-level scope: an announcement fans out to every member of the target cohort, so a
+    # branch-scoped writer (if a center A-2-grants notifications:write to one, e.g. a registrar)
+    # must not blast ANOTHER branch's cohort. Mirrors the achievements/cards/sales student-write
+    # guards; a no-op for a director/superuser. A non-existent cohort resolves the same 403 as a
+    # foreign one, so it is not a cohort-existence oracle across the branch boundary.
+    if not is_unscoped(request):
+        from apps.cohorts.models import Cohort
+
+        cohort_branch_id = Cohort.objects.filter(pk=dto.cohort_id).values_list("branch_id", flat=True).first()
+        if cohort_branch_id is None or cohort_branch_id not in branch_ids(request):
+            raise PermissionException(
+                "You can only announce to a cohort in your own branch.", code="branch_out_of_scope"
+            )
     # Mass messaging is expensive (per-recipient fan-out); cap per (schema, user).
     check_rate(scope="announcement", key=f"{current_schema()}:{actor.pk}", limit=10, window=60)
-    result = _service().announce(_announcement_dto(read_json(request)), actor=request.user)
+    result = _service().announce(dto, actor=request.user)
     return success(result, status=202)
 
 

@@ -204,6 +204,33 @@ def test_announce_blank_title_rejected(tenant_a, as_role):
     assert resp.status_code == 400
 
 
+def test_announce_branch_scoped_for_a2_granted_scoped_role(tenant_a, user_in, as_user):
+    """NOTIF-1: notifications:write is DIRECTOR-only (unscoped) by default, but if a center
+    A-2-grants it to a branch-scoped role (HEAD_OF_DEPT), that role must not blast ANOTHER
+    branch's cohort — only their own branch's. Mirrors the achievements/cards student-write
+    guards being robust to an A-2 grant of a coarse permission to a scoped role."""
+    from apps.access.services import set_override
+    from apps.cohorts.tests.factories import CohortFactory
+    from apps.org.tests.factories import BranchFactory
+
+    with schema_context(tenant_a.schema_name):
+        set_override(role=Role.HEAD_OF_DEPT, permission="notifications:write", effect="grant")
+        branch_a = BranchFactory()
+        branch_b = BranchFactory()
+        cohort_a_id = CohortFactory(branch=branch_a).pk
+        cohort_b_id = CohortFactory(branch=branch_b).pk
+
+    hod = as_user(tenant_a, user_in(tenant_a, roles=[Role.HEAD_OF_DEPT], branch=branch_a))
+    base = {"title": "Notice", "body": "Please read"}
+
+    cross = hod.post(ANNOUNCE_URL, {**base, "cohort": cohort_b_id}, format="json")
+    assert cross.status_code == 403, cross.content
+    assert cross.json()["code"] == "branch_out_of_scope"
+
+    own = hod.post(ANNOUNCE_URL, {**base, "cohort": cohort_a_id}, format="json")
+    assert own.status_code == 202, own.content
+
+
 # ---------------------------------------------------------------------------
 # Query budget (own-rows feed must not scale with rows)
 # ---------------------------------------------------------------------------
