@@ -124,6 +124,33 @@ def test_succeeded_request_is_not_redriven(tenant_a):
         assert again.status == AIRequest.Status.SUCCEEDED  # idempotent, not reset
 
 
+def test_exam_generation_idempotency_keys_on_params(tenant_a):
+    """R3-P3: an AI run whose identity includes generation params must key on them — the
+    SAME subject with DIFFERENT exam shape produces a NEW request (not the stale first),
+    while identical params stay idempotent (a genuine retry/double-click coalesces)."""
+    from apps.ai.models import AIFeature
+    from apps.ai.services import check_and_reserve_budget
+
+    _seed_ai(tenant_a, daily=1_000_000)
+    with schema_context(tenant_a.schema_name):
+
+        def _request(**params):
+            return check_and_reserve_budget(
+                feature=AIFeature.EXAM_GENERATION,
+                estimated_tokens=5000,
+                source_app="academics",
+                source_id=42,
+                params=params,
+            )
+
+        easy = _request(exam_type="quiz", question_count=10, difficulty="easy")
+        hard = _request(exam_type="quiz", question_count=50, difficulty="hard")
+        assert hard.pk != easy.pk  # different params -> a distinct generation, not stale reuse
+
+        again = _request(exam_type="quiz", question_count=10, difficulty="easy")
+        assert again.pk == easy.pk  # identical params -> idempotent
+
+
 def test_redaction_applied_before_complete(tenant_a, monkeypatch):
     _seed_ai(tenant_a)
     from celery_tasks import ai_tasks

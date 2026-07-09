@@ -118,8 +118,25 @@ def active_prompt(feature: str) -> AIPrompt:
         ) from exc
 
 
-def make_idempotency_key(*, feature: str, source_app: str, source_id: int, version: int) -> str:
-    return f"{feature}:{source_app}:{source_id}:v{version}"
+def make_idempotency_key(
+    *, feature: str, source_app: str, source_id: int, version: int, params: dict | None = None
+) -> str:
+    """The idempotency key for one AI run.
+
+    Base key = ``feature:source_app:source_id:v{version}``. When ``params`` is given
+    (R3-P3), a stable hash of them is appended so two requests on the SAME source row but
+    with DIFFERENT generation parameters (e.g. exam difficulty / question_count) get
+    DISTINCT keys — otherwise the second silently returns the first's stale result. Passing
+    no params leaves the key unchanged (backward-compatible: the other AI features that key
+    purely on their source row are unaffected)."""
+    base = f"{feature}:{source_app}:{source_id}:v{version}"
+    if not params:
+        return base
+    import hashlib
+    import json
+
+    digest = hashlib.sha256(json.dumps(params, sort_keys=True, default=str).encode()).hexdigest()[:16]
+    return f"{base}:h{digest}"
 
 
 # Terminal-FAILURE states that a re-request may re-drive (reset to queued + re-reserve):
@@ -136,14 +153,16 @@ def check_and_reserve_budget(
     requested_by_id: int | None = None,
     source_app: str,
     source_id: int,
+    params: dict | None = None,
 ) -> AIRequest:
     """Reserve budget and create a ``queued`` ``AIRequest`` for one feature run.
 
     Accepts either ``requested_by`` (a User instance, from a request handler) or
     ``requested_by_id`` (an int, from a Celery task carrying only the id).
 
-    - Idempotent: a duplicate (feature, source_app, source_id, active version)
-      returns the existing row and reserves nothing again.
+    - Idempotent: a duplicate (feature, source_app, source_id, active version [, params])
+      returns the existing row and reserves nothing again. ``params`` (optional, R3-P3)
+      distinguishes runs on the same source row that differ by generation parameters.
     - Over-budget or disabled: records an ``AIRequest(status=denied_budget)`` and
       raises ``AIBudgetExceeded`` (429 envelope, code ``ai_budget_exceeded``).
 
@@ -153,7 +172,7 @@ def check_and_reserve_budget(
     """
     prompt = active_prompt(feature)
     key = make_idempotency_key(
-        feature=feature, source_app=source_app, source_id=source_id, version=prompt.version
+        feature=feature, source_app=source_app, source_id=source_id, version=prompt.version, params=params
     )
     actor_id = requested_by_id if requested_by_id is not None else getattr(requested_by, "id", None)
     requested = max(int(estimated_tokens), 0)
@@ -332,6 +351,10 @@ def request_exam_generation(
         requested_by=requested_by,
         source_app="academics",
         source_id=subject_id,
+        # R3-P3: the exam-shape params are part of the idempotency identity, so a second
+        # request for the same subject with a different type/count/difficulty generates a
+        # NEW exam instead of silently returning the first result.
+        params={"exam_type": exam_type, "question_count": question_count, "difficulty": difficulty},
     )
 
     if ai_request.status == AIRequest.Status.QUEUED:
