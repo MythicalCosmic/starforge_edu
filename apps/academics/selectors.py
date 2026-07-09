@@ -73,7 +73,7 @@ def scoped_exams(*, user, roles: set[str] | None = None) -> QuerySet[Exam]:
     a TEACHER is limited to exams of cohorts they teach (so the results /
     import-csv / publish write actions 404 on out-of-cohort exams via
     get_object()); everyone else sees none."""
-    qs = Exam.objects.select_related("subject", "cohort", "term")
+    qs = Exam.objects.select_related("subject", "cohort", "term", "exam_type")
     if user.is_superuser:
         return qs
     if roles is None:

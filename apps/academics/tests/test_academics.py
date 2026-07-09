@@ -16,7 +16,12 @@ from apps.academics import selectors, services
 from apps.academics.grading import display_for
 from apps.academics.models import ExamResult, Transcript
 from apps.academics.signals import grade_changed
-from apps.academics.tests.factories import ExamFactory, GradeFactory, SubjectFactory
+from apps.academics.tests.factories import (
+    ExamFactory,
+    ExamTypeFactory,
+    GradeFactory,
+    SubjectFactory,
+)
 from apps.cohorts.tests.factories import CohortFactory, CohortMembershipFactory
 from apps.org.models import CenterSettings
 from apps.org.tests.factories import BranchFactory
@@ -656,14 +661,15 @@ def test_teacher_cannot_create_exam_in_non_taught_cohort(tenant_a, user_in, as_u
         foreign_cohort: Any = CohortFactory(branch=branch)
         subject = SubjectFactory()
         term: Any = TermFactory()
+        exam_type = ExamTypeFactory()
         own_id, foreign_id = own_cohort.id, foreign_cohort.id
-        subject_id, term_id = subject.id, term.id
+        subject_id, term_id, exam_type_id = subject.id, term.id, exam_type.id
 
     client = as_user(tenant_a, teacher_user)
     base = {
         "subject": subject_id,
         "term": term_id,
-        "type": "midterm",
+        "exam_type": exam_type_id,
         "title": "Midterm",
         "exam_date": date(2026, 3, 1).isoformat(),
         "max_score": "100",
@@ -675,7 +681,41 @@ def test_teacher_cannot_create_exam_in_non_taught_cohort(tenant_a, user_in, as_u
 
     ok = client.post("/api/v1/academics/exams/", {**base, "cohort": own_id}, format="json")
     assert ok.status_code == 201
-    assert ok.json()["data"]["cohort"] == own_id
+    data = ok.json()["data"]
+    assert data["cohort"] == own_id
+    # The exam carries its per-Center type as both an id and an expanded object.
+    assert data["exam_type"] == exam_type_id
+    assert data["exam_type_detail"]["id"] == exam_type_id
+
+
+def test_manager_creates_and_lists_exam_types(as_role):
+    """Per-Center configurable exam kinds: a manager creates one (name auto-slugs),
+    a duplicate slug is rejected, and it shows up in the list."""
+    from core.permissions import Role
+
+    director, _ = as_role(Role.DIRECTOR)
+    created = director.post(
+        "/api/v1/academics/exam-types/", {"name": "Mock IELTS", "color": "#3b82f6"}, format="json"
+    )
+    assert created.status_code == 201, created.content
+    body = created.json()["data"]
+    assert body["slug"] == "mock-ielts"  # auto-derived from the label
+    assert body["name"] == "Mock IELTS"
+
+    dup = director.post("/api/v1/academics/exam-types/", {"name": "Mock IELTS"}, format="json")
+    assert dup.status_code == 400  # slug collision
+
+    listing = director.get("/api/v1/academics/exam-types/")
+    assert listing.status_code == 200
+    assert any(t["slug"] == "mock-ielts" for t in listing.json()["data"])
+
+
+def test_student_cannot_create_exam_type(as_role):
+    from core.permissions import Role
+
+    student, _ = as_role(Role.STUDENT)
+    resp = student.post("/api/v1/academics/exam-types/", {"name": "X"}, format="json")
+    assert resp.status_code == 403
 
 
 def test_teacher_cannot_recompute_grades_for_non_taught_cohort(tenant_a, user_in, as_user):

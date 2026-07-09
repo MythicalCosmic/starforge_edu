@@ -7,7 +7,7 @@ from decimal import Decimal
 
 import factory
 
-from apps.academics.models import Exam, ExamResult, Grade, Subject
+from apps.academics.models import Exam, ExamResult, ExamType, Grade, Subject
 from apps.cohorts.tests.factories import CohortFactory
 from apps.schedule.tests.factories import TermFactory
 from apps.students.tests.factories import StudentProfileFactory
@@ -21,6 +21,14 @@ class SubjectFactory(factory.django.DjangoModelFactory[Subject]):
     code = factory.Sequence(lambda n: f"subj-{n}")
 
 
+class ExamTypeFactory(factory.django.DjangoModelFactory[ExamType]):
+    class Meta:
+        model = ExamType
+
+    name = factory.Sequence(lambda n: f"Exam Type {n}")
+    slug = factory.Sequence(lambda n: f"exam-type-{n}")
+
+
 class ExamFactory(factory.django.DjangoModelFactory[Exam]):
     class Meta:
         model = Exam
@@ -28,7 +36,7 @@ class ExamFactory(factory.django.DjangoModelFactory[Exam]):
     subject = factory.SubFactory(SubjectFactory)
     cohort = factory.SubFactory(CohortFactory)
     term = factory.SubFactory(TermFactory)
-    type = Exam.Type.MIDTERM
+    exam_type = factory.SubFactory(ExamTypeFactory)
     title = factory.Sequence(lambda n: f"Exam {n}")
     exam_date = date(2026, 3, 1)
     max_score = Decimal("100")

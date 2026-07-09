@@ -6,8 +6,28 @@ from typing import Any
 
 from django.db.models import QuerySet
 
-from apps.academics.models import Exam, ExamResult, Grade, Subject, Transcript
+from apps.academics.models import Exam, ExamResult, ExamType, Grade, Subject, Transcript
 from core.interfaces import IBaseRepository
+
+
+class IExamTypeRepository(IBaseRepository[ExamType]):
+    def list_types(self) -> QuerySet[ExamType]:
+        raise NotImplementedError
+
+    def get(self, *, pk: int) -> ExamType | None:
+        raise NotImplementedError
+
+    def add(self, *, data: dict[str, Any]) -> ExamType:
+        raise NotImplementedError
+
+    def apply_changes(self, exam_type: ExamType, *, changes: dict[str, Any]) -> ExamType:
+        raise NotImplementedError
+
+    def remove(self, exam_type: ExamType) -> None:
+        raise NotImplementedError
+
+    def slug_taken(self, *, slug: str, exclude_pk: int | None = None) -> bool:
+        raise NotImplementedError
 
 
 class ISubjectRepository(IBaseRepository[Subject]):

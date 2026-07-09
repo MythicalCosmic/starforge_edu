@@ -7,7 +7,24 @@ from typing import Any
 
 from django.db.models import QuerySet
 
-from apps.academics.models import Exam, ExamResult, Grade, Subject, Transcript
+from apps.academics.models import Exam, ExamResult, ExamType, Grade, Subject, Transcript
+
+
+class IExamTypeService(ABC):
+    @abstractmethod
+    def list_types(self) -> QuerySet[ExamType]: ...
+
+    @abstractmethod
+    def get(self, *, pk: int) -> ExamType | None: ...
+
+    @abstractmethod
+    def create(self, *, data: dict[str, Any]) -> ExamType: ...
+
+    @abstractmethod
+    def update(self, exam_type: ExamType, *, changes: dict[str, Any]) -> ExamType: ...
+
+    @abstractmethod
+    def delete(self, exam_type: ExamType) -> None: ...
 
 
 class ISubjectService(ABC):

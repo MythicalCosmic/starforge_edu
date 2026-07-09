@@ -6,21 +6,24 @@ from __future__ import annotations
 from typing import Any
 
 from django.db.models import QuerySet
+from django.utils.text import slugify
 
 from apps.academics import services as domain
 from apps.academics.interfaces.repositories import (
     IExamRepository,
+    IExamTypeRepository,
     IGradeRepository,
     ISubjectRepository,
     ITranscriptRepository,
 )
 from apps.academics.interfaces.services import (
     IExamService,
+    IExamTypeService,
     IGradeService,
     ISubjectService,
     ITranscriptService,
 )
-from apps.academics.models import Exam, ExamResult, Grade, Subject, Transcript
+from apps.academics.models import Exam, ExamResult, ExamType, Grade, Subject, Transcript
 from apps.cohorts.models import Cohort
 from apps.schedule.models import Term
 from core.exceptions import ValidationException
@@ -28,6 +31,36 @@ from core.exceptions import ValidationException
 
 def _reject(field: str, message: str) -> ValidationException:
     return ValidationException("Invalid input.", code="validation_error", fields={field: [message]})
+
+
+class ExamTypeService(IExamTypeService):
+    def __init__(self, repository: IExamTypeRepository) -> None:
+        self.repository = repository
+
+    def list_types(self) -> QuerySet[ExamType]:
+        return self.repository.list_types()
+
+    def get(self, *, pk: int) -> ExamType | None:
+        return self.repository.get(pk=pk)
+
+    def create(self, *, data: dict[str, Any]) -> ExamType:
+        data = dict(data)
+        if not data.get("slug"):
+            # Auto-derive from the label so managers just type a name (LessonType parity).
+            data["slug"] = slugify(data.get("name", ""))[:64]
+        if not data["slug"]:
+            raise _reject("slug", "Could not derive a slug; provide one explicitly.")
+        if self.repository.slug_taken(slug=data["slug"]):
+            raise _reject("slug", "An exam type with this slug already exists.")
+        return self.repository.add(data=data)
+
+    def update(self, exam_type: ExamType, *, changes: dict[str, Any]) -> ExamType:
+        if "slug" in changes and self.repository.slug_taken(slug=changes["slug"], exclude_pk=exam_type.pk):
+            raise _reject("slug", "An exam type with this slug already exists.")
+        return self.repository.apply_changes(exam_type, changes=changes)
+
+    def delete(self, exam_type: ExamType) -> None:
+        self.repository.remove(exam_type)
 
 
 class SubjectService(ISubjectService):
@@ -96,7 +129,15 @@ class ExamService(IExamService):
             if not Cohort.objects.filter(pk=cohort_id).exists():
                 raise _reject("cohort", "Cohort does not exist.")
             out["cohort_id"] = cohort_id
-        for field in ("type", "title", "exam_date", "max_score", "weight"):
+        if "exam_type" in data:
+            exam_type_id = data["exam_type"]
+            if exam_type_id is None:
+                out["exam_type_id"] = None  # nullable — clearing the type
+            elif not ExamType.objects.filter(pk=exam_type_id).exists():
+                raise _reject("exam_type", "Exam type does not exist.")
+            else:
+                out["exam_type_id"] = exam_type_id
+        for field in ("title", "exam_date", "max_score", "weight"):
             if field in data:
                 out[field] = data[field]
         return out

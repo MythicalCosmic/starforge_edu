@@ -7,6 +7,7 @@ from .models import Lesson, RecurrenceRule, Term, TimeSlot
 class TermAdmin(admin.ModelAdmin):
     list_display = ("academic_year", "name", "start_date", "end_date", "is_current")
     list_filter = ("academic_year", "is_current")
+    search_fields = ("name", "academic_year")
 
 
 @admin.register(TimeSlot)

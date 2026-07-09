@@ -6,6 +6,9 @@ urlpatterns = [
     # Subjects
     path("subjects/", views.subjects_collection_view, name="subject-list"),
     path("subjects/<int:pk>/", views.subject_detail_view, name="subject-detail"),
+    # Exam types (per-Center configurable exam kinds)
+    path("exam-types/", views.exam_types_collection_view, name="exam-type-list"),
+    path("exam-types/<int:pk>/", views.exam_type_detail_view, name="exam-type-detail"),
     # Exams (+ per-student results / CSV import / publish actions)
     path("exams/", views.exams_collection_view, name="exam-list"),
     path("exams/<int:pk>/results/import-csv/", views.exam_import_csv_view, name="exam-import-csv"),

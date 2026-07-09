@@ -18,6 +18,7 @@ from django.views.decorators.csrf import csrf_exempt
 
 from apps.academics.interfaces.services import (
     IExamService,
+    IExamTypeService,
     IGradeService,
     ISubjectService,
     ITranscriptService,
@@ -26,6 +27,7 @@ from apps.academics.models import Exam
 from apps.academics.presenters import (
     exam_result_to_dict,
     exam_to_dict,
+    exam_type_to_dict,
     grade_to_dict,
     subject_to_dict,
     transcript_to_dict,
@@ -58,6 +60,10 @@ def _subject_service() -> ISubjectService:
 
 def _exam_service() -> IExamService:
     return container.resolve(IExamService)  # type: ignore[type-abstract]
+
+
+def _exam_type_service() -> IExamTypeService:
+    return container.resolve(IExamTypeService)  # type: ignore[type-abstract]
 
 
 def _grade_service() -> IGradeService:
@@ -228,6 +234,77 @@ def subject_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
     return _method_not_allowed()
 
 
+# --- exam types (per-Center configurable exam kinds) -----------------------
+
+
+def _exam_type_create_data(request: HttpRequest) -> dict[str, Any]:
+    data = read_json(request)
+    out: dict[str, Any] = {
+        "name": _str_value(_require(data, "name"), "name", max_length=64),
+        "color": _str_value(data.get("color", ""), "color", max_length=16, allow_blank=True),
+        "is_active": bool_field(data, "is_active", default=True),
+    }
+    if data.get("slug"):
+        out["slug"] = _slug_value(data["slug"], "slug", max_length=64)
+    return out
+
+
+def _exam_type_changes(request: HttpRequest) -> dict[str, Any]:
+    data = read_json(request)
+    changes: dict[str, Any] = {}
+    if "name" in data:
+        changes["name"] = _str_value(data["name"], "name", max_length=64)
+    if "slug" in data:
+        changes["slug"] = _slug_value(data["slug"], "slug", max_length=64)
+    if "color" in data:
+        changes["color"] = _str_value(data["color"], "color", max_length=16, allow_blank=True)
+    if "is_active" in data:
+        changes["is_active"] = _bool_value(data["is_active"], "is_active")
+    return changes
+
+
+@csrf_exempt
+@require_auth
+def exam_types_collection_view(request: HttpRequest) -> HttpResponse:
+    if request.method in ("GET", "HEAD"):
+        check_perm(request, "academics:read")
+        qs = apply_filters(
+            request,
+            _exam_type_service().list_types(),
+            filter_fields=("is_active",),
+            search_fields=("name", "slug"),
+            ordering_fields=("name",),
+            default_ordering="name",
+        )
+        items, total, page, size = paginate(request, qs)
+        return paginated([exam_type_to_dict(t) for t in items], total=total, page=page, page_size=size)
+    if request.method == "POST":
+        check_perm(request, "academics:write")
+        exam_type = _exam_type_service().create(data=_exam_type_create_data(request))
+        return created(exam_type_to_dict(exam_type))
+    return _method_not_allowed()
+
+
+@csrf_exempt
+@require_auth
+def exam_type_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
+    read = request.method in ("GET", "HEAD")
+    check_perm(request, "academics:read" if read else "academics:write")
+    exam_type = _exam_type_service().get(pk=pk)
+    if exam_type is None:
+        raise NotFoundException(code="not_found")
+    if read:
+        return success(exam_type_to_dict(exam_type))
+    if request.method in ("PUT", "PATCH"):
+        return success(
+            exam_type_to_dict(_exam_type_service().update(exam_type, changes=_exam_type_changes(request)))
+        )
+    if request.method == "DELETE":
+        _exam_type_service().delete(exam_type)
+        return no_content()
+    return _method_not_allowed()
+
+
 # --- exams -----------------------------------------------------------------
 
 
@@ -253,7 +330,7 @@ def _exam_create_data(request: HttpRequest) -> dict[str, Any]:
         "subject": _int_value(_require(data, "subject"), "subject"),
         "cohort": _int_value(_require(data, "cohort"), "cohort"),
         "term": _int_value(_require(data, "term"), "term"),
-        "type": _choice_value(_require(data, "type"), "type", set(Exam.Type.values)),
+        "exam_type": _int_value(_require(data, "exam_type"), "exam_type"),
         "title": _str_value(_require(data, "title"), "title", max_length=200),
         "exam_date": _date_value(_require(data, "exam_date"), "exam_date"),
     }
@@ -270,8 +347,8 @@ def _exam_changes(request: HttpRequest) -> dict[str, Any]:
         changes["cohort"] = _int_value(data["cohort"], "cohort")
     if "term" in data:
         changes["term"] = _int_value(data["term"], "term")
-    if "type" in data:
-        changes["type"] = _choice_value(data["type"], "type", set(Exam.Type.values))
+    if "exam_type" in data:
+        changes["exam_type"] = None if data["exam_type"] is None else _int_value(data["exam_type"], "exam_type")
     if "title" in data:
         changes["title"] = _str_value(data["title"], "title", max_length=200)
     if "exam_date" in data:
@@ -301,7 +378,7 @@ def exams_collection_view(request: HttpRequest) -> HttpResponse:
         qs = apply_filters(
             request,
             qs,
-            filter_fields=("subject", "cohort", "term", "type", "is_published"),
+            filter_fields=("subject", "cohort", "term", "exam_type", "is_published"),
             ordering_fields=("exam_date",),
             default_ordering="-exam_date",
         )

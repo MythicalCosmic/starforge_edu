@@ -32,18 +32,36 @@ class Subject(models.Model):
         return f"{self.code}:{self.name}"
 
 
-class Exam(models.Model):
-    class Type(models.TextChoices):
-        MIDTERM = "midterm", _("Midterm")
-        FINAL = "final", _("Final")
-        QUIZ = "quiz", _("Quiz")
-        PROJECT = "project", _("Project")
-        ORAL = "oral", _("Oral")
+class ExamType(models.Model):
+    """Dynamic, manager-created exam kind (per-Center configurable): "Midterm",
+    "Final", "Quiz", "Speaking", "Mock IELTS", … — every education center names
+    its assessments differently, so the kinds are data, not a hardcoded enum. The
+    five defaults (midterm/final/quiz/project/oral) are seeded per tenant. Mirrors
+    ``schedule.LessonType``."""
 
+    name = models.CharField(max_length=64)
+    slug = models.SlugField(max_length=64, unique=True)
+    color = models.CharField(max_length=16, blank=True)  # optional UI hint, e.g. "#3b82f6"
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("name",)
+
+    def __str__(self) -> str:  # pragma: no cover
+        return self.name
+
+
+class Exam(models.Model):
     subject = models.ForeignKey(Subject, on_delete=models.PROTECT, related_name="exams")
     cohort = models.ForeignKey("cohorts.Cohort", on_delete=models.PROTECT, related_name="exams")
     term = models.ForeignKey("schedule.Term", on_delete=models.PROTECT, related_name="exams")
-    type = models.CharField(max_length=10, choices=Type.choices)
+    # Per-Center configurable kind (SET_NULL preserves the exam if a center retires a
+    # type, like schedule.Lesson.lesson_type).
+    exam_type = models.ForeignKey(
+        ExamType, on_delete=models.SET_NULL, null=True, blank=True, related_name="exams"
+    )
     title = models.CharField(max_length=200)
     exam_date = models.DateField()
     max_score = models.DecimalField(max_digits=6, decimal_places=2, default=100)

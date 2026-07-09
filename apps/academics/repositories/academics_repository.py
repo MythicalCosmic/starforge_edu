@@ -9,12 +9,42 @@ from django.db.models import QuerySet
 from apps.academics import selectors
 from apps.academics.interfaces.repositories import (
     IExamRepository,
+    IExamTypeRepository,
     IGradeRepository,
     ISubjectRepository,
     ITranscriptRepository,
 )
-from apps.academics.models import Exam, ExamResult, Grade, Subject, Transcript
+from apps.academics.models import Exam, ExamResult, ExamType, Grade, Subject, Transcript
 from core.repositories import BaseRepository
+
+
+class ExamTypeRepository(BaseRepository[ExamType], IExamTypeRepository):
+    model = ExamType
+
+    def list_types(self) -> QuerySet[ExamType]:
+        return ExamType.objects.all()
+
+    def get(self, *, pk: int) -> ExamType | None:
+        return ExamType.objects.filter(pk=pk).first()
+
+    def add(self, *, data: dict[str, Any]) -> ExamType:
+        return ExamType.objects.create(**data)
+
+    def apply_changes(self, exam_type: ExamType, *, changes: dict[str, Any]) -> ExamType:
+        for field, value in changes.items():
+            setattr(exam_type, field, value)
+        if changes:
+            exam_type.save(update_fields=[*changes.keys(), "updated_at"])
+        return exam_type
+
+    def remove(self, exam_type: ExamType) -> None:
+        exam_type.delete()
+
+    def slug_taken(self, *, slug: str, exclude_pk: int | None = None) -> bool:
+        qs = ExamType.objects.filter(slug=slug)
+        if exclude_pk is not None:
+            qs = qs.exclude(pk=exclude_pk)
+        return qs.exists()
 
 
 class SubjectRepository(BaseRepository[Subject], ISubjectRepository):
