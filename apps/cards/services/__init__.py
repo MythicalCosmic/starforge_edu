@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import secrets
 from decimal import Decimal, InvalidOperation
 
@@ -11,6 +12,8 @@ from django.utils.translation import gettext_lazy as _
 
 from apps.cards.models import Card, CardScan, CardType, Wallet, WalletTransaction
 from core.exceptions import NotFoundException, UnprocessableEntity
+
+logger = logging.getLogger(__name__)
 
 _CENT = Decimal("0.01")
 
@@ -77,6 +80,22 @@ def scan_card(*, code: str, scanned_by=None) -> dict:
     valid = card.is_active
     scan = CardScan.objects.create(card=card, scanned_by=scanned_by, was_valid=valid)
     student = card.student
+    # F12/F15: a valid scan feeds attendance — mark the student PRESENT on the lesson they
+    # are arriving for (never overrides a teacher's mark, never creates an absence). This is
+    # best-effort: an attendance hiccup must NEVER fail the door check-in, and it runs in a
+    # savepoint so a DB error there can't poison the scan's transaction.
+    attendance_lesson_id = None
+    if valid:
+        try:
+            from apps.attendance.services import mark_present_from_scan
+
+            with transaction.atomic():
+                record = mark_present_from_scan(
+                    student=student, at=scan.scanned_at, marked_by=scanned_by
+                )
+            attendance_lesson_id = record.lesson_id if record is not None else None
+        except Exception:
+            logger.exception("card-scan attendance marking failed for student %s", student.pk)
     return {
         "scan_id": scan.pk,
         "valid": valid,
@@ -84,6 +103,7 @@ def scan_card(*, code: str, scanned_by=None) -> dict:
         "student_name": (student.user.get_full_name() if student.user else "") or "",
         "card_type": card.card_type.name,
         "scanned_at": scan.scanned_at,
+        "attendance_lesson": attendance_lesson_id,
     }
 
 

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
@@ -47,6 +47,63 @@ def _assert_can_mark(lesson: Lesson, actor, roles: set[str]) -> None:
     raise PermissionException(
         _("Only the lesson's teacher can mark its attendance."), code="not_lesson_teacher"
     )
+
+
+# F12/F15: a door card-scan checks a student in; the window around the scan time within
+# which it matches (and marks present on) the lesson the student is arriving for.
+SCAN_ATTENDANCE_WINDOW = dt.timedelta(minutes=30)
+
+
+def mark_present_from_scan(*, student, at=None, marked_by=None) -> AttendanceRecord | None:
+    """A card scan at the door marks the student PRESENT on their active-cohort lesson
+    happening around ``at`` (±``SCAN_ATTENDANCE_WINDOW``). Purely ADDITIVE and safe for the
+    money path (attendance feeds the A-1 absence-deduction):
+
+    - it NEVER overrides an existing mark — a teacher's mark always wins;
+    - it NEVER creates an absence — a scan can only record presence, never a penalty (and,
+      by marking present, it also stops the auto-absent sweep from penalising a student who
+      was actually here).
+
+    Returns the created ``AttendanceRecord``, or ``None`` when there is no matching lesson
+    or the lesson is already marked. Best-effort by contract — the caller (``scan_card``)
+    must not let a failure here break the door check-in."""
+    at = at or timezone.now()
+    cohort_ids = list(
+        CohortMembership.objects.filter(student=student, end_date__isnull=True).values_list(
+            "cohort_id", flat=True
+        )
+    )
+    if not cohort_ids:
+        return None
+    lesson = (
+        Lesson.objects.filter(
+            cohort_id__in=cohort_ids,
+            status=Lesson.Status.SCHEDULED,
+            starts_at__lte=at + SCAN_ATTENDANCE_WINDOW,
+            ends_at__gte=at - SCAN_ATTENDANCE_WINDOW,
+        )
+        .order_by("starts_at")
+        .first()
+    )
+    if lesson is None:
+        return None
+    if AttendanceRecord.objects.filter(student=student, lesson=lesson).exists():
+        return None  # never override an existing (teacher or prior) mark
+    try:
+        # Savepoint so a lost race (the partial unique on (student, lesson)) rolls back just
+        # this insert, not the caller's whole transaction.
+        with transaction.atomic():
+            return AttendanceRecord.objects.create(
+                student=student,
+                lesson=lesson,
+                status=AttendanceRecord.Status.PRESENT,
+                arrived_at=at,
+                marked_by=marked_by,
+                auto_marked=True,
+                note="card_scan",
+            )
+    except IntegrityError:
+        return None  # a concurrent mark won the (student, lesson) unique race
 
 
 def _assert_within_correction_window(lesson: Lesson, actor, roles: set[str], settings) -> None:
