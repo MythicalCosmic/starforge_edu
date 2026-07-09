@@ -120,10 +120,11 @@ def _validate_question(question_type: str, options: Any, correct_answer: Any) ->
             raise ValidationException(
                 _("A true/false question's answer must be true or false."), code="answer_not_boolean"
             )
-    elif question_type == _QT.WRITING:
+    elif question_type in PlacementQuestion.HUMAN_GRADED_TYPES:
+        # writing / reading / listening / speaking are all human-marked: no answer key.
         if correct_answer is not None:
             raise ValidationException(
-                _("A writing question is marked by a person and has no answer key."),
+                _("This question is marked by a person and has no answer key."),
                 code="writing_has_no_answer",
             )
     else:
@@ -157,6 +158,7 @@ def add_question(
     correct_answer: Any = None,
     points: int = 1,
     order: int | None = None,
+    media: dict | None = None,
 ) -> PlacementQuestion:
     """Append a question. Only a DRAFT test can be edited. The parent row is locked
     so the status check and the next-slot `order` computation are race-free (two
@@ -167,6 +169,7 @@ def add_question(
     options = options if options is not None else []
     _validate_question(question_type, options, correct_answer)
     _assert_type_allowed(question_type)  # F8-1: respect the center's enabled types
+    media = _clean_media(media)
     if order is None:
         last = test.questions.order_by("-order").first()
         order = (last.order + 1) if last else 0
@@ -178,7 +181,18 @@ def add_question(
         correct_answer=correct_answer,
         points=points,
         order=order,
+        media=media,
     )
+
+
+def _clean_media(media: Any) -> dict:
+    """Media is a free-form object shown to the taker with the question (a listening audio
+    URL/key, a reading passage, ...). Reject a non-object so `.media` is always a dict."""
+    if media is None:
+        return {}
+    if not isinstance(media, dict):
+        raise ValidationException(_("media must be an object."), code="invalid_media")
+    return media
 
 
 @transaction.atomic
@@ -643,7 +657,11 @@ def apply_generated_questions(*, test_id: int, output_text: str) -> int:
         if allowed and question_type not in allowed:
             continue  # the model proposed a type this center has disabled — drop it
         options = item.get("options") or []
-        correct = None if question_type == _QT.WRITING else item.get("correct_answer")
+        correct = (
+            None
+            if question_type in PlacementQuestion.HUMAN_GRADED_TYPES
+            else item.get("correct_answer")
+        )
         # Coerce a stringified boolean the model may emit for true/false.
         if (
             question_type == _QT.TRUE_FALSE
@@ -786,15 +804,16 @@ def mark_writing_manually(*, attempt: PlacementAttempt, marks: list[dict]) -> Pl
         raise UnprocessableEntity(
             _("Only a submitted attempt can be marked."), code="attempt_not_graded"
         )
+    # Any human-marked type (writing + the reading/listening/speaking media skills).
     writing_answers = {
         a.question_id: a
         for a in attempt.answers.select_related("question").filter(
-            question__question_type=_QT.WRITING
+            question__question_type__in=PlacementQuestion.HUMAN_GRADED_TYPES
         )
     }
     if not writing_answers:
         raise UnprocessableEntity(
-            _("This attempt has no writing answers to mark."), code="no_writing_answers"
+            _("This attempt has no manually-marked answers to mark."), code="no_writing_answers"
         )
     seen: set[int] = set()
     updates: list[PlacementAnswer] = []

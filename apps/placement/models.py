@@ -60,19 +60,37 @@ class PlacementQuestion(models.Model):
         SHORT_ANSWER = "short_answer", _("Short answer (typed, auto-graded)")
         TRUE_FALSE = "true_false", _("True / false")
         WRITING = "writing", _("Writing (manually marked)")
+        # F8-1: media-based skills, all marked by a human (no auto answer key). READING
+        # carries a passage (in `media`) the taker reads; LISTENING an audio clip they hear;
+        # SPEAKING a prompt they answer by uploading audio (the answer value is that key).
+        READING = "reading", _("Reading (manually marked)")
+        LISTENING = "listening", _("Listening (audio prompt, manually marked)")
+        SPEAKING = "speaking", _("Speaking (audio answer, manually marked)")
 
-    # Auto-gradable types carry a correct_answer; WRITING is marked by a human later.
+    # Auto-gradable types carry a correct_answer; the others are marked by a human later.
     AUTO_GRADED_TYPES = (
         QuestionType.SINGLE_CHOICE,
         QuestionType.MULTIPLE_CHOICE,
         QuestionType.SHORT_ANSWER,
         QuestionType.TRUE_FALSE,
     )
+    # Human-marked (no answer key): writing + the three media skills. These never
+    # auto-grade; a person scores them via the manual-mark endpoint (F8-3).
+    HUMAN_GRADED_TYPES = (
+        QuestionType.WRITING,
+        QuestionType.READING,
+        QuestionType.LISTENING,
+        QuestionType.SPEAKING,
+    )
 
     test = models.ForeignKey(PlacementTest, on_delete=models.CASCADE, related_name="questions")
     prompt = models.TextField()
     question_type = models.CharField(max_length=16, choices=QuestionType.choices)
     options = models.JSONField(default=list, blank=True)  # [str] for single/multiple_choice
+    # F8-1: type-specific media shown to the taker WITH the question (part of the prompt,
+    # NOT the answer key) — e.g. {"audio_url": "..."} for listening, {"passage": "..."} for
+    # reading. Empty for the non-media types. Returned in both the staff and the taker view.
+    media = models.JSONField(default=dict, blank=True)
     # str (single_choice option) / [str] (the correct subset for multiple_choice; the
     # list of acceptable answers for short_answer) / bool (true_false) / null (writing).
     # The "answer key" that F1-6 auto-grading scores against; staff-only (never sent to leads).

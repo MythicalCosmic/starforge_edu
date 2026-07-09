@@ -344,6 +344,7 @@ def test_add_question_view(request: HttpRequest, pk: int) -> HttpResponse:
         options=data.get("options", []),  # the domain validates list-ness + semantics
         correct_answer=data.get("correct_answer"),
         points=_points_value(data),
+        media=data.get("media"),  # the domain validates dict-ness (F8-1 media questions)
     )
     return created(placement_question_to_dict(question))
 

@@ -34,6 +34,7 @@ def placement_question_to_dict(q: PlacementQuestion) -> dict[str, Any]:
         "prompt": q.prompt,
         "question_type": q.question_type,
         "options": q.options,
+        "media": q.media,
         "correct_answer": q.correct_answer,
         "points": q.points,
         "order": q.order,
@@ -41,12 +42,14 @@ def placement_question_to_dict(q: PlacementQuestion) -> dict[str, Any]:
 
 
 def attempt_question_to_dict(q: PlacementQuestion) -> dict[str, Any]:
-    """Key-free question — what a test-taker sees while sitting (no correct_answer)."""
+    """Key-free question — what a test-taker sees while sitting (no correct_answer). `media`
+    IS included: the audio/passage is part of the question the taker must answer."""
     return {
         "id": q.id,
         "prompt": q.prompt,
         "question_type": q.question_type,
         "options": q.options,
+        "media": q.media,
         "points": q.points,
         "order": q.order,
     }
