@@ -19,8 +19,22 @@ from __future__ import annotations
 
 import asyncio
 
+from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
 from django.contrib.auth.models import AnonymousUser
+from django_tenants.utils import get_public_schema_name, schema_context
+
+
+@database_sync_to_async
+def _session_still_valid(raw_token: str, schema: str | None) -> bool:
+    """Re-validate a session-key token inside its tenant schema (mirrors the WS
+    middleware's ``_user_from_token`` schema switch on asgiref's executor thread).
+    False -> the session was revoked / expired, or the user was deactivated, AFTER
+    the socket connected."""
+    from core.session_auth import validate_session_key
+
+    with schema_context(schema or get_public_schema_name()):
+        return validate_session_key(raw_token) is not None
 
 # Server ping cadence and tolerance. Class attributes so tests can patch the
 # interval down (a 30s real interval would make the heartbeat tests glacial).
@@ -86,6 +100,12 @@ class HeartbeatConsumerMixin(AsyncJsonWebsocketConsumer):
         try:
             while True:
                 await asyncio.sleep(self.HEARTBEAT_INTERVAL)
+                # Re-authorize the LIVE socket each cycle (R1-05): a session revoked/
+                # expired after connect (force-logout, password change, deactivation), or a
+                # revoked role/branch on a scoped consumer, must terminate the stream — not
+                # keep delivering the tenant's realtime feed until the client disconnects.
+                if not await self._reauthorize():
+                    return
                 # The ping we are about to send counts against the budget until a
                 # pong clears it. Two pings sent with no intervening pong = close.
                 self._missed_pings += 1
@@ -98,6 +118,27 @@ class HeartbeatConsumerMixin(AsyncJsonWebsocketConsumer):
                 await self.send_json({"type": "ping"})
         except asyncio.CancelledError:  # pragma: no cover - normal on disconnect
             raise
+
+    async def _reauthorize(self) -> bool:
+        """Re-check the live socket's authorization. On failure it discards groups, closes
+        the socket, and returns False: 4401 when the session is gone (force-logout /
+        expiry / deactivation), 4403 when the consumer's own scope check now fails."""
+        token = self.scope.get("_ws_token")
+        if token is not None and not await _session_still_valid(token, self._schema()):
+            await self._discard_groups()
+            await self.close(code=CLOSE_UNAUTHORIZED)
+            return False
+        if not await self._still_authorized():
+            await self._discard_groups()
+            await self.close(code=CLOSE_FORBIDDEN)
+            return False
+        return True
+
+    async def _still_authorized(self) -> bool:
+        """Overridable per-consumer authorization re-check, run every heartbeat. Defaults to
+        no extra check beyond the session (any authenticated user stays). A branch/role-
+        scoped consumer (e.g. attendance) overrides this to drop a now-unauthorized socket."""
+        return True
 
     async def receive(self, text_data=None, bytes_data=None, **kwargs):
         # Drop an oversized inbound frame undecoded (DoS guard) before the JSON

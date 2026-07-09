@@ -77,9 +77,20 @@ class AttendanceConsumer(HeartbeatConsumerMixin):
             await self.close(code=CLOSE_FORBIDDEN)
             return
 
+        self._cohort_id = cohort_id  # remembered so the heartbeat can re-check scope (R1-05)
         await self.accept(subprotocol=accepted_subprotocol(self.scope))
         await self.join_group(f"{schema}.cohort.{cohort_id}")
         await self.start_heartbeat()
+
+    async def _still_authorized(self) -> bool:
+        """R1-05: re-run the connect-time branch/role gate each heartbeat, so a teacher
+        whose role or branch membership is revoked mid-session is dropped (close 4403),
+        not left watching the cohort's live marks."""
+        user = self._authed_user()
+        schema = self._schema()
+        if user is None or schema is None:
+            return False
+        return await _can_watch_cohort(schema=schema, user_id=user.pk, cohort_id=self._cohort_id)
 
     async def attendance_update(self, event: dict) -> None:
         """Relay a producer payload (group_send type ``attendance.update``)."""

@@ -70,6 +70,10 @@ class TenantAwareJWTAuthMiddleware(BaseMiddleware):
         token = self._extract_token(scope)
         scope["user"] = await _user_from_token(token, tenant) if token else AnonymousUser()
         scope["tenant"] = tenant
+        # Stash the raw session-key so the consumer can RE-validate it on each heartbeat
+        # (R1-05): connect-time auth alone would let a force-logged-out / revoked session
+        # keep receiving the live stream until it happens to disconnect.
+        scope["_ws_token"] = token
         return await super().__call__(scope, receive, send)
 
     @staticmethod

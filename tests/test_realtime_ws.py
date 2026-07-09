@@ -411,6 +411,93 @@ async def test_heartbeat_pong_sustains(tenant_a, user_in, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# R1-05 — post-connect revocation: a live socket is re-authorized each heartbeat
+# --------------------------------------------------------------------------- #
+@pytest.mark.channels
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_revoked_session_closes_live_socket_4401(tenant_a, user_in, monkeypatch):
+    """A session revoked AFTER connect (force-logout / password change) terminates the live
+    socket on the next heartbeat cycle (close 4401), and its group membership is discarded
+    — connect-time auth alone would keep streaming to a de-authorized user."""
+    from infrastructure.websocket import consumers as ws_consumers
+
+    monkeypatch.setattr(ws_consumers.HeartbeatConsumerMixin, "HEARTBEAT_INTERVAL", 0.05)
+
+    @sync_to_async
+    def _mint():
+        user = user_in(tenant_a)
+        return user.pk, _mint_access(tenant_a, user)
+
+    user_pk, token = await _mint()
+    comm, connected, _ = await _connect("/ws/notifications/", HOST_A, token)
+    assert connected
+
+    @sync_to_async
+    def _revoke():
+        from core.session_auth import revoke_all_for_user
+
+        with schema_context(tenant_a.schema_name):
+            revoke_all_for_user(user_pk)
+
+    await _revoke()
+
+    closed_code = None
+    for _ in range(20):
+        msg = await comm.receive_output(timeout=2)
+        if msg["type"] == "websocket.close":
+            closed_code = msg.get("code")
+            break
+    assert closed_code == 4401
+
+    # Group membership discarded: a send to the user group now reaches nothing.
+    await _group_send(
+        f"{tenant_a.schema_name}.user.{user_pk}", {"type": "notification.message", "id": 9}
+    )
+    assert await comm.receive_nothing(timeout=0.3)
+
+
+@pytest.mark.channels
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_attendance_role_revoked_closes_live_socket_4403(tenant_a, monkeypatch):
+    """A branch/role-scoped socket is re-checked each heartbeat: a teacher whose role
+    membership is revoked mid-session is dropped (close 4403), not left watching the
+    cohort's live attendance — the session itself is still valid, so this is the scope
+    re-check, distinct from the 4401 session-revocation path."""
+    from infrastructure.websocket import consumers as ws_consumers
+
+    monkeypatch.setattr(ws_consumers.HeartbeatConsumerMixin, "HEARTBEAT_INTERVAL", 0.05)
+
+    cohort_id, teacher_pk, token = await sync_to_async(_make_cohort_with_teacher)(
+        tenant_a, teacher_in_branch=True
+    )
+    comm, connected, _ = await _connect(f"/ws/cohorts/{cohort_id}/attendance/", HOST_A, token)
+    assert connected
+
+    @sync_to_async
+    def _revoke_role():
+        from django.utils import timezone
+
+        from apps.users.models import RoleMembership
+
+        with schema_context(tenant_a.schema_name):
+            RoleMembership.objects.filter(user_id=teacher_pk, revoked_at__isnull=True).update(
+                revoked_at=timezone.now()
+            )
+
+    await _revoke_role()
+
+    closed_code = None
+    for _ in range(20):
+        msg = await comm.receive_output(timeout=2)
+        if msg["type"] == "websocket.close":
+            closed_code = msg.get("code")
+            break
+    assert closed_code == 4403
+
+
+# --------------------------------------------------------------------------- #
 # Disconnect cleanup — no group leak
 # --------------------------------------------------------------------------- #
 @pytest.mark.channels
