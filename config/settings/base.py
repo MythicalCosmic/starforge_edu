@@ -201,6 +201,10 @@ MIDDLEWARE = [
     "apps.billing.middleware.SubscriptionGateMiddleware",
     # A resolved-but-inactive tenant returns 503 (Lane B, after tenant resolution).
     "core.middleware.InactiveTenantMiddleware",
+    # Per-app fault isolation: a disabled app (or one whose hard dependency is down)
+    # answers a clean 503 so one app never falls the whole API; a degraded app (soft
+    # dependency down) is served with a `warnings` list. Runs after tenant resolution.
+    "core.middleware.AppAvailabilityMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.locale.LocaleMiddleware",
@@ -344,6 +348,11 @@ SPECTACULAR_SETTINGS = {
 # Allow the WS ?token= auth fallback (default on for client compatibility). Set
 # False to force subprotocol-only auth (keeps tokens out of proxy/access logs).
 WEBSOCKET_ALLOW_QUERY_TOKEN = env.bool("WEBSOCKET_ALLOW_QUERY_TOKEN", default=True)
+
+# Fault isolation (core.availability): app labels turned OFF at boot (ops default). A
+# director can additionally toggle apps at runtime via /api/v1/org/system/apps/ (a
+# cache-backed override). A disabled app's endpoints answer 503 without falling the rest.
+DISABLED_APPS = env.list("DISABLED_APPS", default=[])
 
 # The Redis connection URL as a SETTING (not just an env read at each use site): the
 # readiness probe + task dead-letter queue go through infrastructure.cache.redis_client.

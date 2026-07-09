@@ -10,6 +10,7 @@ from apps.org.interfaces.services import ICenterSettingsService
 from apps.org.presenters import settings_to_dict
 from core.api_auth import check_perm, require_auth
 from core.container import container
+from core.exceptions import ValidationException
 from core.http import read_json
 from core.responses import error, success
 
@@ -29,4 +30,30 @@ def settings_view(request: HttpRequest) -> HttpResponse:
     if request.method in ("PATCH", "PUT"):
         check_perm(request, f"{_RESOURCE}:write")
         return success(settings_to_dict(_service().update(read_json(request))))
+    return error("Method not allowed.", code="method_not_allowed", status=405)
+
+
+@csrf_exempt
+@require_auth
+def system_availability_view(request: HttpRequest) -> HttpResponse:
+    """Fault-isolation control (core.availability). GET the status of every app (up /
+    degraded / disabled / unavailable, with warnings); PATCH ``{"disabled": [app, ...]}`` to
+    turn apps off for THIS center at runtime (a disabled app 503s without falling the rest).
+    org:read to view, org:write to change."""
+    from core.availability import set_tenant_disabled_apps, system_status
+
+    if request.method in ("GET", "HEAD"):
+        check_perm(request, f"{_RESOURCE}:read")
+        return success({"apps": system_status()})
+    if request.method in ("PATCH", "PUT"):
+        check_perm(request, f"{_RESOURCE}:write")
+        raw = read_json(request).get("disabled", [])
+        if not isinstance(raw, list) or any(not isinstance(a, str) for a in raw):
+            raise ValidationException(
+                "disabled must be a list of app labels.",
+                code="validation_error",
+                fields={"disabled": ["Must be a list of app-label strings."]},
+            )
+        effective = set_tenant_disabled_apps(set(raw))
+        return success({"disabled": sorted(effective), "apps": system_status()})
     return error("Method not allowed.", code="method_not_allowed", status=405)

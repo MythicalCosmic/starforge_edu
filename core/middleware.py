@@ -360,3 +360,73 @@ class JsonErrorResponseMiddleware:
         response.content = json.dumps(_error_envelope(response.status_code)).encode("utf-8")
         response["Content-Type"] = "application/json"
         return response
+
+
+class AppAvailabilityMiddleware:
+    """Per-app fault isolation (see ``core.availability``).
+
+    A disabled app — or one whose HARD dependency is down — answers a clean
+    ``503 service_unavailable`` JSON, so ONE app going down never takes the rest of the API
+    with it. An app running DEGRADED (a SOFT dependency down) is served normally but its JSON
+    success envelope gains a ``warnings`` list naming what's degraded. Only touches
+    ``/api/v1/<mount>/`` routes; ``admin``/``schema``/health and unmanaged paths pass through.
+    """
+
+    _API_PREFIX = "/api/v1/"
+
+    def __init__(self, get_response: GetResponse) -> None:
+        self.get_response = get_response
+
+    def __call__(self, request: HttpRequest) -> HttpResponse:
+        outcome = self._resolve(request)
+        if isinstance(outcome, HttpResponse):  # 503 short-circuit for a down app
+            return outcome
+        response = self.get_response(request)
+        if outcome:  # a non-empty warnings list -> the app is degraded
+            self._inject_warnings(response, outcome)
+        return response
+
+    def _resolve(self, request: HttpRequest):
+        """A 503 ``HttpResponse`` to short-circuit a down app, or a (possibly empty) warnings
+        list / ``None`` to proceed."""
+        from core.availability import (
+            STATUS_DISABLED,
+            STATUS_UNAVAILABLE,
+            app_for_mount,
+            resolve_status,
+        )
+
+        path = request.path
+        if not path.startswith(self._API_PREFIX):
+            return None
+        mount = path[len(self._API_PREFIX) :].split("/", 1)[0]
+        app = app_for_mount(mount)
+        if app is None:
+            return None
+        status, warnings = resolve_status(app)
+        if status in (STATUS_DISABLED, STATUS_UNAVAILABLE):
+            detail = warnings[0] if warnings else f"The {app} service is currently unavailable."
+            return JsonResponse(
+                {"error": {"code": "service_unavailable", "detail": detail}}, status=503
+            )
+        return warnings  # degraded -> non-empty; fully up -> empty
+
+    @staticmethod
+    def _inject_warnings(response: HttpResponse, warnings: list[str]) -> None:
+        """Add a ``warnings`` key to a JSON SUCCESS envelope; leave errors, webhooks,
+        streaming, and non-JSON bodies untouched."""
+        if getattr(response, "streaming", False) or response.status_code >= 400:
+            return
+        if "application/json" not in response.get("Content-Type", ""):
+            return
+        import json
+
+        try:
+            body = json.loads(response.content)
+        except (ValueError, TypeError):
+            return
+        if not isinstance(body, dict) or "success" not in body:
+            return
+        body["warnings"] = warnings
+        response.content = json.dumps(body).encode("utf-8")
+        response["Content-Length"] = str(len(response.content))
