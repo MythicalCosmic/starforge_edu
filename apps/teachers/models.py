@@ -35,3 +35,35 @@ class TeacherProfile(models.Model):
 
     def __str__(self) -> str:  # pragma: no cover
         return f"teacher#{self.user_id}"
+
+
+class PayoutPolicy(models.Model):
+    """F13-1 — a teacher's DYNAMIC pay rule, configured per teacher via the API. Every
+    education centre pays differently (hourly, a % of the tuition their students actually
+    pay, a flat monthly wage), so the METHOD + its parameters are data, not code. A
+    salary-prep run COMPUTES the amount from this policy for a period, then routes it
+    through the A-1 approvals engine (kind=salary_prep) for a manager to approve and a
+    cashier to disburse — the teacher never sets or pays their own salary. One policy per
+    teacher (their current active rule)."""
+
+    class Method(models.TextChoices):
+        HOURLY = "hourly", _("Per taught hour")
+        PERCENT_OF_TUITION = "percent_of_collected_tuition", _("% of collected tuition")
+        FLAT_MONTHLY = "flat_monthly", _("Flat amount per period")
+
+    teacher = models.OneToOneField(
+        TeacherProfile, on_delete=models.CASCADE, related_name="payout_policy"
+    )
+    method = models.CharField(max_length=32, choices=Method.choices)
+    # Per taught hour (HOURLY).
+    hourly_rate_uzs = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    # Flat amount for the whole period (FLAT_MONTHLY).
+    flat_amount_uzs = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    # 0-100 % of tuition collected from the teacher's students (PERCENT_OF_TUITION).
+    tuition_percent = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self) -> str:  # pragma: no cover
+        return f"payout#{self.teacher_id}:{self.method}"

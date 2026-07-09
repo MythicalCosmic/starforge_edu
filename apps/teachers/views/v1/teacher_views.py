@@ -82,6 +82,74 @@ def teacher_dashboard_view(request: HttpRequest) -> HttpResponse:
     return success(_service().dashboard(request.user, get_user_roles(request)))
 
 
+def _teacher_in_scope(request: HttpRequest, pk: int) -> TeacherProfile:
+    teacher = _service().get(pk)
+    if teacher is None:
+        raise NotFoundException(code="not_found")
+    assert_in_branch_scope(request, teacher)
+    return teacher
+
+
+@csrf_exempt
+@require_auth
+def teacher_payout_policy_view(request: HttpRequest, pk: int) -> HttpResponse:
+    """F13-1: GET / set a teacher's dynamic pay rule (method + params). teachers:read to
+    view, teachers:write to configure — the manager sets HOW the teacher is paid."""
+    from apps.teachers.models import PayoutPolicy
+    from apps.teachers.presenters import payout_policy_to_dict
+
+    read = request.method in ("GET", "HEAD")
+    check_perm(request, f"{_RESOURCE}:read" if read else f"{_RESOURCE}:write")
+    teacher = _teacher_in_scope(request, pk)
+    if read:
+        policy = PayoutPolicy.objects.filter(teacher=teacher).first()
+        if policy is None:
+            raise NotFoundException("This teacher has no payout policy yet.", code="no_payout_policy")
+        return success(payout_policy_to_dict(policy))
+    if request.method in ("PUT", "POST"):
+        from apps.teachers.services import set_payout_policy
+
+        body = read_json(request)
+        policy = set_payout_policy(
+            teacher=teacher,
+            method=str_field(body, "method"),
+            hourly_rate_uzs=body.get("hourly_rate_uzs"),
+            flat_amount_uzs=body.get("flat_amount_uzs"),
+            tuition_percent=body.get("tuition_percent"),
+            is_active=bool_field(body, "is_active", default=True),
+        )
+        return success(payout_policy_to_dict(policy))
+    return error("Method not allowed.", code="method_not_allowed", status=405)
+
+
+@csrf_exempt
+@require_auth
+def teacher_prepare_salary_view(request: HttpRequest, pk: int) -> HttpResponse:
+    """F13-1: compute the teacher's payout for a period from their policy and raise it as an
+    A-1 salary-prep request (a manager then approves + a cashier disburses). teachers:write."""
+    if request.method != "POST":
+        return error("Method not allowed.", code="method_not_allowed", status=405)
+    check_perm(request, f"{_RESOURCE}:write")
+    teacher = _teacher_in_scope(request, pk)
+    body = read_json(request)
+    start = _date(body, "period_start")
+    end = _date(body, "period_end")
+    if start is None or end is None:
+        return validation_error({"period_start": ["period_start and period_end are required."]})
+    from apps.teachers.services import prepare_salary
+
+    req = prepare_salary(teacher=teacher, period_start=start, period_end=end, requested_by=request.user)
+    return created(
+        {
+            "request_id": req.pk,
+            "kind": req.kind,
+            "amount_uzs": str(req.amount_uzs),
+            "status": req.status,
+            "breakdown": req.payload.get("breakdown"),
+        }
+    )
+
+
 # --- helpers ---------------------------------------------------------------
 def _list(request: HttpRequest) -> HttpResponse:
     qs = scope_to_branches(request, _service().list())

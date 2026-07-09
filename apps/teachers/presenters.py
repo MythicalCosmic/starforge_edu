@@ -4,8 +4,23 @@ from __future__ import annotations
 
 from typing import Any
 
-from apps.teachers.models import TeacherProfile
+from apps.teachers.models import PayoutPolicy, TeacherProfile
 from apps.users.presenters import user_brief
+
+
+def payout_policy_to_dict(policy: PayoutPolicy) -> dict[str, Any]:
+    def _d(v):
+        return str(v) if v is not None else None
+
+    return {
+        "teacher": policy.teacher_id,
+        "method": policy.method,
+        "hourly_rate_uzs": _d(policy.hourly_rate_uzs),
+        "flat_amount_uzs": _d(policy.flat_amount_uzs),
+        "tuition_percent": _d(policy.tuition_percent),
+        "is_active": policy.is_active,
+        "updated_at": policy.updated_at.isoformat(),
+    }
 
 
 def teacher_to_dict(teacher: TeacherProfile) -> dict[str, Any]:

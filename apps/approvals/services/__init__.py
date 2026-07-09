@@ -44,6 +44,11 @@ KIND_ABSENCE_DEDUCTION = "absence_deduction"
 # F17-1). Built by apps.rewards; the recipient's User id is pinned in the payload.
 KIND_REWARD = "reward"
 
+# F13-1: a teacher salary payout, its amount COMPUTED from the teacher's dynamic PayoutPolicy
+# (apps.teachers) — hourly / %-of-collected-tuition / flat-monthly. Money-OUT to the teacher;
+# the teacher's User id + payee label + the computed breakdown are pinned in the payload.
+KIND_SALARY_PREP = "salary_prep"
+
 # Money/percent columns are NUMERIC(_, 2); normalize payload values to that scale.
 _TWO_PLACES = Decimal("0.01")
 
@@ -216,6 +221,26 @@ def _validate_payment_delay_payload(payload: dict) -> dict:
             code="payment_delay_in_past",
         )
     return {"invoice_id": invoice_id, "new_due_date": new_due.isoformat()}
+
+
+def _validate_salary_prep_payload(payload: dict) -> dict:
+    """Validate a salary_prep payload (F13-1). It must name the beneficiary teacher's User
+    id (so SoD extends to them) and carry a `party_label` so the disbursement's immutable
+    ledger row names the teacher. The computed `breakdown` + period keys are preserved for
+    the audit trail. Built by apps.teachers.services.prepare_salary (which computes the
+    amount from the teacher's dynamic PayoutPolicy) — never a raw human-entered figure."""
+    teacher_user_id = payload.get("teacher_user_id")
+    if not isinstance(teacher_user_id, int) or isinstance(teacher_user_id, bool):
+        raise ValidationException(
+            _("A salary request must name the teacher (teacher_user_id)."),
+            code="salary_teacher_required",
+            fields={"teacher_user_id": ["An integer user id is required."]},
+        )
+    out = dict(payload)
+    if not out.get("party_label"):
+        out["party_label"] = "salary"
+    out["party_label"] = str(out["party_label"])[:200]
+    return out
 
 
 def _validate_loan_payload(payload: dict) -> dict:
@@ -463,6 +488,14 @@ def create_request(
         # Decision-only: the effect is a credit (a standing Discount), not a cash payout.
         payload = _validate_absence_deduction_payload(payload)
         amount_uzs = None
+    elif kind == KIND_SALARY_PREP:
+        # Money-OUT to a teacher: the amount is the computed payout and the payload must
+        # pin the beneficiary teacher's User id (SoD extends to them) + the payee label.
+        if amount_uzs is None:
+            raise ValidationException(
+                _("A salary request must have a computed amount."), code="salary_amount_required"
+            )
+        payload = _validate_salary_prep_payload(payload)
     return ApprovalRequest.objects.create(
         kind=kind,
         title=title,
@@ -787,6 +820,11 @@ _BENEFICIARY_SELF_DEALING: dict[str, tuple[str, str, Any]] = {
         "recipient_id",
         "reward_self_dealing",
         _("You cannot approve or disburse your own reward."),
+    ),
+    KIND_SALARY_PREP: (
+        "teacher_user_id",
+        "salary_self_dealing",
+        _("You cannot approve or disburse your own salary."),
     ),
 }
 
