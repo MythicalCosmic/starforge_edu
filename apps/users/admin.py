@@ -1,7 +1,9 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 
-from .models import OTP, Device, RoleMembership, User
+from core.admin_mixins import ReadOnlyAdmin
+
+from .models import OTP, Device, RoleMembership, Session, User
 
 
 @admin.register(User)
@@ -47,3 +49,18 @@ class RoleMembershipAdmin(admin.ModelAdmin):
     list_display = ("user", "role", "branch", "department", "granted_at", "revoked_at")
     list_filter = ("role",)
     search_fields = ("user__username", "user__phone", "user__email")
+
+
+@admin.register(Session)
+class SessionAdmin(ReadOnlyAdmin):
+    """View-only. ``key`` is a live Bearer token — never list, search, or render
+    it (exposing it lets a viewer impersonate the user), so it is excluded from
+    the form entirely. Session lifecycle is owned by the auth service."""
+
+    list_display = ("id", "user", "ip_address", "device_id", "read_only", "created_at",
+                    "last_used_at", "expires_at", "revoked_at")
+    list_filter = ("read_only",)
+    search_fields = ("user__username", "ip_address", "device_id")
+    date_hierarchy = "created_at"
+    ordering = ("-created_at",)
+    exclude = ("key",)
