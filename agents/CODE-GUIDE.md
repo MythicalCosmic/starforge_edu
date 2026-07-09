@@ -409,7 +409,7 @@ def on_attendance_marked(sender, *, record_id, status, schema_name, **kwargs):
 
 ## 8. API surface
 
-- **Envelope (TD-18)**: everything under `/api/v1/`; all errors — webhooks included — flow through `core/exceptions.drf_exception_handler` as `{"error": {"code", "detail", "fields?"}}`. Raise `StarforgeError` subclasses (`ValidationException`, `PermissionException`, `NotFoundException`, `ThrottledException`, `TenantContextMissing`); never hand-build error dicts in views.
+- **Envelope (TD-18, converged in FI-1)**: everything under `/api/v1/` answers in ONE flat error shape `{"success": false, "code", "message", "errors"?}` — byte-identical from `core.responses.error()` (layered views), `core/exceptions.drf_exception_handler` (the DRF `reports` app), and Django's own `handler404/400/403/500` + the middleware 401/402/403/503. (Deliberate exceptions: `/healthz/*` keeps its ops-probe shape; payment webhooks return provider-exact bodies.) Raise `StarforgeError` subclasses (`ValidationException`, `PermissionException`, `NotFoundException`, `ThrottledException`, `TenantContextMissing`); never hand-build error dicts in views.
 - **`@extend_schema` on every endpoint** (DoD #7). Minimum bar:
 
 ```python

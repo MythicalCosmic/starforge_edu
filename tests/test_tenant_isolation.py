@@ -29,11 +29,11 @@ def test_cross_tenant_token_rejected(tenant_a, tenant_b, user_in, client_for, ur
     resp = client_b.get(url)
 
     assert resp.status_code == 401
-    # Flat envelope everywhere now: {"success": false, "code": ...}. (The legacy nested
-    # fallback is kept harmless in case an old path ever slips through.)
+    # ONE flat envelope everywhere now (FI-1): {"success": false, "code": ...}. Asserted
+    # directly (no nested fallback) so this test would FAIL if the convergence regressed.
     body = resp.json()
-    code = body["code"] if "code" in body else body.get("error", {}).get("code")
-    assert code == "authentication_failed"
+    assert body["success"] is False
+    assert body["code"] == "authentication_failed"
 
 
 def test_token_valid_on_own_tenant(tenant_a, user_in, as_user):

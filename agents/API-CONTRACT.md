@@ -65,7 +65,7 @@ POST /api/v1/auth/login/
 Failures are deliberately indistinguishable — unknown username, wrong password, and deactivated account all return:
 
 ```http
-401 {"error": {"code": "invalid_credentials", "detail": "Invalid username or password."}}
+401 {"success": false, "code": "invalid_credentials", "message": "Invalid username or password."}
 ```
 
 Throttles: `login_user` 5/min per username, `login_ip` 10/min per IP → `429 throttled`. `device_id` is a client-generated stable UUID (keep it in app storage); the server upserts a `Device` row (TASKS §3, D1-C).
@@ -184,14 +184,14 @@ Platform admins can mint a short-lived, read-only token for a tenant. It carries
 
 ### 4.1 Error envelope (TD-18, `core/exceptions.py`)
 
-Every non-2xx response — webhooks included — is:
+Every non-2xx response (except `/healthz/*` and provider-exact payment webhooks) is ONE flat shape:
 
 ```json
-{"error": {"code": "validation_error", "detail": "Invalid input.",
-           "fields": {"due_at": ["This field is required."]}}}
+{"success": false, "code": "validation_error", "message": "Invalid input.",
+ "errors": {"due_at": ["This field is required."]}}
 ```
 
-`code` is stable and machine-readable — branch on it, never on `detail` (which is localized per Accept-Language). `fields` appears only on validation errors. Error-code catalog:
+`code` is stable and machine-readable — branch on it (or on `success`), never on `message` (which is localized per Accept-Language). `errors` appears only on validation errors. Error-code catalog:
 
 | HTTP | `code` | When | Since |
 |---|---|---|---|
@@ -444,8 +444,8 @@ npx @openapitools/openapi-generator-cli generate -i openapi.yaml -g dart-dio \
 When a Center's subscription is suspended/expired, **every tenant API route** returns:
 
 ```http
-402 {"error": {"code": "subscription_required",
-               "detail": "This center's subscription has expired."}}
+402 {"success": false, "code": "subscription_required",
+     "message": "This center's subscription has expired."}
 ```
 
 Required client behavior — treat 402 like a global state, not a per-call error:
