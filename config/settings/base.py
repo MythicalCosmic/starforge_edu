@@ -97,7 +97,9 @@ SHARED_APPS = [
     "apps.tenancy.apps.TenancyConfig",  # Center + Domain only (the tenant model)
     "django.contrib.contenttypes",
     "django.contrib.auth",
-    "django.contrib.admin",
+    # Custom admin config: auto-registers EVERY model after autodiscovery so nothing is missing
+    # from /admin/ (still the standard admin app + site — see core/admin_apps.py).
+    "core.admin_apps.StarforgeAdminConfig",
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
@@ -122,7 +124,7 @@ SHARED_APPS = [
 TENANT_APPS = [
     "django.contrib.contenttypes",
     "django.contrib.auth",
-    "django.contrib.admin",
+    "core.admin_apps.StarforgeAdminConfig",  # auto-registers every model (see SHARED_APPS)
     "django.contrib.sessions",
     "django.contrib.messages",
     "rest_framework",
