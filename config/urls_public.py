@@ -7,9 +7,18 @@ must go through the tenant URLConf in config/urls.py.
 
 from django.contrib import admin
 from django.urls import include, path
+from drf_spectacular.views import SpectacularRedocView, SpectacularSwaggerView
+
+from core.openapi import openapi_schema_view
 
 urlpatterns = [
     path("admin/", admin.site.urls),
+    # OpenAPI schema + Swagger/Redoc for the PUBLIC (platform/billing/webhooks) API. The same
+    # view serves the platform schema here because django-tenants points request.urlconf at
+    # config.urls_public on the public host.
+    path("api/schema/", openapi_schema_view, name="schema"),
+    path("api/schema/swagger-ui/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
+    path("api/schema/redoc/", SpectacularRedocView.as_view(url_name="schema"), name="redoc"),
     path("api/v1/platform/", include("apps.tenancy.urls")),
     # TD-8: platform billing API (plans/subscriptions/usage/checkout), staff-only.
     path("api/v1/platform/billing/", include("apps.billing.urls")),

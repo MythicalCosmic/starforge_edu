@@ -2,9 +2,10 @@
 
 from django.contrib import admin
 from django.urls import include, path
-from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, SpectacularSwaggerView
+from drf_spectacular.views import SpectacularRedocView, SpectacularSwaggerView
 
 import core.schema  # noqa: F401 — registers the OpenAPI auth extension (TD-1)
+from core.openapi import openapi_schema_view
 
 api_v1_patterns = [
     path("auth/", include("apps.auth.urls")),
@@ -48,7 +49,9 @@ api_v1_patterns = [
 urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/v1/", include((api_v1_patterns, "v1"))),
-    path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
+    # Full OpenAPI 3.0 schema for the whole tenant API (core.openapi walks every plain view;
+    # drf-spectacular alone only saw the lone DRF 'reports' app). Swagger UI + Redoc render it.
+    path("api/schema/", openapi_schema_view, name="schema"),
     path("api/schema/swagger-ui/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
     path("api/schema/redoc/", SpectacularRedocView.as_view(url_name="schema"), name="redoc"),
 ]

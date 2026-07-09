@@ -26,6 +26,8 @@ In prod a reverse proxy serves both on 443 and routes `/ws/` to daphne; clients 
 
 **CORS posture:** `CORS_ALLOWED_ORIGINS` env list (`config/settings/base.py`), `CORS_ALLOW_CREDENTIALS = True`. Dev: add your Vite origin (e.g. `http://localhost:5173`) to `CORS_ALLOWED_ORIGINS` in compose/`.env`. Prod: strict allowlist, never `CORS_ALLOW_ALL_ORIGINS` (TASKS §25, D5-A). Mobile apps are unaffected by CORS. Auth uses the `Authorization` header, not cookies — no CSRF for API calls (CSRF applies to `/admin/` only).
 
+> **📖 Interactive docs (live on every host):** **Swagger UI** at `GET /api/schema/swagger-ui/` to browse + try every endpoint · Redoc at `GET /api/schema/redoc/` · raw OpenAPI 3.0 JSON at `GET /api/schema/` for client codegen. The schema is generated from the live routes (`core/openapi.py`), so it never drifts from the code. See §9.
+
 ---
 
 ## 2. Tenancy — what clients must know
@@ -44,7 +46,7 @@ GET https://starforge.uz/api/v1/platform/resolve/?slug=demo
 
 Cache `base_url`/`ws_url` in app storage; ALL subsequent calls go to that host. Unknown slug → 404 `not_found`.
 
-**JWTs are tenant-bound (TD-1, D1):** tokens carry a `schema` claim and are rejected with **401 `tenant_mismatch`** on any other tenant's host. Switching Centers = wipe tokens, resolve the new tenant, full re-login. Never share a token store across tenants.
+**Session tokens are tenant-bound (TD-1, D1):** a session key lives in one center's schema, so presenting it on any other tenant's host simply isn't found → **401 `authentication_failed`**. Switching Centers = wipe the token, resolve the new tenant, full re-login. Never share a token store across tenants.
 
 ---
 
@@ -52,14 +54,16 @@ Cache `base_url`/`ws_url` in app storage; ALL subsequent calls go to that host. 
 
 All endpoints in `apps/auth/urls.py` under `/api/v1/auth/`. **Login is username + password** (owner decision 2026-06-11). OTP codes exist only for **password reset** (sent to the phone/email on file). Accounts are created by staff; the generated username + initial password are handed to the user.
 
-### 3.1 Login — `POST /api/v1/auth/login/` (D1)
+> **The token is an opaque session key, NOT a JWT.** Login returns a single `access` string — the id of a `Session` row in the tenant schema (`core/session_auth.py`). Send it as `Authorization: Bearer <access>` on every authed call. There is **no refresh token and no `/auth/refresh/` endpoint**: the session has a hard **7-day** expiry (`SESSION_TTL_DAYS`), after which any call returns `401` and the client must **log in again**. Roles/permissions are read **live from the DB on every request**, so a role change / revoke / password change takes effect immediately — there are no token claims and no `token_version`/`tv` dance to implement.
+
+### 3.1 Login — `POST /api/v1/auth/login/`
 
 ```http
 POST /api/v1/auth/login/
 {"username": "aziz.karimov", "password": "<password>",
  "device_id": "a1b2c3-stable-uuid", "platform": "android"}     # device fields optional
 
-200 {"access": "<jwt>", "refresh": "<jwt>"}
+200 {"access": "<opaque session key>"}     # ONE token — store it. There is NO refresh token.
 ```
 
 Failures are deliberately indistinguishable — unknown username, wrong password, and deactivated account all return:
@@ -96,44 +100,32 @@ POST /api/v1/auth/password/change/
 Authorization: Bearer <access>
 {"old_password": "<old>", "new_password": "<new>"}
 
-200 {"access": "<jwt>", "refresh": "<jwt>"}   # all OTHER sessions ended; store this pair
+200 {"access": "<new session key>"}   # every OTHER session ended; THIS device gets a fresh key — store it
 ```
 
 Errors: `400 wrong_password`, `400 weak_password`.
 
-### 3.3 Token claims (D1-C, TD-1/TD-5)
+### 3.3 The session token (nothing to decode)
 
-| Claim | Meaning |
-|---|---|
-| `user_id` | PK of the user (`SIMPLE_JWT["USER_ID_CLAIM"]`) |
-| `schema` | Issuing tenant's `schema_name` — must match the host (TD-1) |
-| `tv` | User `token_version`; bumped on password/role change → all live tokens die |
-| `roles` | Denormalized role codes at issue time, e.g. `["teacher"]` — UI hints ONLY, server re-checks every request |
-| `exp`, `iat`, `jti`, `token_type` | Standard simplejwt claims |
+The token is opaque — there are no claims to read client-side. The server validates it per request against the tenant's `Session` table (not revoked, not expired) and re-derives roles/permissions live. What this means for a client:
 
-Lifetimes (`SIMPLE_JWT`): **access 15 min, refresh 14 days**.
+- **Expiry**: hard 7 days, no sliding renewal, no readable `exp`. Treat any `401 authentication_failed` as "session gone → route to login".
+- **Tenant binding**: a session key is valid only on the center (host/schema) it was minted on; presenting it on another center's host is a plain `401`.
+- **Live authorization**: never cache roles from login for gating writes — the server re-checks every request. Use `GET /api/v1/users/me/` (§3.6) only for UI hints (menu visibility).
 
-### 3.4 Refresh — `POST /api/v1/auth/refresh/` (D0)
+### 3.4 Token renewal — there is none
 
-```http
-POST /api/v1/auth/refresh/
-{"refresh": "<refresh-jwt>"}
+**No refresh token, no `/auth/refresh/` endpoint.** On `401` (expiry, revoke, force-logout, password change on another device, deactivation) wipe the stored token and send the user to login. Design for a clean re-login at most once per 7 days; there is no single-flight-refresh machinery to build.
 
-200 {"access": "<new-access>", "refresh": "<new-refresh>"}
-```
-
-Rotation is ON (`ROTATE_REFRESH_TOKENS` + `BLACKLIST_AFTER_ROTATION`): the response **always contains a new refresh token; store it immediately — the old one is blacklisted and dead**. Presenting a blacklisted refresh is treated as theft: ALL of that user's refresh tokens are revoked globally (401 `refresh_reused`). The refresh path is tenant-bound like the access path — a refresh minted on another center's host returns 401 `tenant_mismatch`. Any 401 from this endpoint → wipe both tokens, route to login. Do not retry.
-
-**Recommended client strategy:** decode `exp` from the access token; refresh proactively when < 60 s remain, or reactively on the first 401. Serialize refreshes behind a single-flight mutex (web: shared promise; Flutter: dio `QueuedInterceptor`) so parallel 401s don't double-rotate and trip reuse detection. Persist both tokens atomically.
-
-### 3.5 Logout
+### 3.5 Logout — `POST /api/v1/auth/logout/` (authed)
 
 ```http
-POST /api/v1/auth/logout/            {"refresh": "<jwt>"} → 200     # blacklists that refresh (D0)
-POST /api/v1/auth/logout-all/        {} (Bearer auth)     → 204     # blacklists ALL refreshes + bumps tv (D1-C)
+POST /api/v1/auth/logout/
+Authorization: Bearer <access>
+→ 204     # ends ALL of this user's sessions (every device); then discard the token locally
 ```
 
-Access tokens live their remaining ≤15 min after logout; clients must also discard them locally.
+Logout is **global** — `/auth/logout/` revokes every session for the user, so there is no separate `/auth/logout-all/`. (An impersonation/read-only session cannot force-logout — `403 read_only_token`.)
 
 ### 3.6 Who am I — `GET /api/v1/users/me/` (D0)
 
@@ -159,14 +151,14 @@ Drive navigation/feature visibility from `role_memberships[].role` (role codes i
 POST /api/v1/users/devices/   {"device_id": "a1b2c3...", "platform": "android",
                                "push_token": "<fcm-token>"}        → 201
 GET  /api/v1/users/devices/                                        → 200 list (own devices)
-DELETE /api/v1/users/devices/{id}/                                 → 204 revoke (kills that device's refresh)
+DELETE /api/v1/users/devices/{id}/                                 → 204 revoke (kills that device's session)
 ```
 
 Re-POST with the same `device_id` to rotate the push token. Tokens dead after N push failures are auto-revoked (TASKS §17 bounce handling).
 
 ### 3.8 Impersonation tokens (D4-E, TD-10)
 
-Platform admins can mint a short-lived, read-only token for a tenant. It carries `imp: true` and `ro: true` claims. **Clients must check `ro` and hide/disable every write action**; the server rejects writes regardless (403 `forbidden`). Show a visible "viewing as support" banner when `imp` is set. Heavily audited (TD-9).
+Platform admins can mint a short-lived, **read-only session** for a tenant (`create_session(read_only=True)`). **Clients should hide/disable every write action** while impersonating; the server rejects writes regardless (`403 read_only_token`). Show a visible "viewing as support" banner. Heavily audited (TD-9).
 
 ---
 
@@ -176,7 +168,7 @@ Platform admins can mint a short-lived, read-only token for a tenant. It carries
 
 | Header | Value | When |
 |---|---|---|
-| `Authorization` | `Bearer <access>` (`SIMPLE_JWT["AUTH_HEADER_TYPES"]`) | Every call except `auth/login/`, `auth/password/reset/*`, `auth/refresh/`, `platform/resolve/` |
+| `Authorization` | `Bearer <access>` (the opaque session key from login) | Every call except `auth/login/`, `auth/password/reset/*`, `platform/resolve/`, `webhooks/*` |
 | `Accept-Language` | `uz` \| `ru` \| `en` | Every call (§4.6) |
 | `Content-Type` | `application/json` | Every request with a body (S3 PUTs excepted, §5) |
 | `Idempotency-Key` | UUIDv4 | Required on payment-adjacent POSTs (§4.7) |
@@ -200,10 +192,7 @@ Every non-2xx response (except `/healthz/*` and provider-exact payment webhooks)
 | 400 | `wrong_password` | Password change: `old_password` incorrect | D1 |
 | 400 | `weak_password` | New password fails the validators (min 10 chars, not common/numeric) | D1 |
 | 401 | `invalid_credentials` | Login failed (unknown username / wrong password / inactive — indistinguishable) | D1 |
-| 401 | `authentication_failed` | Missing/expired/invalid access token | D0 |
-| 401 | `tenant_mismatch` | Token's `schema` ≠ this host's tenant (access AND refresh paths) | D1 |
-| 401 | `token_stale` | Token's `tv` ≠ current token_version (password/role change, logout-all) | D1 |
-| 401 | `refresh_reused` | Blacklisted refresh replayed — ALL sessions revoked; full re-login | D1 |
+| 401 | `authentication_failed` | Missing / expired (>7d) / revoked / wrong-tenant-host session token — the single 401 code | D0 |
 | 402 | `subscription_required` | Center's subscription suspended/expired (TD-8) — see §10 | D3 |
 | 403 | `forbidden` | Role lacks `resource:verb`, or object out of branch/department scope | D0 |
 | 404 | `not_found` | Missing resource OR cross-tenant ID probe (indistinguishable by design) | D0 |
@@ -211,14 +200,13 @@ Every non-2xx response (except `/healthz/*` and provider-exact payment webhooks)
 | 429 | `throttled` | Rate limit; honor `Retry-After` | D0 |
 | 500 | `error` | Unhandled server error (request_id in logs, D1-A) | D0 |
 
-(Agents: today generic DRF errors fall through as `code: "api_error"` with nested detail — `drf_exception_handler` last branch. D1 Lane C/A normalizes DRF `ValidationError`→`validation_error` with `fields`, `NotAuthenticated`/`InvalidToken`→`authentication_failed`, `Throttled`→`throttled` + `Retry-After`. Raise `StarforgeError` subclasses from services; never hand-build error JSON in a view.)
+(Agents: the whole API — layered plain views, the DRF `reports` app, and Django's own `handler404/500` — emits this one flat shape (converged in FI-1). Raise `StarforgeError` subclasses from services; never hand-build error JSON in a view.)
 
 Client decision table — wire this into one HTTP interceptor, not per-screen:
 
 | On | Do |
 |---|---|
-| 401 `authentication_failed` | Refresh once (single-flight, §3.4), replay the request; if refresh also 401s → wipe tokens, login screen |
-| 401 `tenant_mismatch` | Wrong tenant host for this token — wipe tokens, re-resolve tenant (mobile), login screen |
+| 401 `authentication_failed` | Session gone (expired/revoked/wrong-host) — wipe the stored token, route to the login screen. There is no refresh to attempt. |
 | 402 `subscription_required` | Global paywall state (§10) |
 | 403 `forbidden` | Show "no access", hide the action going forward — do NOT retry or logout |
 | 409 `conflict` | Surface the `detail` to the user (e.g. schedule overlap); safe to retry after user edits |
@@ -305,7 +293,7 @@ Rejections at step 1: type not in the Center's allowlist or size over the per-Ce
 
 ## 6. Realtime — WebSocket (auth D0; real consumers D4-C, TD-15)
 
-Connect to the **tenant host** on the ASGI port. Auth (`infrastructure/websocket/middleware.py: TenantAwareJWTAuthMiddleware`) accepts the **access** token via either transport:
+Connect to the **tenant host** on the ASGI port. Auth (`infrastructure/websocket/middleware.py`) accepts the **session-key access token** (the same opaque token from login — the middleware class retains a legacy `JWT` name but validates a session key) via either transport:
 
 ```
 A) Subprotocol (recommended for browsers — keeps the token out of URLs/logs):
@@ -327,7 +315,7 @@ Group names are **schema-prefixed** server-side (shared-Redis tenant isolation);
 
 | Code | Meaning | Client action |
 |---|---|---|
-| **4401** | Unauthorized — anonymous, cross-tenant token (schema claim ≠ host tenant), or stale `tv` (logout-everywhere / role change / password change) | Refresh the access token (§3.4), then reconnect with the new token. If refresh also fails, send the user to login. |
+| **4401** | Unauthorized — anonymous, a token minted on another center's host, or a session that was revoked/expired (logout, role change, password change, deactivation) | Reconnect once with the stored token; if it 4401s again the session is gone — send the user to login (there is no refresh). |
 | **4403** | Forbidden — authenticated but not permitted: `/ws/cohorts/{id}/attendance/` requires `attendance:read` AND (director OR a RoleMembership in the cohort's branch); unknown cohort also closes 4403 | Do NOT retry this path with the same token; the user lacks access. Other sockets stay open. |
 | **4408** | Heartbeat timeout — the server sent two pings with no intervening `pong` | Treat as a dead connection; reconnect (backoff below). |
 
@@ -346,12 +334,12 @@ Group names are **schema-prefixed** server-side (shared-Redis tenant isolation);
 
 Unknown `type` values must be ignored, not crash the client.
 
-**Heartbeat (server-driven, D4-C):** the **server** sends `{"type":"ping"}` every **30 s**; the client MUST reply `{"type":"pong"}`. Two consecutive server pings with no `pong` in between → the server closes **4408**. Clients should also treat 60 s of total silence as a dead link and reconnect. Access tokens expire in 15 min — on 4401, refresh first, then reconnect.
+**Heartbeat (server-driven, D4-C):** the **server** sends `{"type":"ping"}` every **30 s**; the client MUST reply `{"type":"pong"}`. Two consecutive server pings with no `pong` in between → the server closes **4408**. Clients should also treat 60 s of total silence as a dead link and reconnect. The session lives 7 days — on a **4401**, reconnect once, and if it recurs route the user to login (no refresh).
 
 **Reconnect procedure (both clients):**
 
 1. On close/error (except 4403, which is a permanent deny for that path): schedule reconnect with **exponential backoff + jitter** (1 s → 2 → 4 → 8 → … cap **30 s**); reset backoff to 1 s after a connection survives 60 s.
-2. Before each attempt: if the access token has < 60 s left (or the prior close was 4401), refresh it (§3.4).
+2. If the prior close was **4401**, re-check the stored session token is still present; a second consecutive 4401 means the session is gone → go to login (there is no token to refresh).
 3. On successful (re)connect: **resync via REST** — `GET /api/v1/notifications/` (cursor feed) for missed items; for an attendance dashboard, re-fetch `GET /api/v1/attendance/records/?lesson=...`. Re-subscribe (reopen the same paths) after reconnect.
 4. Pause attempts when the app is backgrounded (mobile) or the tab is hidden (web); reconnect on foreground.
 
@@ -373,9 +361,8 @@ Tenant host, prefix `/api/v1/` (`config/urls.py`); platform rows are apex (`conf
 
 | Endpoint | Purpose | Permission | Since |
 |---|---|---|---|
-| `POST auth/login/` · `refresh/` · `logout/` | Auth lifecycle (§3) | public | D1 |
+| `POST auth/login/` · `logout/` | Auth lifecycle (§3) — login public; logout authed (ends ALL sessions) | public / authed | D1 |
 | `POST auth/password/change/` · `reset/request/` · `reset/confirm/` | Password management (§3.2) | change: authed; reset: public | D1 |
-| `POST auth/logout-all/` | Revoke all sessions | authenticated | D1 |
 | `GET users/me/` | Current user + role_memberships | authenticated | D0 |
 | `GET users/` · `GET users/{id}/` | User directory | `users:read` | D0 |
 | `GET/POST/DELETE users/devices/` | Devices + push tokens (§3.6) | authenticated (own) | D0/D1 |
@@ -419,21 +406,29 @@ OpenAPI is the authoritative per-field reference: `GET /api/schema/` (YAML), Swa
 
 ---
 
-## 9. Client generation (D5-D, TASKS §27)
+## 9. Schema, Swagger UI & client generation
+
+The whole API is described by a **live OpenAPI 3.0.3 document** built by `core/openapi.py` (it walks every plain view — drf-spectacular alone only saw the lone DRF `reports` app). Served per host, so the tenant host describes the tenant API and the apex host describes the platform API:
+
+| URL | What |
+|---|---|
+| `GET /api/schema/` | The raw OpenAPI 3.0 JSON — feed this to a codegen tool |
+| `GET /api/schema/swagger-ui/` | **Interactive Swagger UI** — browse + try every endpoint |
+| `GET /api/schema/redoc/` | Redoc reference rendering |
+
+Every operation carries its path, HTTP methods, path params, the `sessionAuth` (Bearer) security scheme, and the standard `Success`/`Error`/`Pagination` response envelope. Request/response **bodies are the generic envelope** (the layered stack uses DTOs + presenters, not typed serializers) — for field-level shapes use this document (§3–§8) alongside the schema.
 
 ```bash
-# 1. Schema (CI job validates this on every PR)
-uv run python manage.py spectacular --file openapi.yaml --validate
+# 1. Pull the live schema for a center (any tenant host works)
+curl -s https://<center>.starforge.uz/api/schema/ -o openapi.json
 
 # 2. TypeScript (React web) — @hey-api/openapi-ts, axios client (pairs with TanStack Query)
-npx @hey-api/openapi-ts -i openapi.yaml -o clients/typescript -c @hey-api/client-axios
+npx @hey-api/openapi-ts -i openapi.json -o clients/typescript -c @hey-api/client-axios
 
 # 3. Dart (Flutter) — openapi-generator, dio
-npx @openapitools/openapi-generator-cli generate -i openapi.yaml -g dart-dio \
+npx @openapitools/openapi-generator-cli generate -i openapi.json -g dart-dio \
     -o clients/dart --additional-properties=pubName=starforge_api
 ```
-
-**Regeneration policy:** CI diffs the generated `openapi.yaml` against the committed one (D5-D wires the gate, TASKS §1); a PR that changes the schema **fails until both clients are regenerated and committed** in the same PR. Generated code is never hand-edited.
 
 **Versioning (TD-18):** everything is `/api/v1/`. After Day-5 handoff, v1 is frozen for breaking changes — additive only (new endpoints, new optional fields; clients must tolerate unknown fields). Breaking changes ship as `/api/v2/` alongside v1.
 
@@ -466,7 +461,7 @@ Required client behavior — treat 402 like a global state, not a per-call error
 - [ ] List endpoint: paginated, filterable, searchable, ordered (§4.2–4.3; DoD #5)
 - [ ] Per-action `required_perms` declared — fail-closed (TD-4/TD-5); row added to §8 table with the real permission code
 - [ ] Money as integer minor units + `currency` (§4.5); datetimes tz-aware (§4.4); strings `gettext_lazy` (§4.6)
-- [ ] `@extend_schema` with summary, tags, examples, error responses (DoD #7) — then `uv run python manage.py spectacular --file openapi.yaml --validate` passes
+- [ ] Endpoint auto-appears in the OpenAPI schema (`core/openapi.py` walks the routes — no `@extend_schema` needed on a plain view); confirm at `GET /api/schema/swagger-ui/` and that `tests/test_openapi_schema.py` passes (DoD #7)
 - [ ] External calls in Celery only; payment-adjacent POSTs accept `Idempotency-Key` (§4.7; DoD #9)
 - [ ] New/changed endpoint reflected in this file's §8 index in the same PR
 
