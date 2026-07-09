@@ -226,6 +226,14 @@ DATABASES = {
     "default": env.db_url("DATABASE_URL"),
 }
 DATABASES["default"]["ENGINE"] = "django_tenants.postgresql_backend"
+# Reuse a Postgres connection across requests instead of opening a fresh one each time
+# (Django's default CONN_MAX_AGE=0). On a small box the per-request connect + the
+# django-tenants ``SET search_path`` is a measurable slice of DB CPU under load;
+# persistent connections cut it. Paired with CONN_HEALTH_CHECKS so a dropped/idle-killed
+# connection is detected and replaced at the start of the next request (Django 4.1+),
+# never handing a stale socket to a view. Overridable via env; tests pin it to 0.
+DATABASES["default"]["CONN_MAX_AGE"] = env.int("CONN_MAX_AGE", default=60)
+DATABASES["default"]["CONN_HEALTH_CHECKS"] = True
 DATABASE_ROUTERS = ["django_tenants.routers.TenantSyncRouter"]
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 

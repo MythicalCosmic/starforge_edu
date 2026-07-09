@@ -495,7 +495,23 @@ Owner asked to keep hardening: per-app fault isolation, response-envelope consis
 
 **FI-5 (MEDIUM, broken function-level authz) — FIXED.** `grade_recompute_view` resolved cohort/subject/term by raw pk with NO writable-cohort scope, so any `academics:write` holder (incl. a plain TEACHER) could recompute AND publish grades for a cohort they don't teach, cross-branch. Added the same `_writable_cohort_ids` gate the exam write-path uses (`403 forbidden` for a non-taught cohort). Regression test mirrors `test_teacher_cannot_create_exam_in_non_taught_cohort`.
 
-**Static files (`de6b4b0`):** admin CSS 404'd under gunicorn (no static route in the urlconfs; gunicorn ≠ runserver). Added DEBUG-guarded `staticfiles_urlpatterns()` to both urlconfs (zero new dep; server runs DEBUG=True). **Security agent: 0 password/secret-exposure findings** (the `security-passwords-secrets` dimension returned empty — no leaked secrets, no plaintext passwords, hashing intact).
+**Static files (`de6b4b0`):** admin CSS 404'd under gunicorn (no static route in the urlconfs; gunicorn ≠ runserver). Added DEBUG-guarded `staticfiles_urlpatterns()` to both urlconfs (zero new dep; server runs DEBUG=True). Verified live: `/static/admin/css/base.css` → 200 (23,100 bytes) on both tenant (`demo.localhost`) and public (`localhost`) schemas. **Security agent: 0 password/secret-exposure findings** (the `security-passwords-secrets` dimension returned empty — no leaked secrets, no plaintext passwords, hashing intact).
+
+---
+
+## Performance / load test (test server, owner request)
+
+Load-tested the live test server (internal `:8011`, gunicorn direct) with a stdlib load tester. **The app is fast per-request; the box is the ceiling.**
+
+**Uncontended (c=1) p50 latency — genuinely fast:** `/healthz/ready` 24 ms · `/api/v1/users/me/` 50 ms · `/api/v1/students/` (paginated) 63 ms. Zero 5xx under every burst up to c=50 — nothing "fell."
+
+**Under concurrency, throughput plateaus at ~34–37 req/s** regardless of load (c=25 health p50 600 ms; c=50 p50 1.3 s). **Root cause = 1 vCPU** (`nproc: 1`, load-avg 2.04). During a c=25 burst: `starforge-web-1` 41% + `starforge-postgres-1` 34% CPU = the single core saturated. Shared box also hosts postgres/redis/minio/daphne/celery + the separate `pos_control` + `caddy`.
+
+**Worker tuning does NOT move the ceiling (proven, then reverted).** With owner approval, tried `--workers 3 --threads 4 --worker-class gthread`: throughput stayed ~35 req/s and tail latency got *worse* (c=50 p99 3391 ms vs 1775 ms) — because you can't exceed 1 core of CPU by adding workers; they just add context-switch overhead + RAM. **Reverted to the original `--workers 2`** (leaner, better tails, same ceiling); server restored to its pre-test state (backup kept).
+
+**PERF-1 (app-level, FIXED): `CONN_MAX_AGE` was unset (=0)** → Django opened+closed a fresh Postgres connection every request; with django-tenants that also re-runs `SET search_path`, burning DB CPU under load (the 34% postgres figure above). Set `CONN_MAX_AGE=60` (env-overridable) + `CONN_HEALTH_CHECKS=True` in base settings (Django 4.1+ detects a dead connection at request start); pinned `CONN_MAX_AGE=0` in test settings so pytest's per-test transactions + schema switching stay isolated. Permanent win on any box.
+
+**Recommendations to actually raise the ceiling (infra, owner's call):** (1) **more vCPUs** — this is a 1-core box; that's the dominant lever; (2) run production under `DEBUG=False` (the test server runs `config.settings.development`, DEBUG=True, which adds per-request SQL-capture + CPU overhead); (3) fewer co-tenants on the box, or a dedicated instance.
 
 ---
 

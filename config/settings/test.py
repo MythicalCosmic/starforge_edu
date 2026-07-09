@@ -35,5 +35,11 @@ ESKIZ_USE_MOCK = True
 # Faster password hashing in tests.
 PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]
 
+# Fresh DB connection per test — persistent connections (base sets CONN_MAX_AGE=60)
+# don't mix cleanly with pytest's per-test transaction wrapping + django-tenants schema
+# switching, and tests want deterministic isolation over connection reuse.
+DATABASES["default"]["CONN_MAX_AGE"] = 0  # noqa: F405
+DATABASES["default"]["CONN_HEALTH_CHECKS"] = False  # noqa: F405
+
 # Quiet logs in tests.
 LOGGING["loggers"][""]["level"] = "WARNING"  # type: ignore[index]  # noqa: F405
