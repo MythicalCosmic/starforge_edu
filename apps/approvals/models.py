@@ -48,6 +48,10 @@ class LedgerEntry(models.Model):
         indexes = [
             models.Index(fields=("entry_type", "created_at")),
             models.Index(fields=("source_kind", "source_id")),
+            # The default unfiltered ledger:read list orders by created_at DESC; no existing
+            # index leads with created_at (the composite leads with entry_type). LedgerEntry
+            # is the append-only money spine, so serve the newest-first page from an index.
+            models.Index(fields=("-created_at", "id"), name="ledger_created_idx"),
         ]
         constraints = [
             models.CheckConstraint(condition=models.Q(amount_uzs__gt=0), name="ledger_amount_positive"),
@@ -105,6 +109,10 @@ class ApprovalRequest(models.Model):
         indexes = [
             models.Index(fields=("kind", "status")),
             models.Index(fields=("requested_by", "status")),
+            # The approver/cashier inbox lists newest-first, often unfiltered; neither
+            # composite leads with created_at. ApprovalRequest is the money-movement spine
+            # (all expense/loan/procurement/discount/reward requests) — index the sort.
+            models.Index(fields=("-created_at", "id"), name="apprreq_created_idx"),
         ]
         constraints = [
             models.CheckConstraint(

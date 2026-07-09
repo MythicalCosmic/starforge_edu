@@ -24,5 +24,8 @@ class IThreadRepository(IBaseRepository[Thread]):
     def messages_of(self, *, thread: Thread) -> QuerySet[Message]:
         raise NotImplementedError
 
+    def unread_counts(self, *, thread_ids: list[int], viewer_id: int) -> dict[int, int]:
+        raise NotImplementedError
+
     def active_members(self, *, ids: list[int]) -> list[User]:
         raise NotImplementedError

@@ -21,6 +21,9 @@ class IThreadService(ABC):
     def messages_of(self, *, thread: Thread) -> QuerySet[Message]: ...
 
     @abstractmethod
+    def unread_counts(self, *, thread_ids: list[int], viewer_id: int) -> dict[int, int]: ...
+
+    @abstractmethod
     def create(self, data: CreateThreadDTO, *, creator) -> Thread: ...
 
     @abstractmethod

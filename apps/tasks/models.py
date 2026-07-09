@@ -72,6 +72,9 @@ class Task(models.Model):
             models.Index(fields=("status", "due_at")),
             models.Index(fields=("assignee", "status")),
             models.Index(fields=("department", "status")),
+            # A director's unscoped task board is whole-tenant, newest-first; the composites
+            # all lead with status/assignee/department, so index the default created_at sort.
+            models.Index(fields=("-created_at", "id"), name="task_created_idx"),
         ]
 
     def __str__(self) -> str:  # pragma: no cover

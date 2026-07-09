@@ -357,6 +357,25 @@ def test_teacher_ical_feed_excludes_other_teachers_lesson(tenant_a, user_in):
         assert lesson_b.id not in feed_ids
 
 
+def test_ical_feed_excludes_lessons_older_than_the_window(tenant_a, user_in):
+    """Scale (audit): the iCal feed is bounded to a recent-past window so a whole-tenant
+    calendar can't materialize years of accumulated lessons on every poll. A lesson older
+    than the window is excluded; a recent/future one is kept."""
+    teacher_user = user_in(tenant_a, roles=["teacher"])
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        prof = TeacherProfileFactory(user=teacher_user, branch=branch)
+        term = TermFactory()
+        ctx = {"term": term, "cohort": CohortFactory(branch=branch), "teacher": prof, "room": None}
+        recent = _make_one_lesson(ctx=ctx, title="recent", start=timezone.now() + timedelta(days=1))
+        old = _make_one_lesson(ctx=ctx, title="old", start=timezone.now() - timedelta(days=200))
+        feed_ids = set(
+            services.lessons_for_token(services.ical_token_for(teacher_user)).values_list("id", flat=True)
+        )
+        assert recent.id in feed_ids
+        assert old.id not in feed_ids  # older than ICAL_WINDOW_DAYS
+
+
 def test_student_sees_lessons_from_both_active_cohorts(tenant_a, user_in):
     """A multi-cohort student (active membership in A and B via the enroll
     service) must see lessons from BOTH cohorts — the schedule lane now scopes

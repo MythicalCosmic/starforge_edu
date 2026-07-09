@@ -58,9 +58,15 @@ def user_to_dict(user: Any) -> dict[str, Any]:
         "is_staff": user.is_staff,
         "date_joined": _iso(user.date_joined),
         "last_seen_at": _iso(user.last_seen_at),
+        # Filter in Python over the prefetched cache (UserRepository.query prefetches
+        # role_memberships) rather than `.filter(...)`, which would bypass the cache and
+        # fire a fresh query PER user — an N+1 on the directory list. `.all()` consumes the
+        # prefetch (0 extra queries on the list path); on the un-prefetched /me path it is
+        # one small query, same as before.
         "role_memberships": [
             role_membership_to_dict(rm)
-            for rm in user.role_memberships.filter(revoked_at__isnull=True)
+            for rm in user.role_memberships.all()
+            if rm.revoked_at is None
         ],
     }
 

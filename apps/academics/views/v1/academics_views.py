@@ -554,6 +554,12 @@ def _assert_report_access(request: HttpRequest) -> None:
     raise PermissionException("Honor roll and warnings are staff-only.", code="forbidden")
 
 
+# Honor-roll / warnings are ordered top-N reports (by score); hard-cap the row count so a
+# large term can't materialize an unbounded list into one response (every other list here
+# paginates — these return a bare list on purpose, so cap with a SQL LIMIT slice instead).
+_HONOR_WARNING_CAP = 1000
+
+
 @csrf_exempt
 @require_auth
 def honor_roll_view(request: HttpRequest) -> HttpResponse:
@@ -563,7 +569,7 @@ def honor_roll_view(request: HttpRequest) -> HttpResponse:
     _assert_report_access(request)
     term_id = _require_int_qparam(request, "term")
     grades = _grade_service().honor_roll(term_id=term_id, user=request.user, roles=get_user_roles(request))
-    return success([grade_to_dict(g) for g in grades])
+    return success([grade_to_dict(g) for g in grades[:_HONOR_WARNING_CAP]])
 
 
 @csrf_exempt
@@ -575,4 +581,4 @@ def warnings_view(request: HttpRequest) -> HttpResponse:
     _assert_report_access(request)
     term_id = _require_int_qparam(request, "term")
     grades = _grade_service().warnings(term_id=term_id, user=request.user, roles=get_user_roles(request))
-    return success([grade_to_dict(g) for g in grades])
+    return success([grade_to_dict(g) for g in grades[:_HONOR_WARNING_CAP]])

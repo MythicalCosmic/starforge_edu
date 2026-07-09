@@ -27,6 +27,9 @@ class ThreadService(IThreadService):
     def messages_of(self, *, thread: Thread) -> QuerySet[Message]:
         return self.repository.messages_of(thread=thread)
 
+    def unread_counts(self, *, thread_ids: list[int], viewer_id: int) -> dict[int, int]:
+        return self.repository.unread_counts(thread_ids=thread_ids, viewer_id=viewer_id)
+
     def create(self, data: CreateThreadDTO, *, creator) -> Thread:
         users = self.repository.active_members(ids=data.participant_ids)
         if len(users) != len(data.participant_ids):

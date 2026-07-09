@@ -45,6 +45,10 @@ class AttendanceRecord(models.Model):
             models.Index(fields=("lesson",)),
             models.Index(fields=("student", "created_at")),
             models.Index(fields=("status",)),
+            # The staff-wide records list is newest-first and often unfiltered; the
+            # (student, created_at) composite can't serve a global created_at sort.
+            # AttendanceRecord is the fastest-growing table (students x lessons) — index it.
+            models.Index(fields=("-created_at", "id"), name="attnrec_created_idx"),
         ]
 
     def __str__(self) -> str:  # pragma: no cover

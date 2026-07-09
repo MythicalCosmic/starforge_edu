@@ -112,8 +112,18 @@ def campaign_recipients_view(request: HttpRequest, pk: int) -> HttpResponse:
         return error("Method not allowed.", code="method_not_allowed", status=405)
     check_perm(request, f"{_RESOURCE}:read")
     campaign = _get_campaign(request, pk)
-    rows = _campaign_service().recipients_of(campaign)
-    return success([recipient_to_dict(r) for r in rows])
+    # Paginate: a center-wide campaign freezes one recipient row per targeted student
+    # (thousands), so returning the whole set uncapped is unbounded. Mirrors the sibling
+    # list endpoints; `data` stays the page's item list.
+    qs = apply_filters(
+        request,
+        _campaign_service().recipients_of(campaign),
+        filter_fields=("status",),
+        ordering_fields=("id",),
+        default_ordering="id",
+    )
+    items, total, page, size = paginate(request, qs)
+    return paginated([recipient_to_dict(r) for r in items], total=total, page=page, page_size=size)
 
 
 def _create_campaign(request: HttpRequest) -> HttpResponse:

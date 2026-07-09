@@ -13,18 +13,9 @@ def participant_to_dict(participant: ThreadParticipant) -> dict:
     }
 
 
-def _unread_count(thread: Thread, viewer_id: int) -> int:
-    part = next((p for p in thread.participants.all() if p.user_id == viewer_id), None)
-    last_read = part.last_read_at if part else None
-    # Messages from others, newer than the viewer's last read.
-    return sum(
-        1
-        for m in thread.messages.all()
-        if m.sender_id != viewer_id and (last_read is None or m.created_at > last_read)
-    )
-
-
-def thread_to_dict(thread: Thread, *, viewer_id: int) -> dict:
+def thread_to_dict(thread: Thread, *, unread_count: int) -> dict:
+    # unread_count is supplied by the caller (computed in one bounded query via
+    # ThreadService.unread_counts) rather than derived from a prefetch of every message.
     return {
         "id": thread.id,
         "subject": thread.subject,
@@ -33,7 +24,7 @@ def thread_to_dict(thread: Thread, *, viewer_id: int) -> dict:
         "last_message_at": thread.last_message_at.isoformat() if thread.last_message_at else None,
         "created_at": thread.created_at.isoformat(),
         "participants": [participant_to_dict(p) for p in thread.participants.all()],
-        "unread_count": _unread_count(thread, viewer_id),
+        "unread_count": unread_count,
     }
 
 

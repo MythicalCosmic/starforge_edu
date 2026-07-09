@@ -36,6 +36,13 @@ def _viewer_id(request: HttpRequest) -> int:
     return user.pk
 
 
+def _unread_map(request: HttpRequest, threads: list) -> dict[int, int]:
+    """One bounded query for {thread_id: unread_count} across the given threads."""
+    return _service().unread_counts(
+        thread_ids=[t.id for t in threads], viewer_id=_viewer_id(request)
+    )
+
+
 def _get_thread(request: HttpRequest, pk: int):
     thread = _service().get_thread(user=request.user, pk=pk)
     if thread is None:
@@ -53,7 +60,8 @@ def threads_collection_view(request: HttpRequest) -> HttpResponse:
         # default_ordering so apply_filters preserves it (only ?ordering re-orders).
         qs = apply_filters(request, qs, ordering_fields=("last_message_at", "created_at"))
         items, total, page, size = paginate(request, qs)
-        rows = [thread_to_dict(t, viewer_id=_viewer_id(request)) for t in items]
+        unread = _unread_map(request, items)
+        rows = [thread_to_dict(t, unread_count=unread.get(t.id, 0)) for t in items]
         return paginated(rows, total=total, page=page, page_size=size)
     if request.method == "POST":
         check_perm(request, f"{_RESOURCE}:write")
@@ -68,7 +76,8 @@ def thread_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
         return error("Method not allowed.", code="method_not_allowed", status=405)
     check_perm(request, f"{_RESOURCE}:read")
     thread = _get_thread(request, pk)
-    return success(thread_to_dict(thread, viewer_id=_viewer_id(request)))
+    unread = _unread_map(request, [thread])
+    return success(thread_to_dict(thread, unread_count=unread.get(thread.id, 0)))
 
 
 @csrf_exempt
@@ -107,7 +116,8 @@ def _create_thread(request: HttpRequest) -> HttpResponse:
         attachments=_attachments(body),
     )
     thread = _service().create(dto, creator=request.user)
-    return created(thread_to_dict(thread, viewer_id=_viewer_id(request)))
+    # A freshly created thread's only message is the creator's own opener -> unread 0.
+    return created(thread_to_dict(thread, unread_count=0))
 
 
 def _send_message(request: HttpRequest, thread) -> HttpResponse:

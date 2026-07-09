@@ -21,6 +21,11 @@ ICAL_SALT = "schedule.ical"
 # A leaked feed URL grants the user's schedule until the token expires; bound to
 # token_version so password-change / logout also revokes outstanding feeds.
 ICAL_TOKEN_MAX_AGE = dt.timedelta(days=30)
+# Bound the feed so a director's (whole-tenant) calendar can't materialize years of
+# accumulated lesson occurrences into one multi-MB response on every poll: a rolling
+# recent-past window (calendars only need near-past for context) plus a hard row cap.
+ICAL_WINDOW_DAYS = 90
+ICAL_MAX_LESSONS = 2000
 
 
 # ---------------------------------------------------------------------------
@@ -332,7 +337,10 @@ def lessons_for_token(token: str):
     if data.get("tv") != user.token_version:
         raise AuthenticationException(_("Invalid feed token."), code="authentication_failed")
     try:
-        return scoped_lessons(user=user).order_by("starts_at")
+        cutoff = timezone.now() - dt.timedelta(days=ICAL_WINDOW_DAYS)
+        return scoped_lessons(user=user).filter(starts_at__gte=cutoff).order_by("starts_at")[
+            :ICAL_MAX_LESSONS
+        ]
     except TokenError:  # pragma: no cover - defensive
         return Lesson.objects.none()
 

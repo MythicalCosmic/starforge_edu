@@ -241,3 +241,20 @@ def test_director_can_run_a_centre_wide_campaign(tenant_a, as_role):
 def test_role_without_campaign_is_denied(tenant_a, as_role):
     teacher, _ = as_role(Role.TEACHER)  # teachers hold no campaign permission
     assert teacher.get(CAMPAIGNS).status_code == 403
+
+
+def test_recipients_endpoint_is_paginated(tenant_a, user_in, as_user):
+    """Scale (audit): the recipients list is paginated (was an uncapped full fetch — a
+    center-wide campaign freezes one row per student). data stays the page's item list."""
+    branch = _branch(tenant_a)
+    with schema_context(tenant_a.schema_name):
+        for _ in range(3):
+            _student(branch)
+    client = as_user(tenant_a, user_in(tenant_a, roles=[Role.REGISTRAR], branch=branch))
+    cid = _create(client, branch=branch.id)["id"]
+
+    resp = client.get(f"{CAMPAIGNS}{cid}/recipients/")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert isinstance(body["data"], list)
+    assert body["pagination"]["total"] == 3

@@ -120,6 +120,10 @@ class PrintJob(models.Model):
         indexes = [
             models.Index(fields=("branch", "status", "next_attempt_at"), name="printing_job_claim_idx"),
             models.Index(fields=("source", "source_id"), name="printing_job_source_idx"),
+            # The whole-tenant jobs list is newest-first; no existing index leads with
+            # created_at. Print jobs accumulate fast (one per printed doc) — index the sort
+            # (mirrors AIRequest, which already indexes its -created_at default ordering).
+            models.Index(fields=("-created_at", "id"), name="printjob_created_idx"),
         ]
 
     def __str__(self) -> str:  # pragma: no cover

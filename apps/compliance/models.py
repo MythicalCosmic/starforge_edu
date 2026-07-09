@@ -97,6 +97,9 @@ class Penalty(models.Model):
             models.Index(fields=("student", "status")),
             models.Index(fields=("staff", "status")),
             models.Index(fields=("branch", "status")),
+            # A director's default penalties list is whole-tenant, newest-first by issued_at;
+            # the composites all lead with a subject column, so index the default sort.
+            models.Index(fields=("-issued_at", "id"), name="penalty_issued_idx"),
         ]
         constraints = [
             models.CheckConstraint(condition=models.Q(points__gt=0), name="penalty_points_positive"),

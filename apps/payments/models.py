@@ -100,6 +100,10 @@ class Payment(models.Model):
         indexes = [
             models.Index(fields=("provider", "status")),
             models.Index(fields=("status", "created_at")),
+            # The default payments log is newest-first and usually unfiltered; the
+            # (status, created_at) composite can't serve the ordering without a status
+            # filter. Payment is one row per transaction (high volume) — index the sort.
+            models.Index(fields=("-created_at", "id"), name="payment_created_idx"),
         ]
 
     def __str__(self) -> str:  # pragma: no cover

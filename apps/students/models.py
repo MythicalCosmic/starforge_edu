@@ -46,7 +46,13 @@ class StudentProfile(models.Model):
 
     class Meta:
         ordering = ("-created_at",)
-        indexes = [models.Index(fields=("status", "branch"))]
+        indexes = [
+            models.Index(fields=("status", "branch")),
+            # Serve the default newest-first directory list (ORDER BY created_at DESC, id)
+            # from an index instead of a full sort — StudentProfile is the hottest, most
+            # unbounded list in the product (leads/withdrawn/graduated never deleted).
+            models.Index(fields=("-created_at", "id"), name="student_created_idx"),
+        ]
 
     def __str__(self) -> str:  # pragma: no cover
         return self.student_id
