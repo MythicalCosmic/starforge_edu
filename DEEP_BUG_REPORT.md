@@ -289,8 +289,8 @@ Making `enroll` end-date prior memberships (the finding's fix) would **break the
 ### R3-P2 · [LOW][concurrency] Root-level folder name uniqueness not DB-enforced (nullable parent → NULL-distinct) 🚩 DEFERRED (needs a migration; PLAUSIBLE)
 - **Where:** [apps/content/models.py:129](apps/content/models.py#L129). Fix = a partial unique on `(library, name) WHERE parent IS NULL` — batched with the migration-LOWs.
 
-### R3-P3 · [MEDIUM][correctness] Exam-generation idempotency key omits all exam params (keyed on subject only) → a differently-parameterized second request silently returns the stale first result 🚩 FLAGGED — OWNER/AI-INFRA DECISION (PLAUSIBLE)
-- **Where:** [apps/ai/services/__init__.py:120](apps/ai/services/__init__.py#L120) `make_idempotency_key`. Real gap, but the fix touches the **shared AI budget/idempotency helper used by 7 features**; changing it alters the spend/idempotency contract engine-wide. Only PLAUSIBLE (1 refuter dissented). **Flagged rather than changed** — needs an owner call on the intended per-subject-vs-per-params idempotency + budget policy, then a surgical per-feature key extension (an optional param-hash suffix, not a signature change).
+### R3-P3 · [MEDIUM][correctness] Exam-generation idempotency key omits all exam params (keyed on subject only) → a differently-parameterized second request silently returns the stale first result ✅ FIXED (owner-approved, commit `b685933`)
+- **Where:** [apps/ai/services/__init__.py](apps/ai/services/__init__.py) `make_idempotency_key` / `check_and_reserve_budget` / `request_exam_generation`. Implemented exactly the surgical, **opt-in** extension the flag recommended: both helpers take an optional `params` dict and, when given, append a stable sha256 suffix to the key; `request_exam_generation` passes `{exam_type, question_count, difficulty}`. Passing no params leaves the key unchanged, so the **other 6 AI features are unaffected** (no engine-wide contract change) — only exam generation opts in. Same subject + different exam shape now generates a NEW exam; identical params stay idempotent. +1 test.
 
 ---
 
@@ -442,6 +442,24 @@ A 5-cluster read-path audit (each finding verified real AND safe-additive by a s
 **Unbounded query (4).** (a) `academics` honor-roll/warnings materialized the entire matching Grade set into one response — hard-capped the top-N rows via a SQL-`LIMIT` slice. (b) `schedule` iCal feed served a director the whole tenant's lesson history rebuilt in memory on every calendar poll — bounded to a 90-day recent-past window + a 2000-row cap. (c) `campaigns` recipients endpoint returned the full frozen recipient set (one row per targeted student) — now paginated like every sibling list. (d) `messaging` thread list `prefetch_related("messages")` loaded **every** message of every listed thread just to count unread (a page of long threads = tens of thousands of rows for a few integers) — dropped the prefetch and replaced it with one bounded grouped query (`ThreadService.unread_counts`) reproducing the exact unread semantics.
 
 All 13 reuse existing scope/permission guards, add no owner-facing behavior change beyond the deliberate feed-window/pagination bounds, and are covered by +4 regression tests; the 12 affected apps run **486 passed / 0 failed**, ruff + mypy clean.
+
+---
+
+## Remaining-items triage (after the owner approved sweeping the flagged list)
+
+The owner authorized fixing everything + merge/push/deploy. **All MEDIUM+ findings are now FIXED** (the two security items R6/CONF3 + R1-05, plus R3-P3 this pass; everything else was fixed in the earlier rounds). What remains is either a genuine **decision** (which must not be guessed) or **LOW** edge-case concurrency whose fix carries more deploy risk than the bug:
+
+**Genuine decisions (surfaced to the owner, not guessed):**
+- **R4-07** [MEDIUM, scale] — two nightly beat tasks (`billing.meter_center` + `reports.aggregate_center`) both upsert `UsageSnapshot(center, today)`. Post-R4-05 they agree (no corruption) — it is a 2× nightly scan, not a bug. Both are documented + **tested** features (`test_beat_consolidation.py` asserts the beat entry; `test_reports.py` calls `aggregate_center`), so deduping cleanly needs the owner's call on whether platform-analytics aggregation should be independent of billing metering. Not worth breaking a documented feature to save one nightly scan.
+- **R4-P1** [MEDIUM, IDOR] — print-job presign enforces the tenant prefix but not per-object ownership. Partially mitigated (owning-read-permission-per-source gate landed earlier). The full object-scope redesign (non-uniform S3 keys, cross-app object ownership) is intricate — tracked in `task_16ac6823`; warrants a supervised change, not an overnight guess.
+- **R5-04** [MEDIUM, cosmetic] — datetime renders `+00:00` (string-preformatted presenters) vs `Z` (raw-datetime via DjangoJSONEncoder) for different fields. Both are valid ISO-8601; unifying is a **client-contract decision** (pick the canonical) + a broad response-shape sweep that risks breaking a client parsing one form. Needs the owner to pick `Z` or `+00:00`.
+- **cash `Idempotency-Key`** — the current 60s-window fallback is correct; the precise dedupe is a client header contract (frontend coordination), not a server bug.
+
+**LOW, deferred (fix risk > bug; each needs a dedupe-then-constrain migration or a coordinated sweep):**
+- R1-10 / R2-14 / R3-08 / R3-P2 — add a uniqueness constraint (NotificationDelivery double-send; RoleMembership null-dept; open print-job; folder root-name). Each needs a Postgres partial/`nulls-distinct` constraint **plus** a data-migration to dedupe any existing violating rows first (deploy-safe). Batch as one migration pass under supervision.
+- R2-13 — UTC-vs-local as-of-date needs a repo-wide `timezone.now().date()`→`localdate()` sweep kept consistent across attendance + membership dating (the isolated sites were already fixed in R4-05).
+- R3-07 / R3-09 / R3-P1 — dept-head branch scope (ambiguous "head's branch"), k-anon distinct-count, transcript enumeration oracle.
+- R4-06 — iCal token is a URL-path credential logged by the access log; mitigation is deploy-config (log redaction / disable the `?token=` fallback), not app code.
 
 ---
 
