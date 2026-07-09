@@ -690,7 +690,33 @@ def test_runs_list_query_count(tenant_a, user_in, as_user, django_assert_max_num
     with django_assert_max_num_queries(12):
         resp = client.get("/api/v1/reports/runs/")
     assert resp.status_code == 200
-    assert resp.data["count"] == 5
+    # Standard envelope (StandardEnvelopeRenderer) — reports matches every other app:
+    # {"success": true, "data": [...], "pagination": {"total", ...}}, NOT DRF's
+    # bare {"count", "results"}.
+    body = resp.json()
+    assert body["success"] is True
+    assert body["pagination"]["total"] == 5
+    assert len(body["data"]) == 5
+    assert body["pagination"]["page"] == 1
+
+
+def test_run_detail_and_datetime_envelope(tenant_a, user_in, as_user):
+    """A single run: enveloped {success,data} AND timestamps rendered UTC +00:00
+    (matching the layered presenters), not DRF's localized +05:00 / Z."""
+    with schema_context(tenant_a.schema_name):
+        director = user_in(tenant_a, roles=[Role.DIRECTOR])
+        run = ReportRun.objects.create(
+            report=Report.objects.get(key="enrollment"),
+            requested_by=director,
+            format="pdf",
+            status=ReportRun.Status.QUEUED,
+        )
+    resp = as_user(tenant_a, director).get(f"/api/v1/reports/runs/{run.pk}/")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    assert body["data"]["id"] == run.pk
+    assert body["data"]["created_at"].endswith("+00:00")
 
 
 # --------------------------------------------------------------------------- #

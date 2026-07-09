@@ -7,7 +7,7 @@ and `connection.schema_name` are already resolved when this runs.
 Behavior:
 - PUBLIC schema requests: no-op (platform admin + webhooks are unaffected).
 - TENANT schema with subscription status `suspended`: respond 402 with the
-  TD-18 envelope `{"error": {"code": "subscription_required", "detail": ...}}`
+  flat error envelope `{"success": false, "code": "subscription_required", "message": ...}`
   as a plain `JsonResponse` (this runs before DRF, so no exception handler).
 - Allowlist prefixes always pass through (so a suspended tenant can still log
   in, reach /admin/, the health probes, and the schema): `/admin/`,
@@ -66,14 +66,13 @@ class SubscriptionGateMiddleware:
         if status == "suspended":
             return JsonResponse(
                 {
-                    "error": {
-                        "code": "subscription_required",
-                        "detail": str(
-                            _(
-                                "This center's subscription is suspended. Please contact billing to restore access."
-                            )
-                        ),
-                    }
+                    "success": False,
+                    "code": "subscription_required",
+                    "message": str(
+                        _(
+                            "This center's subscription is suspended. Please contact billing to restore access."
+                        )
+                    ),
                 },
                 status=402,
             )

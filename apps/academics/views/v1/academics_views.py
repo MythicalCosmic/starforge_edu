@@ -482,6 +482,15 @@ def grade_recompute_view(request: HttpRequest) -> HttpResponse:
     term = Term.objects.filter(pk=term_id).first()
     if cohort is None or subject is None or term is None:
         raise NotFoundException(code="not_found")
+    # Scope the write like every other academics write path (exam create/update via
+    # _resolve_write_fields): a TEACHER may only recompute/publish grades for cohorts
+    # they teach. Without this a plain academics:write holder could force-publish another
+    # cohort's (or another branch's) grades. None = staff/superuser, unscoped.
+    writable = _writable_cohort_ids(request)
+    if writable is not None and cohort_id not in writable:
+        raise PermissionException(
+            "You may only recompute grades for cohorts you teach.", code="forbidden"
+        )
     grades = _grade_service().recompute(cohort=cohort, subject=subject, term=term, publish=publish)
     return success({"recomputed": len(grades)})
 

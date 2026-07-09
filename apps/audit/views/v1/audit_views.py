@@ -32,7 +32,7 @@ from core.api_auth import check_perm, require_auth
 from core.container import container
 from core.exceptions import NotFoundException, ValidationException
 from core.listing import cursor_paginate
-from core.responses import error
+from core.responses import error, success
 from core.utils import client_ip, user_agent
 from core.viewsets import assert_tenant_context
 
@@ -81,7 +81,10 @@ def audit_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
     row = _service().get(pk)
     if row is None:
         raise NotFoundException(code="not_found")
-    return JsonResponse(audit_to_dict(row))
+    # Standard success envelope — matches every other <resource>_detail_view and lets the
+    # availability middleware inject degraded-mode `warnings` (it keys on a top-level
+    # "success"). The COLLECTION view stays a bare {results,next,previous} cursor feed.
+    return success(audit_to_dict(row))
 
 
 @csrf_exempt

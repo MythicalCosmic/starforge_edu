@@ -115,7 +115,7 @@ class InactiveTenantMiddleware:
             tenant = getattr(connection, "tenant", None)
             if tenant is not None and not getattr(tenant, "is_active", True):
                 return JsonResponse(
-                    {"error": {"code": "center_inactive", "detail": "This center is not active."}},
+                    {"success": False, "code": "center_inactive", "message": "This center is not active."},
                     status=503,
                 )
         return self.get_response(request)
@@ -247,12 +247,15 @@ _ERROR_DETAILS = {
 }
 
 
-def _error_envelope(status_code: int) -> dict[str, dict[str, str]]:
+def _error_envelope(status_code: int) -> dict[str, object]:
+    # ONE flat error shape, byte-compatible with core.responses.error(), so a client
+    # branches on the same `success`/`code`/`message` keys for EVERY error — a layered
+    # domain error, a rate-limit 429, an unmatched-URL 404, an uncaught 500, or a 503
+    # outage — instead of special-casing a nested {"error": {...}} for Django's own paths.
     return {
-        "error": {
-            "code": _ERROR_CODES.get(status_code, "error"),
-            "detail": _ERROR_DETAILS.get(status_code, "An error occurred."),
-        }
+        "success": False,
+        "code": _ERROR_CODES.get(status_code, "error"),
+        "message": _ERROR_DETAILS.get(status_code, "An error occurred."),
     }
 
 
@@ -277,8 +280,8 @@ def json_500(request: HttpRequest) -> JsonResponse:
 class JsonErrorResponseMiddleware:
     """Guarantee every error response is JSON, project-wide.
 
-    DRF endpoints already emit the ``{"error": {...}}`` envelope via
-    ``core.exceptions.drf_exception_handler``. This is the safety net for everything
+    DRF endpoints already emit the flat ``{"success": false, "code", "message"}`` envelope
+    via ``core.exceptions.drf_exception_handler``. This is the safety net for everything
     that does NOT pass through DRF — an unmatched URL, a non-DRF view, the admin, and
     (crucially) the DEBUG technical 404/500 pages — rewriting any HTML error response
     into the same envelope so an API/mobile client never receives an HTML page.
@@ -407,7 +410,7 @@ class AppAvailabilityMiddleware:
         if status in (STATUS_DISABLED, STATUS_UNAVAILABLE):
             detail = warnings[0] if warnings else f"The {app} service is currently unavailable."
             return JsonResponse(
-                {"error": {"code": "service_unavailable", "detail": detail}}, status=503
+                {"success": False, "code": "service_unavailable", "message": detail}, status=503
             )
         return warnings  # degraded -> non-empty; fully up -> empty
 

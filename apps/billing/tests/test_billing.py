@@ -92,7 +92,7 @@ def test_middleware_402_on_suspended(tenant_a, user_in, as_user):
     client = as_user(tenant_a, user)
     resp = client.get("/api/v1/students/")
     assert resp.status_code == 402
-    assert resp.json()["error"]["code"] == "subscription_required"
+    assert resp.json()["code"] == "subscription_required"
 
 
 def test_middleware_active_passes(tenant_a, user_in, as_user):

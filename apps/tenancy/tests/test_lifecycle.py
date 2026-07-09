@@ -19,7 +19,7 @@ def test_inactive_center_503(tenant_a, client_for):
     # Anonymous is fine — InactiveTenantMiddleware runs before authentication.
     resp = client_for(tenant_a).get("/api/v1/org/settings/")
     assert resp.status_code == 503
-    assert resp.json()["error"]["code"] == "center_inactive"
+    assert resp.json()["code"] == "center_inactive"
 
 
 def test_trial_expiry_flips_is_active(tenant_a):

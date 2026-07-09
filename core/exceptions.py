@@ -142,21 +142,21 @@ def drf_exception_handler(exc: Exception, context: dict[str, Any]) -> Response |
         wait = getattr(exc, "wait", None)
         if wait is not None:
             headers["Retry-After"] = str(int(wait))
-        body: dict[str, Any] = {"code": exc.code, "detail": exc.detail}
+        body: dict[str, Any] = {"success": False, "code": exc.code, "message": str(exc.detail)}
         exc_fields = getattr(exc, "fields", None)
         if exc_fields:
-            body["fields"] = exc_fields
-        return Response({"error": body}, status=exc.status_code, headers=headers or None)
+            body["errors"] = exc_fields
+        return Response(body, status=exc.status_code, headers=headers or None)
 
     if isinstance(exc, PermissionDenied):
         return Response(
-            {"error": {"code": "forbidden", "detail": str(exc) or _("Forbidden.")}},
+            {"success": False, "code": "forbidden", "message": str(exc) or str(_("Forbidden."))},
             status=status.HTTP_403_FORBIDDEN,
         )
 
     if isinstance(exc, Http404):
         return Response(
-            {"error": {"code": "not_found", "detail": _("Resource not found.")}},
+            {"success": False, "code": "not_found", "message": str(_("Resource not found."))},
             status=status.HTTP_404_NOT_FOUND,
         )
 
@@ -165,13 +165,14 @@ def drf_exception_handler(exc: Exception, context: dict[str, Any]) -> Response |
         logger.exception("Unhandled exception in view", extra={"context": context})
         return None
 
-    # Normalize DRF exceptions to the TD-18 envelope with a stable, branchable
-    # `code`. Headers DRF set (e.g. Retry-After on Throttled) are preserved.
+    # Normalize DRF exceptions to the flat project envelope with a stable, branchable
+    # `code`, byte-compatible with core.responses.error() and core.middleware. Headers
+    # DRF set (e.g. Retry-After on Throttled) are preserved.
     code, fields = _classify(exc)
-    error: dict[str, Any] = {"code": code, "detail": _detail_text(exc)}
+    body = {"success": False, "code": code, "message": _detail_text(exc)}
     if fields is not None:
-        error["fields"] = fields
-    response.data = {"error": error}
+        body["errors"] = fields
+    response.data = body
     return response
 
 

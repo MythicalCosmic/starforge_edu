@@ -51,7 +51,9 @@ def test_disabled_app_503s_and_others_keep_working(tenant_a, as_role):
     _disable(tenant_a, {"placement"})
     down = director.get("/api/v1/placement/tests/")
     assert down.status_code == 503
-    assert down.json()["error"]["code"] == "service_unavailable"
+    body = down.json()
+    assert body["success"] is False
+    assert body["code"] == "service_unavailable"
     # a different app is completely unaffected — the project did NOT fall
     assert director.get("/api/v1/cohorts/").status_code == 200
 

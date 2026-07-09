@@ -23,6 +23,7 @@ from apps.reports.serializers import (
     ReportSerializer,
 )
 from core.permissions import DenyWriteForReadOnlyToken, RolePermission, get_user_roles
+from core.renderers import StandardEnvelopeRenderer
 from core.viewsets import assert_tenant_context
 
 
@@ -32,6 +33,7 @@ class ReportViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.G
 
     serializer_class = ReportSerializer
     permission_classes = [RolePermission]
+    renderer_classes = [StandardEnvelopeRenderer]
     resource = "reports"
     queryset = Report.objects.none()  # schema introspection; real qs in get_queryset
     filterset_fields = ("key", "default_format")
@@ -57,6 +59,7 @@ class ReportRunViewSet(
 
     serializer_class = ReportRunReadSerializer
     permission_classes = [RolePermission, DenyWriteForReadOnlyToken]
+    renderer_classes = [StandardEnvelopeRenderer]
     resource = "reports"
     required_perms = {"create": "reports:write"}
     queryset = ReportRun.objects.none()
@@ -110,6 +113,7 @@ class ReportScheduleViewSet(
 
     serializer_class = ReportScheduleReadSerializer
     permission_classes = [RolePermission, DenyWriteForReadOnlyToken]
+    renderer_classes = [StandardEnvelopeRenderer]
     resource = "reports"
     required_perms = {"create": "reports:write", "partial_update": "reports:write", "update": "reports:write"}
     queryset = ReportSchedule.objects.none()

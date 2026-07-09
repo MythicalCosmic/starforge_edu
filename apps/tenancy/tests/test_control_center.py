@@ -116,7 +116,7 @@ def test_suspend_then_activate_round_trip(
     # Tenant API now blocked by the Day-3 paywall (402 subscription_required).
     blocked = client_for(tenant_a).get("/api/v1/org/settings/")
     assert blocked.status_code == 402
-    assert blocked.json()["error"]["code"] == "subscription_required"
+    assert blocked.json()["code"] == "subscription_required"
 
     with django_capture_on_commit_callbacks(execute=True):
         resp = staff_client.post(f"/api/v1/platform/centers/{tenant_a.pk}/activate/", {}, format="json")

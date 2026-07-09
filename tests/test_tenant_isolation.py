@@ -29,8 +29,8 @@ def test_cross_tenant_token_rejected(tenant_a, tenant_b, user_in, client_for, ur
     resp = client_b.get(url)
 
     assert resp.status_code == 401
-    # Either envelope: layered plain views (cohorts) return {"code": ...}; still-DRF
-    # endpoints (users/me, students) return {"error": {"code": ...}}.
+    # Flat envelope everywhere now: {"success": false, "code": ...}. (The legacy nested
+    # fallback is kept harmless in case an old path ever slips through.)
     body = resp.json()
     code = body["code"] if "code" in body else body.get("error", {}).get("code")
     assert code == "authentication_failed"

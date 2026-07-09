@@ -65,7 +65,8 @@ if settings.DEBUG:
     urlpatterns += staticfiles_urlpatterns()
 
 # Backend API: Django's own error responses (unmatched URL, uncaught 500, CSRF
-# 403, suspicious-operation 400) return the JSON {"error": {...}} envelope.
+# 403, suspicious-operation 400) return the flat {"success": false, "code", "message"}
+# JSON envelope — identical to what the layered views and DRF handler emit.
 handler400 = "core.middleware.json_400"
 handler403 = "core.middleware.json_403"
 handler404 = "core.middleware.json_404"

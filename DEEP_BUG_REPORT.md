@@ -479,6 +479,26 @@ The owner authorized fixing everything + merge/push/deploy. **All MEDIUM+ findin
 
 ---
 
+## Fault-isolation + response-consistency + security audit (2nd owner request, 2026-07-08)
+
+Owner asked to keep hardening: per-app fault isolation, response-envelope consistency, security/passwords, static files, performance. Built the fault-isolation layer, then ran an 8-agent adversarial audit (response-consistency + security/passwords + authz/injection, each finding refuted by an independent verifier). 5 confirmed findings — all fixed + gated.
+
+**Fault isolation (FEATURE, `819178e`):** `core/availability.py` (mount→app map, hard/soft dependency graph, per-tenant runtime disable set + global `DISABLED_APPS`) + `AppAvailabilityMiddleware` (a disabled app or one whose HARD dep is down → clean `503`; a SOFT dep down → served with a `warnings` list injected into the success envelope) + control endpoint `GET/PATCH /api/v1/org/system/apps/`. ONE app failing never falls the whole API. 6 tests.
+
+**FI-1 (HIGH, error-envelope inconsistency) — FIXED.** The API shipped TWO error shapes: flat `{success:false,code,message}` (layered views, rate-limit) vs nested `{error:{code,detail}}` (Django `handler404/400/403/500`, `_jsonify` HTML-rewrite, `InactiveTenantMiddleware`, `AppAvailabilityMiddleware` 503, billing paywall 402, the DRF `reports` handler). A client couldn't branch on errors uniformly. Converged EVERY API-client-facing error path to the flat `core.responses.error()` shape (`core/middleware.py` `_error_envelope`/`center_inactive`/`service_unavailable`; `core/exceptions.py` `drf_exception_handler`; `apps/billing/middleware.py`). Deliberately LEFT: `/healthz/*` (separate ops-probe contract, not `/api/`), payments webhooks (provider-exact formats). 6 test assertions flipped nested→flat.
+
+**FI-2 (MEDIUM, reports bare envelope) — FIXED.** `reports` (lone DRF app) returned bare serializer data + DRF `{count,results}` pagination and silently bypassed the availability warnings injection (no `success` key). Added `core.renderers.StandardEnvelopeRenderer` (wraps DRF responses into `{success,data,pagination}`, passes error bodies through) wired to the 3 reports viewsets. 5 renderer unit tests + 2 HTTP envelope tests.
+
+**FI-3 (MEDIUM, audit detail bare) — FIXED.** `audit_detail_view` returned `JsonResponse(audit_to_dict(row))` (bare) unlike every other detail view → now `success(...)`.
+
+**FI-4 (MEDIUM, reports datetime) — FIXED.** DRF localized `reports` timestamps to `Asia/Tashkent` (`+05:00`) while every layered presenter emits UTC (`+00:00`). Added `UtcDateTimeField` (forces UTC + plain isoformat) on the reports read serializers → whole API now emits `+00:00`. (Closes the long-deferred R5-04 datetime item.)
+
+**FI-5 (MEDIUM, broken function-level authz) — FIXED.** `grade_recompute_view` resolved cohort/subject/term by raw pk with NO writable-cohort scope, so any `academics:write` holder (incl. a plain TEACHER) could recompute AND publish grades for a cohort they don't teach, cross-branch. Added the same `_writable_cohort_ids` gate the exam write-path uses (`403 forbidden` for a non-taught cohort). Regression test mirrors `test_teacher_cannot_create_exam_in_non_taught_cohort`.
+
+**Static files (`de6b4b0`):** admin CSS 404'd under gunicorn (no static route in the urlconfs; gunicorn ≠ runserver). Added DEBUG-guarded `staticfiles_urlpatterns()` to both urlconfs (zero new dep; server runs DEBUG=True). **Security agent: 0 password/secret-exposure findings** (the `security-passwords-secrets` dimension returned empty — no leaked secrets, no plaintext passwords, hashing intact).
+
+---
+
 ## Appendix A — Refuted candidates
 
 _Populated on completion. Recorded so future passes don't re-investigate them._

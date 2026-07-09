@@ -678,6 +678,37 @@ def test_teacher_cannot_create_exam_in_non_taught_cohort(tenant_a, user_in, as_u
     assert ok.json()["data"]["cohort"] == own_id
 
 
+def test_teacher_cannot_recompute_grades_for_non_taught_cohort(tenant_a, user_in, as_user):
+    """Authz parity with the exam write-path (security finding): a TEACHER holding
+    academics:write may NOT recompute/publish grades for a cohort they don't teach —
+    otherwise they could force-publish another cohort's (or another branch's) grades.
+    Their own cohort is allowed."""
+    teacher_user = user_in(tenant_a, roles=["teacher"])
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        teacher_profile = TeacherProfileFactory(user=teacher_user, branch=branch)
+        own_cohort: Any = CohortFactory(branch=branch, primary_teacher=teacher_profile)
+        foreign_cohort: Any = CohortFactory(branch=branch)
+        subject = SubjectFactory()
+        term: Any = TermFactory()
+        own_id, foreign_id = own_cohort.id, foreign_cohort.id
+        subject_id, term_id = subject.id, term.id
+
+    client = as_user(tenant_a, teacher_user)
+    body = {"subject": subject_id, "term": term_id, "publish": True}
+
+    foreign = client.post(
+        "/api/v1/academics/grades/recompute/", {**body, "cohort": foreign_id}, format="json"
+    )
+    assert foreign.status_code == 403
+    assert foreign.json()["code"] == "forbidden"
+
+    ok = client.post(
+        "/api/v1/academics/grades/recompute/", {**body, "cohort": own_id}, format="json"
+    )
+    assert ok.status_code == 200
+
+
 def test_grades_cross_tenant_isolated(tenant_a, tenant_b, user_in, as_user):
     with schema_context(tenant_a.schema_name):
         branch = BranchFactory()

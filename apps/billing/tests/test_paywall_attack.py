@@ -42,7 +42,7 @@ def test_suspended_tenant_students_402(tenant_a, user_in, as_user):
     _set_status(tenant_a, "suspended")
     resp = as_user(tenant_a, director).get(STUDENTS_URL)
     assert resp.status_code == 402
-    assert resp.json()["error"]["code"] == "subscription_required"
+    assert resp.json()["code"] == "subscription_required"
 
 
 def test_active_tenant_students_not_paywalled(tenant_a, user_in, as_user):

@@ -1,6 +1,7 @@
-"""Backend API contract: every response is JSON — errors use the
-``{"error": {"code", "detail"}}`` envelope, and there is no HTML browsable-API UI.
-Mobile/web clients must never receive an HTML page (a template or a DEBUG error page)."""
+"""Backend API contract: every response is JSON — errors use the ONE flat
+``{"success": false, "code", "message"}`` envelope (Django's own handlers included),
+and there is no HTML browsable-API UI. Mobile/web clients must never receive an HTML
+page (a template or a DEBUG error page)."""
 
 from __future__ import annotations
 
@@ -13,7 +14,11 @@ def test_unmatched_url_is_json_404_not_html(tenant_a, client_for):
     resp = client_for(tenant_a).get("/api/v1/definitely-not-a-real-endpoint/")
     assert resp.status_code == 404
     assert resp["Content-Type"].startswith("application/json")
-    assert resp.json()["error"]["code"] == "not_found"
+    body = resp.json()
+    # Same flat envelope Django's handlers now emit as the layered views — a client
+    # branches on top-level success/code for an unmatched-URL 404 exactly like any error.
+    assert body["success"] is False
+    assert body["code"] == "not_found"
 
 
 def test_unauthenticated_request_is_json_401(tenant_a, client_for):

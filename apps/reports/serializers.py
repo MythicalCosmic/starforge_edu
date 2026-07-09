@@ -2,9 +2,33 @@
 
 from __future__ import annotations
 
+from datetime import UTC
+from typing import Any
+
 from rest_framework import serializers
 
 from apps.reports.models import Report, ReportFormat, ReportKey, ReportRun, ReportSchedule
+
+
+class UtcDateTimeField(serializers.DateTimeField):
+    """Render timestamps in UTC with a ``+00:00`` offset, matching every layered
+    app's presenter (which emits ``value.isoformat()`` on a UTC-aware datetime).
+
+    DRF's default DateTimeField localizes aware values to ``settings.TIME_ZONE``
+    (Asia/Tashkent) and swaps a trailing ``+00:00`` to ``Z`` — so without this,
+    reports would emit ``...+05:00`` while the rest of the API emits ``...+00:00``
+    for the same conceptual field. Forcing UTC + a plain ``isoformat()`` keeps the
+    whole API's timestamps byte-identical.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        kwargs.setdefault("default_timezone", UTC)
+        super().__init__(**kwargs)
+
+    def to_representation(self, value: Any) -> Any:
+        if not value:
+            return None
+        return self.enforce_timezone(value).isoformat()
 
 
 class ReportSerializer(serializers.ModelSerializer):
@@ -19,6 +43,9 @@ class ReportSerializer(serializers.ModelSerializer):
 class ReportRunReadSerializer(serializers.ModelSerializer):
     report_key = serializers.CharField(source="report.key", read_only=True)
     download_url = serializers.SerializerMethodField()
+    created_at = UtcDateTimeField(read_only=True)
+    started_at = UtcDateTimeField(read_only=True)
+    finished_at = UtcDateTimeField(read_only=True)
 
     class Meta:
         model = ReportRun
@@ -55,6 +82,9 @@ class ReportRunCreateSerializer(serializers.Serializer):
 
 class ReportScheduleReadSerializer(serializers.ModelSerializer):
     report_key = serializers.CharField(source="report.key", read_only=True)
+    last_run_at = UtcDateTimeField(read_only=True)
+    created_at = UtcDateTimeField(read_only=True)
+    updated_at = UtcDateTimeField(read_only=True)
 
     class Meta:
         model = ReportSchedule
