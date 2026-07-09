@@ -56,17 +56,36 @@ _CONVERTER_TYPE = {
 }
 
 
-def _route_of(pattern: Any) -> str:
-    """The literal route string of a URLPattern/URLResolver (``students/``, ``<int:pk>/``)."""
+def _route_of(pattern: Any) -> str | None:
+    """The route template of a URLPattern/URLResolver as an OpenAPI path fragment.
+
+    Django ``path()`` gives a RoutePattern (``._route`` like ``students/`` / ``<int:pk>/``).
+    A DRF router (the lone DRF ``reports`` app) or ``re_path`` gives a RegexPattern (``._regex``,
+    no ``._route``) — translate its named groups to ``{name}`` and SKIP the ``.json``/``.api``
+    format-suffix routes DRF adds. ``None`` => the caller skips this entry.
+    """
     p = getattr(pattern, "pattern", None)
-    return getattr(p, "_route", "") if p is not None else ""
+    if p is None:
+        return ""
+    route = getattr(p, "_route", None)
+    if route is not None:
+        return route  # django path()
+    rx = getattr(p, "_regex", "") or ""
+    if not rx or "?P<format>" in rx:  # a DRF format-suffix (.json / .api) route — skip
+        return None
+    frag = re.sub(r"\(\?P<(\w+)>[^)]*\)", r"{\1}", rx.lstrip("^").rstrip("$"))
+    # Bail on anything still carrying regex metacharacters we can't render as a clean path.
+    return None if any(c in frag for c in "()[]\\+*?|") else frag
 
 
 def _walk(patterns: list, prefix: str) -> list[tuple[str, Any, str]]:
     """Flatten a urlpatterns tree into ``(full_route, callback, name)`` leaves."""
     out: list[tuple[str, Any, str]] = []
     for entry in patterns:
-        route = prefix + _route_of(entry)
+        frag = _route_of(entry)
+        if frag is None:  # a deliberately-skipped route (DRF format-suffix / untranslatable)
+            continue
+        route = prefix + frag
         if isinstance(entry, URLResolver):
             out.extend(_walk(entry.url_patterns, route))
         elif isinstance(entry, URLPattern):
@@ -100,6 +119,19 @@ def _view_source(callback: Any) -> str:
 
 def _methods_and_meta(callback: Any) -> tuple[list[str], str | None, str]:
     """(http_methods, required_permission, module_resource) introspected from the view."""
+    # DRF viewset route (as_view({"get":"list","post":"create",...})): the real method set is
+    # the actions map, NOT the request.method branches (unwrap resolves to APIView.dispatch).
+    actions = getattr(callback, "actions", None)
+    if actions:
+        # The DRF router maps every mixin verb (e.g. PUT+PATCH for UpdateModelMixin), but the
+        # viewset may narrow that via http_method_names (ReportScheduleViewSet drops PUT).
+        allowed = getattr(getattr(callback, "cls", None), "http_method_names", None)
+        allow = {m.upper() for m in allowed} if allowed else set(_HTTP_METHODS)
+        drf_methods = sorted(
+            {m.upper() for m in actions if m.upper() in _HTTP_METHODS and m.upper() in allow},
+            key=_HTTP_METHODS.index,
+        )
+        return (drf_methods or ["GET"]), None, ""
     src = _view_source(callback)
     methods: set[str] = set()
     # (1) Django method-restricting decorators (the decorator header sits above `def`).
@@ -259,6 +291,8 @@ def _build_paths(urlconf: str | None) -> tuple[dict, tuple[str, ...]]:
     for route, callback, name in _walk(get_resolver(urlconf).url_patterns, ""):
         if not route.startswith(_API_PREFIX):
             continue
+        if getattr(getattr(callback, "cls", None), "__name__", "") == "APIRootView":
+            continue  # DRF DefaultRouter's api-root listing — not a real resource endpoint
         try:
             path, params = _openapi_path(route)
             methods, perm, _resource = _methods_and_meta(callback)

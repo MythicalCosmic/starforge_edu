@@ -31,6 +31,22 @@ def test_schema_covers_the_layered_api():
     assert {"get", "patch", "put", "delete"} <= set(paths["/api/v1/students/{pk}/"])
 
 
+def test_reports_drf_app_is_covered():
+    """The lone DRF app (reports) uses a DefaultRouter -> RegexPattern routes + viewset action
+    maps. The generator must translate those (not collapse every route onto /api/v1/reports/,
+    nor default to GET-only). Regression for the two schema-correctness bugs."""
+    s = build_schema(None)
+    paths = s["paths"]
+    assert "/api/v1/reports/{pk}/" in paths  # library detail (was collapsed away)
+    assert {"get", "post"} <= set(paths["/api/v1/reports/runs/"])  # list + create
+    assert "get" in paths["/api/v1/reports/runs/{pk}/"]  # retrieve (pk was lost)
+    assert {"get", "post"} <= set(paths["/api/v1/reports/schedules/"])
+    sched = set(m for m in paths["/api/v1/reports/schedules/{pk}/"] if m in ("get", "put", "patch"))
+    assert "patch" in sched
+    assert "put" not in sched  # ReportScheduleViewSet.http_method_names drops PUT
+    assert not any("{format}" in p for p in paths)  # DRF .json/.api suffix routes skipped
+
+
 def test_auth_and_security_scheme():
     s = build_schema(None)
     login = s["paths"]["/api/v1/auth/login/"]["post"]  # POST (via @require_POST), public

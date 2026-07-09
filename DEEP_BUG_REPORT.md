@@ -563,6 +563,16 @@ The final tail-sweep. Both **guard-consistency slices (money/admin apps + academ
 
 ---
 
+## OpenAPI/Swagger + a DEBUG response bug (2026-07-09, after the schema/docs deliverable)
+
+Built a full OpenAPI generator + rewrote the API contract (commit `5027ceb`), then hunted the new surface.
+
+**HTTP2-1 (HIGH, site-down on the DEBUG test server) — FIXED (`4aad1fd`).** The owner reported `ERR_HTTP2_PROTOCOL_ERROR` / no response on `/` and any "normal" (unmatched) path. Cause: under `DEBUG=True`, Django serves an HTML technical-404/500 page (~3 KB); `CommonMiddleware` stamps `Content-Length` from that HTML, then `JsonErrorResponseMiddleware._jsonify` rewrites the body to the ~73-byte JSON envelope + resets Content-Type **but left the stale `Content-Length: 3020`**. The response declared 3020 bytes and sent 73 → HTTP/2 aborts the stream (`INTERNAL_ERROR`), HTTP/1.1 clients hang. Only unmatched/error paths broke (real endpoints return `JsonResponse` with a correct length). Production (`DEBUG=False`) returns JSON via `handler404` so it was unaffected. Fix: re-stamp `Content-Length` after the rewrite (mirrors `AppAvailabilityMiddleware._inject_warnings`). +regression test (DEBUG=True unmatched URL → `Content-Length == len(content)`). Verified live: `/` now returns a clean JSON 404 over HTTP/2.
+
+**OPENAPI-1 + OPENAPI-2 (HIGH, schema-correctness) — FIXED.** The custom `core/openapi.py` generator handled the 37 plain-view apps but botched the lone DRF app (`reports`): (1) `_route_of` read only `RoutePattern._route`, but DRF-router routes are `RegexPattern` (`._regex`) → every reports route collapsed onto `/api/v1/reports/`, dropping the detail/runs/schedules paths; (2) method introspection resolved a DRF viewset's `as_view()` closure to `APIView.dispatch` (no `request.method` literals) → defaulted to GET-only, dropping create/update. Fix: `_route_of` translates a `RegexPattern` (named groups → `{name}`, skips `.json`/`.api` format-suffix routes), `_methods_and_meta` reads `callback.actions` for DRF viewsets (filtered by `http_method_names`), and `_build_paths` skips the DRF api-root. Reports now renders correctly (runs/schedules list+create+detail, library list+detail; +4 paths → 310). +regression test. The endpoints always worked — only the schema was wrong.
+
+---
+
 ## Appendix A — Refuted candidates
 
 _Populated on completion. Recorded so future passes don't re-investigate them._
