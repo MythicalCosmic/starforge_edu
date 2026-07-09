@@ -322,6 +322,34 @@ async def test_attendance_student_no_branch_scope_denied_4403(tenant_a):
     assert code == 4403
 
 
+@pytest.mark.channels
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_attendance_same_branch_student_denied_4403(tenant_a):
+    """WS-1: a STUDENT in the cohort's OWN branch must NOT get the cohort-WIDE live feed —
+    their attendance:read is row-scoped to self in the HTTP path; the dashboard is a staff
+    feed. Previously a same-branch student could connect (the earlier test's own docstring
+    admitted it); now denied 4403."""
+    from apps.cohorts.tests.factories import CohortFactory
+    from apps.org.tests.factories import BranchFactory
+    from apps.users.models import RoleMembership
+    from apps.users.tests.factories import UserFactory
+
+    def _setup():
+        with schema_context(tenant_a.schema_name):
+            branch = BranchFactory()
+            cohort = CohortFactory(branch=branch)
+            student = UserFactory()
+            RoleMembership.objects.create(user=student, branch=branch, role="student")
+            student.refresh_from_db()
+            return cohort.pk, _mint_access(tenant_a, student)
+
+    cohort_id, token = await sync_to_async(_setup)()
+    _comm, connected, code = await _connect(f"/ws/cohorts/{cohort_id}/attendance/", HOST_A, token)
+    assert not connected
+    assert code == 4403
+
+
 # --------------------------------------------------------------------------- #
 # AttendanceConsumer — E2E relay via the producer
 # --------------------------------------------------------------------------- #

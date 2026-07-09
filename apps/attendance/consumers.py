@@ -1,12 +1,15 @@
 """Attendance WebSocket consumer (D4-LC-4).
 
 ``ws/cohorts/<cohort_id>/attendance/`` — live attendance dashboard for one
-cohort. Authorization is checked **on connect** (not per-message):
+cohort. The feed is cohort-WIDE (every student's live marks), so it is a STAFF
+feed. Authorization is checked **on connect** (not per-message):
 
   1. The user must hold ``attendance:read`` (``has_permission_code``).
-  2. AND be a director (``*:*``) OR have an active RoleMembership whose branch is
-     the cohort's branch — a teacher from another branch must not watch this
-     cohort's live marks.
+  2. AND be a director (``*:*``) OR hold a DASHBOARD role (head-of-dept / teacher)
+     in the cohort's branch. A STUDENT/PARENT also holds ``attendance:read`` but
+     only ROW-scoped to self / their children (``apps.attendance.selectors``), so
+     they must NOT receive the whole cohort's live marks; a teacher from another
+     branch must not watch this cohort either.
 
 Failure modes:
   - anonymous / cross-tenant / stale tv -> 4401 (middleware yields AnonymousUser)
@@ -35,10 +38,15 @@ from infrastructure.websocket.consumers import (
     accepted_subprotocol,
 )
 
+# Roles that may watch the cohort-WIDE live dashboard (director is handled separately as
+# "sees every cohort"). STUDENT/PARENT are excluded: their attendance:read is row-scoped to
+# self / their children in the HTTP selectors, so they must not get every peer's live marks.
+_DASHBOARD_ROLES = frozenset({Role.HEAD_OF_DEPT, Role.TEACHER})
+
 
 @database_sync_to_async
 def _can_watch_cohort(*, schema: str, user_id: int, cohort_id: int) -> bool:
-    """attendance:read AND (director OR a membership in the cohort's branch)."""
+    """attendance:read AND (director OR a DASHBOARD-role membership in the cohort's branch)."""
     from apps.cohorts.models import Cohort
     from apps.users.models import RoleMembership
 
@@ -56,7 +64,12 @@ def _can_watch_cohort(*, schema: str, user_id: int, cohort_id: int) -> bool:
         cohort_branch_id = Cohort.objects.filter(pk=cohort_id).values_list("branch_id", flat=True).first()
         if cohort_branch_id is None:
             return False
-        return any(branch_id == cohort_branch_id for _role, branch_id in memberships)
+        # A row-scoped student/parent must NOT receive the whole cohort's feed: require a
+        # dashboard-role (HOD/teacher) membership in the cohort's own branch.
+        return any(
+            role in _DASHBOARD_ROLES and branch_id == cohort_branch_id
+            for role, branch_id in memberships
+        )
 
 
 class AttendanceConsumer(HeartbeatConsumerMixin):

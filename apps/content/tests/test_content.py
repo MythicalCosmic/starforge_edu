@@ -339,6 +339,35 @@ def test_visibility_positive_department_membership(tenant_a, user_in):
         assert other_dept_file not in visible
 
 
+def test_content_write_scoped_to_visible_library(tenant_a, user_in, as_user):
+    """CONTENT-1: content WRITES are visibility-scoped like reads. A content:write holder
+    (teacher scoped to dept A) cannot create a course in a DEPARTMENT-restricted library of
+    dept B they cannot see (403 library_out_of_scope), closing the read/write asymmetry; a
+    TENANT-visible library works (201)."""
+    from apps.academics.tests.factories import SubjectFactory
+    from apps.users.models import RoleMembership
+
+    teacher = user_in(tenant_a, roles=["teacher"])
+    with schema_context(tenant_a.schema_name):
+        branch: Any = BranchFactory()
+        my_dept: Any = DepartmentFactory(branch=branch)
+        other_dept: Any = DepartmentFactory(branch=branch)
+        RoleMembership.objects.create(user=teacher, branch=branch, department=my_dept, role="teacher")
+        hidden = ContentLibraryFactory(visibility="department", department=other_dept)
+        visible = ContentLibraryFactory(visibility="tenant")
+        subject_id = SubjectFactory().id
+        hidden_id, visible_id = hidden.id, visible.id
+
+    client = as_user(tenant_a, teacher)
+    base = {"subject": subject_id, "title": "Algebra"}
+    blocked = client.post("/api/v1/content/courses/", {**base, "library": hidden_id}, format="json")
+    assert blocked.status_code == 403, blocked.content
+    assert blocked.json()["code"] == "library_out_of_scope"
+
+    ok = client.post("/api/v1/content/courses/", {**base, "library": visible_id}, format="json")
+    assert ok.status_code == 201, ok.content
+
+
 def test_visibility_positive_role_allowlist(tenant_a, user_in):
     """A user whose role is in allowed_roles sees a role-visibility library
     (positive allowed_roles__contains JSONField containment branch)."""

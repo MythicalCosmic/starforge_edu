@@ -28,7 +28,7 @@ from apps.content.interfaces.services import (
     IModuleService,
 )
 from apps.content.models import ContentLibrary, LessonFile, LibraryMaterial
-from core.exceptions import ValidationException
+from core.exceptions import PermissionException, ValidationException
 
 
 def _reject(field: str, message: str) -> ValidationException:
@@ -38,6 +38,30 @@ def _reject(field: str, message: str) -> ValidationException:
 def _require_fk(model, value, field: str):
     if not model.objects.filter(pk=value).exists():
         raise _reject(field, f"{field} does not exist.")
+
+
+def _assert_library_writable(library_id, *, actor, roles) -> None:
+    """Content reads are visibility-scoped (DEPARTMENT/COHORT/ROLE walls); writes must be too.
+    A ``content:write`` holder may only create/reparent content into a library they can SEE —
+    otherwise they inject material into a restricted library, surfacing it to that library's
+    members (cross-department/cohort content injection). ``actor=None`` is a trusted internal
+    call (no HTTP actor) and skips the check; mirrors LibraryMaterialService.is_writable_library."""
+    if actor is None or library_id is None:
+        return
+    if not selectors.scoped_libraries(user=actor, roles=roles).filter(pk=library_id).exists():
+        raise PermissionException("You don't have access to that library.", code="library_out_of_scope")
+
+
+def _course_library_id(course_id) -> int | None:
+    from apps.content.models import Course
+
+    return Course.objects.filter(pk=course_id).values_list("library_id", flat=True).first()
+
+
+def _module_library_id(module_id) -> int | None:
+    from apps.content.models import Module
+
+    return Module.objects.filter(pk=module_id).values_list("course__library_id", flat=True).first()
 
 
 class ContentLibraryService(IContentLibraryService):
@@ -65,10 +89,13 @@ class ContentLibraryService(IContentLibraryService):
             out["cohort_id"] = data["cohort"]
         return out
 
-    def create(self, *, data: dict[str, Any]):
+    def create(self, *, data: dict[str, Any], actor: Any = None, roles: set[str] | None = None):
+        # A library is the top-level container (no parent library to scope against); creating
+        # one is a plain content:write authoring action. actor/roles accepted for a uniform
+        # CRUD signature but not needed here.
         return self.repository.add(data=self._resolve(data))
 
-    def update(self, obj, *, changes: dict[str, Any]):
+    def update(self, obj, *, changes: dict[str, Any], actor: Any = None, roles: set[str] | None = None):
         return self.repository.apply_changes(obj, changes=self._resolve(changes))
 
     def delete(self, obj) -> None:
@@ -97,11 +124,16 @@ class CourseService(ICourseService):
             out["subject_id"] = data["subject"]
         return out
 
-    def create(self, *, data: dict[str, Any]):
-        return self.repository.add(data=self._resolve(data))
+    def create(self, *, data: dict[str, Any], actor: Any = None, roles: set[str] | None = None):
+        resolved = self._resolve(data)
+        _assert_library_writable(resolved.get("library_id"), actor=actor, roles=roles)
+        return self.repository.add(data=resolved)
 
-    def update(self, obj, *, changes: dict[str, Any]):
-        return self.repository.apply_changes(obj, changes=self._resolve(changes))
+    def update(self, obj, *, changes: dict[str, Any], actor: Any = None, roles: set[str] | None = None):
+        resolved = self._resolve(changes)
+        if "library_id" in resolved:  # reparent into a (possibly restricted) library
+            _assert_library_writable(resolved["library_id"], actor=actor, roles=roles)
+        return self.repository.apply_changes(obj, changes=resolved)
 
     def delete(self, obj) -> None:
         self.repository.remove(obj)
@@ -126,14 +158,19 @@ class ModuleService(IModuleService):
             out["course_id"] = data["course"]
         return out
 
-    def create(self, *, data: dict[str, Any]):
+    def create(self, *, data: dict[str, Any], actor: Any = None, roles: set[str] | None = None):
         resolved = self._resolve(data)
+        # Authorize the target library BEFORE probing order-taken (which would otherwise leak
+        # whether an order is used in a course the actor cannot see).
+        _assert_library_writable(_course_library_id(resolved.get("course_id")), actor=actor, roles=roles)
         if self.repository.order_taken(course_id=resolved["course_id"], order=resolved.get("order", 0)):
             raise _reject("order", "A module with this order already exists in the course.")
         return self.repository.add(data=resolved)
 
-    def update(self, obj, *, changes: dict[str, Any]):
+    def update(self, obj, *, changes: dict[str, Any], actor: Any = None, roles: set[str] | None = None):
         resolved = self._resolve(changes)
+        if "course_id" in resolved:  # reparent into another course/library
+            _assert_library_writable(_course_library_id(resolved["course_id"]), actor=actor, roles=roles)
         course_id = resolved.get("course_id", obj.course_id)
         if ("order" in resolved or "course_id" in resolved) and self.repository.order_taken(
             course_id=course_id, order=resolved.get("order", obj.order), exclude_pk=obj.pk
@@ -164,11 +201,16 @@ class ContentLessonService(IContentLessonService):
             out["module_id"] = data["module"]
         return out
 
-    def create(self, *, data: dict[str, Any]):
-        return self.repository.add(data=self._resolve(data))
+    def create(self, *, data: dict[str, Any], actor: Any = None, roles: set[str] | None = None):
+        resolved = self._resolve(data)
+        _assert_library_writable(_module_library_id(resolved.get("module_id")), actor=actor, roles=roles)
+        return self.repository.add(data=resolved)
 
-    def update(self, obj, *, changes: dict[str, Any]):
-        return self.repository.apply_changes(obj, changes=self._resolve(changes))
+    def update(self, obj, *, changes: dict[str, Any], actor: Any = None, roles: set[str] | None = None):
+        resolved = self._resolve(changes)
+        if "module_id" in resolved:  # reparent into another module/course/library
+            _assert_library_writable(_module_library_id(resolved["module_id"]), actor=actor, roles=roles)
+        return self.repository.apply_changes(obj, changes=resolved)
 
     def delete(self, obj) -> None:
         self.repository.remove(obj)
@@ -197,16 +239,19 @@ class FolderService(IFolderService):
             out["parent_id"] = data["parent"]
         return out
 
-    def create(self, *, data: dict[str, Any]):
+    def create(self, *, data: dict[str, Any], actor: Any = None, roles: set[str] | None = None):
         resolved = self._resolve(data)
+        _assert_library_writable(resolved.get("library_id"), actor=actor, roles=roles)
         if self.repository.name_taken(
             library_id=resolved["library_id"], parent_id=resolved.get("parent_id"), name=resolved["name"]
         ):
             raise _reject("name", "A folder with this name already exists here.")
         return self.repository.add(data=resolved)
 
-    def update(self, obj, *, changes: dict[str, Any]):
+    def update(self, obj, *, changes: dict[str, Any], actor: Any = None, roles: set[str] | None = None):
         resolved = self._resolve(changes)
+        if "library_id" in resolved:  # reparent into a (possibly restricted) library
+            _assert_library_writable(resolved["library_id"], actor=actor, roles=roles)
         library_id = resolved.get("library_id", obj.library_id)
         parent_id = resolved.get("parent_id", obj.parent_id)
         name = resolved.get("name", obj.name)

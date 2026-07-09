@@ -179,7 +179,9 @@ def _crud_collection(
         return paginated([presenter(o) for o in items], total=total, page=page, page_size=size)
     if request.method == "POST":
         check_perm(request, "content:write")
-        obj = service.create(data=create_data_fn(request))
+        # Scope the write like the read: verify the target library is visible to the caller
+        # (services enforce this when actor/roles are passed), closing the read/write asymmetry.
+        obj = service.create(data=create_data_fn(request), actor=request.user, roles=_roles(request))
         return created(presenter(obj))
     return _method_not_allowed()
 
@@ -192,11 +194,12 @@ def _crud_detail(request, pk, service, presenter, *, create_data_fn, changes_fn)
         raise NotFoundException(code="not_found")
     if read:
         return success(presenter(obj))
+    actor, roles = request.user, _roles(request)
     if request.method == "PUT":
         # Full replace (DRF parity): all required fields must be present, or 400.
-        return success(presenter(service.update(obj, changes=create_data_fn(request))))
+        return success(presenter(service.update(obj, changes=create_data_fn(request), actor=actor, roles=roles)))
     if request.method == "PATCH":
-        return success(presenter(service.update(obj, changes=changes_fn(request))))
+        return success(presenter(service.update(obj, changes=changes_fn(request), actor=actor, roles=roles)))
     if request.method == "DELETE":
         service.delete(obj)
         return no_content()
