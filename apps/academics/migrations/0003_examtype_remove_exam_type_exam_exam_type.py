@@ -36,11 +36,15 @@ def seed_and_map(apps, schema_editor):
 
 
 def unmap(apps, schema_editor):
-    """Reverse: copy the type slug back from exam_type before the column returns."""
+    """Reverse: restore the legacy `type` slug where it still fits the old
+    varchar(10) enum column. A center-authored type with a longer slug has no
+    legacy enum equivalent, so leave `type` blank rather than overflow the column
+    (writing a >10-char slug into varchar(10) would raise DataError and abort the
+    rollback for that tenant)."""
     Exam = apps.get_model("academics", "Exam")
     for exam in Exam.objects.select_related("exam_type").all():
-        if exam.exam_type_id:
-            Exam.objects.filter(pk=exam.pk).update(type=exam.exam_type.slug)
+        slug = exam.exam_type.slug if exam.exam_type_id else ""
+        Exam.objects.filter(pk=exam.pk).update(type=slug if len(slug) <= 10 else "")
 
 
 class Migration(migrations.Migration):
