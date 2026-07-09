@@ -128,6 +128,51 @@ def test_invalid_scheduled_at_is_400(tenant_a, user_in, as_user):
     assert resp.json()["code"] == "validation_error"
 
 
+def test_concurrent_send_does_not_double_text_recipients(
+    tenant_a, user_in, as_user, sms_outbox, monkeypatch
+):
+    """Regression (self-review, HIGH double-send): the send loop runs outside the campaign
+    row lock and SENDING is resumable, so the scheduled-dispatch beat can race a manual
+    'send now' (or a redelivered task) on the same campaign. The per-recipient
+    compare-and-swap claim must guarantee each recipient's SMS is sent at most once.
+
+    Deterministic simulation of the race: the SMS client, on its first send, flips every
+    other still-PENDING recipient to SENT (as a concurrent worker would by claiming them);
+    the loop's own CAS for those rows then affects 0 rows and skips — so they are NOT
+    texted a second time."""
+    from apps.campaigns.models import CampaignRecipient
+
+    branch = _branch(tenant_a)
+    with schema_context(tenant_a.schema_name):
+        _student(branch)
+        _student(branch)
+        _student(branch)
+    client = as_user(tenant_a, user_in(tenant_a, roles=[Role.REGISTRAR], branch=branch))
+    cid = client.post(
+        CAMPAIGNS, {"name": "Race", "message": "hi", "branch": branch.id}, format="json"
+    ).json()["data"]["id"]
+
+    class _RacingClient:
+        raced = False
+
+        def send(self, *, phone, text):
+            if not _RacingClient.raced:
+                _RacingClient.raced = True
+                # A concurrent worker claims all remaining PENDING recipients first.
+                with schema_context(tenant_a.schema_name):
+                    CampaignRecipient.objects.filter(
+                        campaign_id=cid, status=CampaignRecipient.Status.PENDING
+                    ).update(status=CampaignRecipient.Status.SENT, sent_at=timezone.now())
+            sms_outbox.append({"phone": phone, "text": text})
+
+    monkeypatch.setattr("apps.campaigns.services.get_sms_client", lambda: _RacingClient())
+    resp = client.post(f"{CAMPAIGNS}{cid}/send/", {}, format="json")
+    assert resp.status_code == 200
+    # Only the FIRST recipient was actually texted; the two the "concurrent worker" claimed
+    # were skipped by the CAS, never double-sent.
+    assert len(sms_outbox) == 1
+
+
 def test_scheduled_campaign_can_still_be_sent_manually(tenant_a, user_in, as_user, sms_outbox):
     """Setting a schedule does not block the manual send endpoint — a human can send it
     early; the later sweep then finds it already SENT and skips it."""

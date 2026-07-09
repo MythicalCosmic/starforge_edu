@@ -28,6 +28,13 @@ def _active_count(cohort: Cohort) -> int:
 def enroll_student_in_cohort(*, cohort: Cohort, student, start_date=None) -> CohortMembership:
     if cohort.is_archived:
         raise ValidationException(_("Cohort is archived."), code="cohort_archived")
+    # Lock the student row so enroll serialises with move_student / unenroll on the
+    # `current_cohort` primary (F2-6 / R2-04). Without the lock a concurrent unenroll could
+    # recompute the primary from the remaining memberships BEFORE this enrollment's row is
+    # visible and strand the student with an active membership but a NULL current_cohort —
+    # a state only the unenroll path can otherwise produce. Re-read under the lock so the
+    # `current_cohort_id is None` guard below sees the committed truth, not a stale copy.
+    student = type(student).objects.select_for_update().get(pk=student.pk)
     if student.branch_id != cohort.branch_id:
         raise ValidationException(
             _("Student belongs to a different branch than this cohort."),

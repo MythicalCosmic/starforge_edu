@@ -185,6 +185,31 @@ def test_student_patch_cannot_rewrite_cohort_or_branch(director, tenant_a):
         assert CohortMembership.objects.filter(student=student).count() == 1
 
 
+def test_enroll_reads_current_cohort_from_db_under_lock_not_stale_memory(tenant_a):
+    """Regression (self-review, current_cohort NULL-race): enroll must decide the primary
+    from the student row it re-reads under select_for_update, NOT a stale in-memory copy.
+    A secondary enroll via a handle that still thinks current_cohort is None must not
+    silently reset the (committed) primary — the lock is what serialises enroll with a
+    concurrent unenroll so a student can never end up active-but-groupless."""
+    from apps.students.models import StudentProfile
+
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory.create()
+        cohort_a = CohortFactory.create(branch=branch, name="A")
+        cohort_b = CohortFactory.create(branch=branch, name="B")
+        student = StudentProfileFactory.create(branch=branch)
+        enroll_student_in_cohort(cohort=cohort_a, student=student)  # primary committed = A
+
+        # A stale handle whose in-memory current_cohort_id is None (pre-fix, enroll trusted
+        # this and wrongly reset the primary to B).
+        stale = StudentProfile.objects.get(pk=student.pk)
+        stale.current_cohort = None
+        enroll_student_in_cohort(cohort=cohort_b, student=stale)
+
+        student.refresh_from_db()
+        assert student.current_cohort_id == cohort_a.id  # primary unchanged, read from DB
+
+
 def test_move_student_leaves_exactly_one_active_membership(tenant_a):
     """move_student locks the student row (select_for_update inside its existing
     @transaction.atomic) and must end-date the old membership, leaving the student

@@ -141,25 +141,34 @@ def send_campaign(*, campaign_id: int, actor=None) -> Campaign:
     # sent (consent wins over a frozen recipient list).
     suppressed = set(DoNotContact.objects.values_list("phone", flat=True))
     for recipient in campaign.recipients.filter(status=R.PENDING):
+        now = timezone.now()
         if recipient.phone in suppressed:
-            recipient.status = R.SKIPPED
-            recipient.error = "do_not_contact"
-            recipient.save(update_fields=["status", "error", "sent_at"])
+            # Claim atomically (PENDING -> SKIPPED) so a racing invocation processes it once.
+            CampaignRecipient.objects.filter(pk=recipient.pk, status=R.PENDING).update(
+                status=R.SKIPPED, error="do_not_contact"
+            )
             continue
+        # Per-recipient compare-and-swap CLAIM: flip PENDING -> SENT so exactly ONE worker
+        # owns this recipient even though the send loop runs outside the campaign row lock.
+        # The scheduled-dispatch beat can race a manual "send now" (or a redelivered task)
+        # on the same SENDING campaign; without this claim BOTH loops would call client.send
+        # for every recipient and the paid SMS provider would double-charge + double-text
+        # (a consent breach). A racer's UPDATE affects 0 rows -> it skips. We claim to SENT
+        # optimistically (never double-send is safer than never-under-send for paid SMS);
+        # a send failure rolls the row to FAILED below.
+        claimed = CampaignRecipient.objects.filter(pk=recipient.pk, status=R.PENDING).update(
+            status=R.SENT, sent_at=now, error=""
+        )
+        if not claimed:
+            continue  # another concurrent worker already claimed/sent this recipient
         try:
-            if recipient.phone not in texted:
+            if recipient.phone not in texted:  # siblings sharing a guardian -> texted once
                 client.send(phone=recipient.phone, text=campaign.message)
                 texted.add(recipient.phone)
-            recipient.status = R.SENT
-            recipient.sent_at = timezone.now()
-            recipient.save(update_fields=["status", "error", "sent_at"])
         except Exception as exc:  # one bad recipient must not abort the batch
-            try:
-                recipient.status = R.FAILED
-                recipient.error = str(exc)[:255]
-                recipient.save(update_fields=["status", "error", "sent_at"])
-            except Exception:
-                pass  # even a save failure can't abort the run — row stays PENDING, retried on resume
+            CampaignRecipient.objects.filter(pk=recipient.pk).update(
+                status=R.FAILED, error=str(exc)[:255], sent_at=now
+            )
 
     by = {row["status"]: row["n"] for row in campaign.recipients.values("status").annotate(n=Count("id"))}
     campaign.sent_count = by.get(R.SENT, 0)
@@ -183,9 +192,11 @@ def dispatch_due_campaigns() -> int:
 
     Runs inside the current tenant schema (the beat task fans it out per Center). Picks up
     DRAFT campaigns with a non-null ``scheduled_at`` that is now in the past and sends each
-    via ``send_campaign`` — which claims the row under a lock and is idempotent, so an
-    overlapping beat cycle can't double-send. One campaign's failure never aborts the rest.
-    Returns the number of campaigns dispatched."""
+    via ``send_campaign``. Double-send safety does NOT come from this filter alone (a
+    dispatch can race a manual "send now" on the same campaign, and Celery may redeliver
+    the task): it comes from ``send_campaign``'s per-recipient compare-and-swap claim, which
+    guarantees each recipient's SMS is sent at most once even under concurrent invocations.
+    One campaign's failure never aborts the rest. Returns the number of campaigns dispatched."""
     now = timezone.now()
     due_ids = list(
         Campaign.objects.filter(
