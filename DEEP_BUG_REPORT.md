@@ -431,6 +431,20 @@ Each: reuses the app's existing scope/permission guards, tests added (17 new), p
 
 ---
 
+## Scale-hardening audit (pipeline "harden for scale": N+1 / indexes / unbounded queries)
+
+A 5-cluster read-path audit (each finding verified real AND safe-additive by a second agent) confirmed **13 scale defects** on hot read paths, all fixed additively in commit `3a6c43a`. One real finding (billing `usage_view` unbounded) was correctly **excluded** because its only safe fix changed the response envelope (not purely additive) — recorded, not forced.
+
+**Missing index (8 — additive `AddIndex` migrations).** Every one is a growable table whose default list orders by `-created_at`/`-issued_at` with no covering index (existing composites lead with a filter column), forcing a full-table sort + top-N heapsort on each page-1 load at scale. Added `Index(("-created_at","id"))` (exact match for the `ORDER BY … DESC, id ASC LIMIT` the paginator emits) to: **students** `StudentProfile` (the hottest list), **approvals** `LedgerEntry` + `ApprovalRequest` (the money spine), **payments** `Payment`, **attendance** `AttendanceRecord` (fastest-growing: students×lessons), **printing** `PrintJob`, **compliance** `Penalty` (`-issued_at`), **staff_tasks** `Task`.
+
+**N+1 (1).** `users.presenters.user_to_dict` filtered `role_memberships` with `.filter(revoked_at__isnull=True)`, which bypasses the list queryset's `prefetch_related` cache → a fresh query per user on the directory page (25–100 extra queries/page). Now filters the prefetched cache in Python (0 extra queries on the list path).
+
+**Unbounded query (4).** (a) `academics` honor-roll/warnings materialized the entire matching Grade set into one response — hard-capped the top-N rows via a SQL-`LIMIT` slice. (b) `schedule` iCal feed served a director the whole tenant's lesson history rebuilt in memory on every calendar poll — bounded to a 90-day recent-past window + a 2000-row cap. (c) `campaigns` recipients endpoint returned the full frozen recipient set (one row per targeted student) — now paginated like every sibling list. (d) `messaging` thread list `prefetch_related("messages")` loaded **every** message of every listed thread just to count unread (a page of long threads = tens of thousands of rows for a few integers) — dropped the prefetch and replaced it with one bounded grouped query (`ThreadService.unread_counts`) reproducing the exact unread semantics.
+
+All 13 reuse existing scope/permission guards, add no owner-facing behavior change beyond the deliberate feed-window/pagination bounds, and are covered by +4 regression tests; the 12 affected apps run **486 passed / 0 failed**, ruff + mypy clean.
+
+---
+
 ## Appendix A — Refuted candidates
 
 _Populated on completion. Recorded so future passes don't re-investigate them._
