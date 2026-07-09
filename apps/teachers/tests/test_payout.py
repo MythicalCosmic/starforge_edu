@@ -109,8 +109,8 @@ def test_compute_percent_of_collected_tuition(tenant_a):
         cohort = CohortFactory(branch=branch, primary_teacher=teacher)
         student = StudentProfileFactory(branch=branch)
         CohortMembershipFactory(cohort=cohort, student=student)  # active member of the teacher's cohort
-        invoice = InvoiceFactory(student=student)
-        # 400,000 collected (allocated) toward this student's tuition, created now.
+        invoice = InvoiceFactory(student=student, cohort=cohort)
+        # 400,000 collected (allocated) toward this cohort's tuition, created now.
         PaymentAllocation.objects.create(invoice=invoice, payment_id=1, amount_uzs=Decimal("400000.00"))
         set_payout_policy(
             teacher=teacher, method="percent_of_collected_tuition", tuition_percent=Decimal("40")
@@ -118,6 +118,77 @@ def test_compute_percent_of_collected_tuition(tenant_a):
         start_d, end_d = _wide_period()
         result = compute_payout(teacher=teacher, period_start=start_d, period_end=end_d)
         assert result["amount_uzs"] == Decimal("160000.00")  # 40% of 400,000
+
+
+def test_percent_only_counts_the_teachers_own_cohort_tuition(tenant_a):
+    """Regression (self-review): tuition a student paid for ANOTHER teacher's course must
+    NOT count toward this teacher — the sum is scoped per cohort (Invoice.cohort), so the
+    total payout can't exceed the tuition actually collected."""
+    from apps.cohorts.tests.factories import CohortFactory, CohortMembershipFactory
+    from apps.finance.models import PaymentAllocation
+    from apps.finance.tests.factories import InvoiceFactory
+    from apps.students.tests.factories import StudentProfileFactory
+    from apps.teachers.services import compute_payout, set_payout_policy
+    from apps.teachers.tests.factories import TeacherProfileFactory
+
+    teacher, branch = _teacher(tenant_a)
+    with schema_context(tenant_a.schema_name):
+        my_cohort = CohortFactory(branch=branch, primary_teacher=teacher)
+        other_cohort = CohortFactory(branch=branch, primary_teacher=TeacherProfileFactory(branch=branch))
+        student = StudentProfileFactory(branch=branch)
+        CohortMembershipFactory(cohort=my_cohort, student=student)
+        CohortMembershipFactory(cohort=other_cohort, student=student)  # also in the OTHER course
+        # 100k paid for MY cohort, 900k paid for the OTHER teacher's cohort.
+        PaymentAllocation.objects.create(
+            invoice=InvoiceFactory(student=student, cohort=my_cohort), payment_id=1, amount_uzs=Decimal("100000.00")
+        )
+        PaymentAllocation.objects.create(
+            invoice=InvoiceFactory(student=student, cohort=other_cohort), payment_id=2, amount_uzs=Decimal("900000.00")
+        )
+        set_payout_policy(teacher=teacher, method="percent_of_collected_tuition", tuition_percent=Decimal("50"))
+        start_d, end_d = _wide_period()
+        result = compute_payout(teacher=teacher, period_start=start_d, period_end=end_d)
+        assert result["amount_uzs"] == Decimal("50000.00")  # 50% of only MY cohort's 100k
+
+
+def test_prepare_salary_rejects_a_max_year_period(tenant_a, as_role):
+    """Regression (self-review, never-500): period_end at date.max would overflow
+    period_end+1day; must be a clean 400, not a 500, on the money endpoint."""
+    director, _ = as_role(Role.DIRECTOR)
+    teacher, _b = _teacher(tenant_a)
+    with schema_context(tenant_a.schema_name):
+        set_payout_policy_flat(teacher)
+    r = director.post(
+        PREPARE.format(teacher.id),
+        {"period_start": "2020-01-01", "period_end": "9999-12-31"},
+        format="json",
+    )
+    assert r.status_code == 400
+    assert r.json()["code"] == "validation_error"
+
+
+def set_payout_policy_flat(teacher):
+    from apps.teachers.services import set_payout_policy
+
+    set_payout_policy(teacher=teacher, method="flat_monthly", flat_amount_uzs=Decimal("1000000"))
+
+
+def test_generic_approvals_endpoint_cannot_mint_a_salary(tenant_a, as_role):
+    """Regression (self-review): salary_prep must NOT be creatable via the generic
+    POST /approvals/ (only the computed + branch-scoped /prepare-salary/ path) — otherwise
+    an approvals:write user could mint a raw, uncomputed, unscoped money-OUT salary."""
+    director, _ = as_role(Role.DIRECTOR)  # holds approvals:write (*:*)
+    r = director.post(
+        "/api/v1/approvals/requests/",
+        {
+            "kind": "salary_prep",
+            "title": "x",
+            "amount_uzs": "50000000.00",
+            "payload": {"teacher_user_id": 999, "party_label": "Ghost"},
+        },
+        format="json",
+    )
+    assert r.status_code == 400  # not an allowed generic kind
 
 
 # --- prepare -> A-1 + SoD -------------------------------------------------

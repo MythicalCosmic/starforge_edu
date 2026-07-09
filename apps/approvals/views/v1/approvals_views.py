@@ -38,7 +38,11 @@ _REQUEST_KINDS = frozenset(
         "fine",
         "absence_deduction",
         "payment_delay",
-        "salary_prep",
+        # NOTE: "salary_prep" is deliberately NOT here. A salary is real money OUT whose
+        # amount must be COMPUTED from the teacher's PayoutPolicy and branch-scoped — only
+        # apps.teachers.prepare_salary may create it (via the domain create_request). Letting
+        # the generic POST /approvals/ accept it would allow an approvals:write user to mint
+        # a salary for an arbitrary teacher at a raw, uncomputed figure (F13-1 self-review).
         "event_split",
         "book_cash",
         "reward",

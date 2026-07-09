@@ -115,23 +115,28 @@ def _period_bounds(period_start: dt.date, period_end: dt.date) -> tuple[dt.datet
         )
     tz = timezone.get_current_timezone()
     start_dt = timezone.make_aware(dt.datetime.combine(period_start, dt.time.min), tz)
-    end_dt = timezone.make_aware(dt.datetime.combine(period_end + dt.timedelta(days=1), dt.time.min), tz)
+    try:
+        end_exclusive = period_end + dt.timedelta(days=1)
+    except OverflowError:  # period_end at/near date.max — a clean 400, never a 500
+        raise ValidationException(
+            _("period_end is too far in the future."),
+            code="validation_error",
+            fields={"period_end": ["Out of range."]},
+        ) from None
+    end_dt = timezone.make_aware(dt.datetime.combine(end_exclusive, dt.time.min), tz)
     return start_dt, end_dt
 
 
-def _teacher_student_ids(teacher: TeacherProfile) -> list[int]:
-    """Student ids ACTIVELY enrolled in a cohort this teacher teaches (primary or co)."""
+def _teacher_cohort_ids(teacher: TeacherProfile) -> list[int]:
+    """Ids of the cohorts this teacher teaches (primary or co)."""
     from django.db.models import Q
 
-    from apps.cohorts.models import Cohort, CohortMembership
+    from apps.cohorts.models import Cohort
 
-    cohort_ids = list(
+    return list(
         Cohort.objects.filter(Q(primary_teacher=teacher) | Q(co_teachers__teacher=teacher))
         .values_list("id", flat=True)
-    )
-    return list(
-        CohortMembership.objects.filter(cohort_id__in=cohort_ids, end_date__isnull=True)
-        .values_list("student_id", flat=True).distinct()
+        .distinct()
     )
 
 
@@ -163,10 +168,14 @@ def compute_payout(*, teacher: TeacherProfile, period_start: dt.date, period_end
     elif policy.method == PayoutPolicy.Method.PERCENT_OF_TUITION:
         from apps.finance.models import PaymentAllocation
 
-        student_ids = _teacher_student_ids(teacher)
+        # Tuition attributed PER COHORT the teacher teaches (Invoice.cohort), NOT by student
+        # id — a student enrolled in another teacher's course too would otherwise credit
+        # this teacher for tuition they paid for that OTHER course, so the total payout
+        # could exceed the tuition actually collected.
+        cohort_ids = _teacher_cohort_ids(teacher)
         collected = (
             PaymentAllocation.objects.filter(
-                invoice__student_id__in=student_ids,
+                invoice__cohort_id__in=cohort_ids,
                 created_at__gte=start_dt, created_at__lt=end_dt,
             ).aggregate(total=Sum("amount_uzs"))["total"]
             or Decimal("0")

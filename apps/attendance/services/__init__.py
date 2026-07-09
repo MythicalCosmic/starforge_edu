@@ -75,18 +75,25 @@ def mark_present_from_scan(*, student, at=None, marked_by=None) -> AttendanceRec
     )
     if not cohort_ids:
         return None
-    lesson = (
+    candidates = list(
         Lesson.objects.filter(
             cohort_id__in=cohort_ids,
             status=Lesson.Status.SCHEDULED,
             starts_at__lte=at + SCAN_ATTENDANCE_WINDOW,
             ends_at__gte=at - SCAN_ATTENDANCE_WINDOW,
-        )
-        .order_by("starts_at")
-        .first()
+        ).only("id", "starts_at", "ends_at")
     )
-    if lesson is None:
+    if not candidates:
         return None
+    # The lesson the student is ARRIVING for: prefer one currently IN SESSION, otherwise the
+    # one whose start is nearest the scan time — NOT merely the earliest-starting overlapping
+    # one, which (with the ±window) may already have ended, so back-to-back lessons don't get
+    # the scan mis-attributed to the earlier class.
+    def _arrival_key(lesson):
+        in_session = lesson.starts_at <= at <= lesson.ends_at
+        return (0 if in_session else 1, abs((lesson.starts_at - at).total_seconds()))
+
+    lesson = min(candidates, key=_arrival_key)
     if AttendanceRecord.objects.filter(student=student, lesson=lesson).exists():
         return None  # never override an existing (teacher or prior) mark
     try:
