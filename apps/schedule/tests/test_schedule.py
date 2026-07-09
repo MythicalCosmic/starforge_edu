@@ -568,6 +568,33 @@ def test_rules_create_cross_branch_blocked(tenant_a, user_in, as_user):
     assert resp.json()["code"] == "out_of_scope"
 
 
+def test_lesson_cancel_move_cross_branch_blocked(tenant_a, user_in, as_user):
+    """SCHED-1: scoped_lessons returns EVERY lesson for STAFF_ROLES, but a branch-scoped
+    HEAD_OF_DEPT/REGISTRAR must not cancel/move ANOTHER branch's lesson (cross-branch write +
+    a cancellation/reschedule notification blast). Their own branch's lesson still works."""
+    from core.permissions import Role
+
+    with schema_context(tenant_a.schema_name):
+        ctx_a = _setup()
+        ctx_b = _setup()  # a DIFFERENT branch
+        lesson_b_id = _make_rule(ctx_b).lessons.order_by("starts_at").first().id
+        lesson_a_id = _make_rule(ctx_a).lessons.order_by("starts_at").first().id
+
+    writer = as_user(tenant_a, user_in(tenant_a, roles=[Role.HEAD_OF_DEPT], branch=ctx_a["branch"]))
+
+    # cross-branch cancel + move are refused (the branch check runs before the body is parsed)
+    c = writer.post(f"/api/v1/schedule/lessons/{lesson_b_id}/cancel/", {"reason": "x"}, format="json")
+    assert c.status_code == 403, c.content
+    assert c.json()["code"] == "out_of_scope"
+    m = writer.post(f"/api/v1/schedule/lessons/{lesson_b_id}/move/", {}, format="json")
+    assert m.status_code == 403, m.content
+    assert m.json()["code"] == "out_of_scope"
+
+    # ...but the writer's OWN branch lesson still cancels (200)
+    ok = writer.post(f"/api/v1/schedule/lessons/{lesson_a_id}/cancel/", {"reason": "snow"}, format="json")
+    assert ok.status_code == 200, ok.content
+
+
 def test_rules_create_reversed_times_is_400_not_500(tenant_a, as_role):
     """A rule whose start_time > end_time is regex-valid but violates the
     rule_times_ordered CheckConstraint; full_clean() raises Django's ValidationError.

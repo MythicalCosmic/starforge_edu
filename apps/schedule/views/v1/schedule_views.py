@@ -590,6 +590,11 @@ def lesson_cancel_view(request: HttpRequest, pk: int) -> HttpResponse:
     lesson = _lesson_service().get_scoped(pk=pk, user=request.user, roles=get_user_roles(request))
     if lesson is None:
         raise NotFoundException(code="not_found")
+    # A branch-scoped writer (HEAD_OF_DEPT / REGISTRAR) may only cancel a lesson in their own
+    # branch: scoped_lessons returns EVERY lesson for STAFF_ROLES, so without this a bare-pk
+    # fetch is a cross-branch write + a cancellation-notification blast to another branch's
+    # cohort. Mirrors rule_detail_view / rule_bulk_reschedule_view. cohort is select_related.
+    assert_branch_id_in_scope(request, lesson.cohort.branch_id)
     data = read_json(request)
     raw = data.get("reason", "")
     reason = "" if raw in (None, "") else _str_value(raw, "reason", max_length=255, allow_blank=True)
@@ -606,6 +611,9 @@ def lesson_move_view(request: HttpRequest, pk: int) -> HttpResponse:
     lesson = _lesson_service().get_scoped(pk=pk, user=request.user, roles=get_user_roles(request))
     if lesson is None:
         raise NotFoundException(code="not_found")
+    # Branch-scope the write (same as lesson_cancel_view): a move reschedules the class and
+    # notifies its cohort, so a branch-scoped writer must not drive it on another branch's lesson.
+    assert_branch_id_in_scope(request, lesson.cohort.branch_id)
     data = read_json(request)
     starts_at = _datetime_value(_require(data, "starts_at"), "starts_at")
     ends_at = _datetime_value(_require(data, "ends_at"), "ends_at")

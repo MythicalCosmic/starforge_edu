@@ -545,6 +545,14 @@ Money-OUT SoD completeness and cross-tenant isolation came back **dry** (the SoD
 
 **Session bug tally: 6 real bugs across 3 hunt rounds** (fault-isolation lockout + N+1, reward SoD bypass, content-write IDOR, 2 websocket authz). Rounds 1–3 each found real defects; the dry dimensions (CONN_MAX_AGE tenancy, concurrency/races, never-500, money-OUT completeness, cross-tenant) bound the converged surface.
 
+### Round 4 (broad authz/IDOR across app-slices · write-scope asymmetry · privilege escalation)
+
+3 of 4 dimensions **dry** — the ops/misc apps (tasks/messaging/rewards/loans/meetings/forms/placement/cards/…), the generalized read-scoped-but-write-unscoped sweep, and privilege escalation all clean. 1 confirmed defect (2/2 refuters):
+
+**SCHED-1 (HIGH, object-level authz / IDOR) — FIXED.** `lesson_cancel_view` + `lesson_move_view` mutated a lesson resolved by raw pk with **no branch-scope assertion**. `scoped_lessons()` returns EVERY lesson tenant-wide for STAFF_ROLES `{DIRECTOR, HEAD_OF_DEPT, REGISTRAR, IT}`, but `core.scoping.is_unscoped` treats only superuser/DIRECTOR as unscoped — so a **branch-scoped HEAD_OF_DEPT/REGISTRAR** (both hold `schedule:*`) could POST `/api/v1/schedule/lessons/<pk>/cancel|move/` on **another branch's** lesson, rescheduling/cancelling that class and blasting `lesson_rescheduled`/`lesson_cancelled` to its cohort. The sibling `rule_detail_view` / `rule_bulk_reschedule_view` in the same file already guard this with `assert_branch_id_in_scope(request, rule.cohort.branch_id)` — the lesson write path was the lone omission. Fix: added `assert_branch_id_in_scope(request, lesson.cohort.branch_id)` after `get_scoped` in both mutating views (`lesson.cohort` is already `select_related`), before the body is parsed. Reads stay staff-broad, matching the `rule_*` read behavior. +test (cross-branch cancel/move → 403 `out_of_scope`; own-branch cancel → 200).
+
+**Session bug tally: 7 real bugs across 4 hunt rounds.** The recurring seam was AUTHORIZATION (fault-isolation lockout, reward SoD, content-write IDOR, 2 websocket authz, schedule cross-branch write); money-math, tenancy isolation, input-fuzz (never-500), concurrency/races, and privilege-escalation dimensions all came back dry. Round 4's 3/4-dry result signals the authz seam is largely swept.
+
 ---
 
 ## Appendix A — Refuted candidates
