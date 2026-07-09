@@ -100,3 +100,54 @@ def test_control_endpoint_rejects_a_bad_body(tenant_a, as_role):
     director, _ = as_role(Role.DIRECTOR)
     r = director.patch("/api/v1/org/system/apps/", {"disabled": "placement"}, format="json")
     assert r.status_code == 400
+
+
+def test_foundational_apps_cannot_be_disabled(tenant_a, as_role):
+    """Self-lockout guard: org/auth/users host the control plane + auth surface, and the
+    toggle endpoint itself lives under /api/v1/org/ — disabling `org` would 503 the very
+    endpoint needed to re-enable it. The API rejects it (400) and the control plane survives."""
+    from core.availability import (
+        PROTECTED_APPS,
+        STATUS_DISABLED,
+        _cache_key,
+        resolve_status,
+        set_tenant_disabled_apps,
+    )
+
+    cache.clear()
+    director, _ = as_role(Role.DIRECTOR)
+    # The API refuses to disable a protected app, with a clear error...
+    r = director.patch("/api/v1/org/system/apps/", {"disabled": ["org"]}, format="json")
+    assert r.status_code == 400
+    # ...and the control endpoint is still reachable (NOT bricked).
+    assert director.get("/api/v1/org/system/apps/").status_code == 200
+
+    with schema_context(tenant_a.schema_name):
+        # Direct call strips the protected set (defense in depth), keeps a real target.
+        effective = set_tenant_disabled_apps({"org", "auth", "users", "placement"})
+        assert PROTECTED_APPS.isdisjoint(effective)
+        assert "placement" in effective
+        # And even if a protected app somehow sits in the raw set (stale/global entry),
+        # resolve_status never reports it disabled.
+        cache.set(_cache_key(), ["org"], timeout=None)
+        assert resolve_status("org")[0] != STATUS_DISABLED
+
+
+def test_resolve_status_reads_disabled_set_once(tenant_a, monkeypatch):
+    """The disabled set is read from cache exactly ONCE per resolve_status call, not once per
+    node of the dependency-graph walk — the per-request hot path must not fan out into N Redis
+    GETs. (payments -> finance,approvals,notifications; finance -> approvals,notifications.)"""
+    from core import availability
+
+    cache.clear()
+    calls = {"n": 0}
+    real = availability.disabled_apps
+
+    def counting() -> set[str]:
+        calls["n"] += 1
+        return real()
+
+    monkeypatch.setattr(availability, "disabled_apps", counting)
+    with schema_context(tenant_a.schema_name):
+        availability.resolve_status("payments")
+    assert calls["n"] == 1

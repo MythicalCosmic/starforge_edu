@@ -40,7 +40,7 @@ def system_availability_view(request: HttpRequest) -> HttpResponse:
     degraded / disabled / unavailable, with warnings); PATCH ``{"disabled": [app, ...]}`` to
     turn apps off for THIS center at runtime (a disabled app 503s without falling the rest).
     org:read to view, org:write to change."""
-    from core.availability import set_tenant_disabled_apps, system_status
+    from core.availability import PROTECTED_APPS, set_tenant_disabled_apps, system_status
 
     if request.method in ("GET", "HEAD"):
         check_perm(request, f"{_RESOURCE}:read")
@@ -53,6 +53,16 @@ def system_availability_view(request: HttpRequest) -> HttpResponse:
                 "disabled must be a list of app labels.",
                 code="validation_error",
                 fields={"disabled": ["Must be a list of app-label strings."]},
+            )
+        # Reject foundational apps with a clear error rather than silently stripping them:
+        # disabling `org` would 503 THIS endpoint (it lives under /api/v1/org/) — an
+        # unrecoverable self-lockout of the control plane.
+        protected = sorted(set(raw) & PROTECTED_APPS)
+        if protected:
+            raise ValidationException(
+                f"These apps are foundational and cannot be disabled: {', '.join(protected)}.",
+                code="validation_error",
+                fields={"disabled": [f"Cannot disable protected app(s): {', '.join(protected)}."]},
             )
         effective = set_tenant_disabled_apps(set(raw))
         return success({"disabled": sorted(effective), "apps": system_status()})

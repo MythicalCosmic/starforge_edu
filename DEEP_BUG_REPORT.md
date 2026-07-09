@@ -517,6 +517,18 @@ Load-tested the live test server (internal `:8011`, gunicorn direct) with a stdl
 
 ---
 
+## Adversarial hunt on this session's new code (6-dimension, 2-refuter)
+
+Re-ran the loop on the code ADDED this session (fault-isolation, envelope convergence, renderer, `CONN_MAX_AGE`, the 5 features) — 6 finder dimensions × 2 independent refuters (≥2 real = confirmed). 4 confirmed findings reduced to **2 distinct real bugs** (both in my fault-isolation code), both fixed. **Key negative result: the `CONN_MAX_AGE` + django-tenants dimension found `{}` — no cross-tenant `search_path` leak** (django-tenants sets the schema per request on the reused connection), so the persistent-connection change is adversarially confirmed safe.
+
+**HUNT-1 (HIGH, self-lockout) — FIXED.** `set_tenant_disabled_apps` let a director disable ANY known app including `org`/`auth`/`users`. Since the availability control endpoint itself lives under `/api/v1/org/`, PATCHing `{"disabled":["org"]}` 503'd the very endpoint needed to re-enable it — a permanent, API-unrecoverable tenant lockout (found independently by 3 dimensions). Added `PROTECTED_APPS = {auth, users, org}`: `set_tenant_disabled_apps` strips them, `resolve_status` never marks a protected app disabled (belt-and-suspenders vs a stale/global entry), and the control view rejects a PATCH naming one with a clear 400. +test.
+
+**HUNT-2 (HIGH→MED, N+1 Redis reads) — FIXED.** `resolve_status()` called `disabled_apps()` (a Redis `GET`) at EVERY node of the dependency-graph walk, so one `/api/v1` request paid several serial Redis reads (the module docstring claimed "one cache read"), and `system_status()` multiplied it across ~38 apps — eroding the `CONN_MAX_AGE` win on the hot path. Refactored to read the disabled set ONCE per call and thread it through a pure `_resolve(app, disabled, seen)` recursion; `system_status()` reads once for all apps. +test asserting exactly one read for a multi-node chain.
+
+**Refuted (correctly did not reach the ≥2 bar):** co-teacher payout "over-count" (intentional per-teacher policy), `compute_payout` Python lesson-loop (bounded + correct), 503-before-auth (intentional fault-isolation), `_classify` `api_error` vs stable codes on the DRF reports app (1/2 — rare exceptions, minor).
+
+---
+
 ## Appendix A — Refuted candidates
 
 _Populated on completion. Recorded so future passes don't re-investigate them._

@@ -82,6 +82,15 @@ STATUS_DEGRADED = "degraded"
 STATUS_DISABLED = "disabled"
 STATUS_UNAVAILABLE = "unavailable"
 
+# Apps that host the tenant control plane + auth surface. They can NEVER be turned off by the
+# per-tenant runtime toggle: the availability control endpoint itself lives under
+# ``/api/v1/org/``, so disabling ``org`` (or ``auth``/``users``) would 503 the very endpoint
+# needed to re-enable apps — an unrecoverable self-lockout. Guarded in both
+# ``set_tenant_disabled_apps`` (can't be added to the set) and ``resolve_status`` (never
+# resolves to disabled, even if a stale/global entry names one), so the control plane always
+# stays reachable.
+PROTECTED_APPS: frozenset[str] = frozenset({"auth", "users", "org"})
+
 
 def _global_disabled() -> frozenset[str]:
     """Ops-level disables (the DISABLED_APPS setting) — apply to EVERY tenant and can't be
@@ -104,10 +113,11 @@ def disabled_apps() -> set[str]:
 
 def set_tenant_disabled_apps(apps: set[str]) -> set[str]:
     """Persist THIS tenant's disabled set (runtime toggle). Only known app labels are kept
-    (a typo can't silently disable everything), and a globally-disabled app is implicitly
-    included. Returns the resulting effective disabled set."""
+    (a typo can't silently disable everything), foundational ``PROTECTED_APPS`` are stripped
+    (disabling them would brick the control plane itself), and a globally-disabled app is
+    implicitly included. Returns the resulting effective disabled set."""
     known = set(APP_MOUNTS.values())
-    tenant_set = sorted(set(apps) & known)
+    tenant_set = sorted((set(apps) & known) - PROTECTED_APPS)
     cache.set(_cache_key(), tenant_set, timeout=None)
     return set(tenant_set) | set(_global_disabled())
 
@@ -120,30 +130,40 @@ def app_for_mount(mount: str) -> str | None:
 def resolve_status(app: str, _seen: frozenset[str] = frozenset()) -> tuple[str, list[str]]:
     """(status, warnings) for ``app``. Transitive: an app whose HARD dep resolves to
     disabled/unavailable is itself ``unavailable``; a SOFT dep that is disabled/unavailable
-    downgrades it to ``degraded`` with a warning. Cycle-safe via ``_seen``."""
-    disabled = disabled_apps()
-    if app in disabled:
+    downgrades it to ``degraded`` with a warning. Cycle-safe via ``_seen``.
+
+    The disabled set is read from cache exactly ONCE and threaded through the whole graph
+    walk (see ``_resolve``) — resolving a dep chain must not fan out into N Redis reads on
+    the per-request hot path."""
+    return _resolve(app, disabled_apps(), _seen)
+
+
+def _resolve(app: str, disabled: set[str], seen: frozenset[str]) -> tuple[str, list[str]]:
+    """The recursion for :func:`resolve_status`, over a pre-fetched ``disabled`` set (no I/O)."""
+    if app in disabled and app not in PROTECTED_APPS:
         return STATUS_DISABLED, [f"The {app} service is turned off."]
-    if app in _seen:  # a dependency cycle — treat as up to avoid infinite recursion
+    if app in seen:  # a dependency cycle — treat as up to avoid infinite recursion
         return STATUS_UP, []
-    seen = _seen | {app}
+    seen = seen | {app}
     deps = APP_DEPENDENCIES.get(app, {})
     warnings: list[str] = []
     for hard in deps.get("hard", []):
-        h_status, _ = resolve_status(hard, seen)
+        h_status, _ = _resolve(hard, disabled, seen)
         if h_status in (STATUS_DISABLED, STATUS_UNAVAILABLE):
             return STATUS_UNAVAILABLE, [f"The {app} service is unavailable: it requires {hard}, which is down."]
     for soft in deps.get("soft", []):
-        s_status, _ = resolve_status(soft, seen)
+        s_status, _ = _resolve(soft, disabled, seen)
         if s_status in (STATUS_DISABLED, STATUS_UNAVAILABLE):
             warnings.append(f"{soft} is down — {app} is running in a degraded mode.")
     return (STATUS_DEGRADED if warnings else STATUS_UP), warnings
 
 
 def system_status() -> list[dict]:
-    """A snapshot of every managed app's status — for the system-status endpoint."""
+    """A snapshot of every managed app's status — for the system-status endpoint. Reads the
+    disabled set once and reuses it across all ~38 apps (not one Redis read per app)."""
+    disabled = disabled_apps()
     out = []
     for app in sorted(set(APP_MOUNTS.values())):
-        status, warnings = resolve_status(app)
+        status, warnings = _resolve(app, disabled, frozenset())
         out.append({"app": app, "status": status, "warnings": warnings})
     return out
