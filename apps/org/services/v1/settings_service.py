@@ -51,6 +51,7 @@ _WRITABLE = frozenset(
         "placement_allowed_question_types",
         "penalty_escalation_threshold",
         "show_classroom_rank",
+        "placement_test_creation_mobile_only",
     }
 )
 

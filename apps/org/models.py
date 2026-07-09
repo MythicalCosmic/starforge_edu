@@ -167,6 +167,11 @@ class CenterSettings(models.Model):
     # F23-1: when True (default) only an EXCUSED absence (one with an accepted reason)
     # qualifies for a deduction; when False a plain ABSENT record qualifies too.
     absence_deduction_excused_only = models.BooleanField(default=True)
+    # F8-2: when True, placement test AUTHORING (create test / add-remove question /
+    # AI-generate) is restricted to the mobile app — a request without `X-Client: mobile`
+    # is 403'd. A soft, spoofable policy gate (a determined web client can send the
+    # header); the intent is to steer staff to the mobile authoring tools. Off by default.
+    placement_test_creation_mobile_only = models.BooleanField(default=False)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

@@ -48,6 +48,22 @@ def _method_not_allowed() -> HttpResponse:
     return error("Method not allowed.", code="method_not_allowed", status=405)
 
 
+def _assert_test_creation_client(request: HttpRequest) -> None:
+    """F8-2: when the center restricts placement-test authoring to the mobile app, a
+    request that does not identify as the mobile client (``X-Client: mobile``) is 403'd.
+    A soft, spoofable steering gate (a determined web caller can send the header) — the
+    intent is to route staff to the mobile authoring tools, not to be a security boundary."""
+    from apps.org.selectors import get_center_settings
+
+    if not get_center_settings().placement_test_creation_mobile_only:
+        return
+    if request.META.get("HTTP_X_CLIENT", "").strip().lower() != "mobile":
+        raise PermissionException(
+            _("Placement tests can only be authored from the mobile app."),
+            code="web_test_creation_blocked",
+        )
+
+
 def _reject(field: str, message: str) -> ValidationException:
     return ValidationException("Invalid input.", code="validation_error", fields={field: [message]})
 
@@ -287,6 +303,7 @@ def tests_collection_view(request: HttpRequest) -> HttpResponse:
         return paginated([placement_test_to_dict(t) for t in items], total=total, page=page, page_size=size)
     if request.method == "POST":
         check_perm(request, "placement:write")
+        _assert_test_creation_client(request)
         test = _service().create_test(created_by=request.user, **_create_test_data(request))
         return created(placement_test_to_dict(test))
     return _method_not_allowed()
@@ -316,6 +333,7 @@ def test_add_question_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method != "POST":
         return _method_not_allowed()
     check_perm(request, "placement:write")
+    _assert_test_creation_client(request)
     test = _get_test(request, pk)
     data = read_json(request)
     question = _service().add_question(
@@ -347,6 +365,7 @@ def test_generate_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method != "POST":
         return _method_not_allowed()
     check_perm(request, "placement:write")
+    _assert_test_creation_client(request)
     test = _get_test(request, pk)
     data = read_json(request)
     ai_request = _service().request_generation(
@@ -365,6 +384,7 @@ def test_remove_question_view(request: HttpRequest, pk: int, question_id: int) -
     if request.method != "POST":
         return _method_not_allowed()
     check_perm(request, "placement:write")
+    _assert_test_creation_client(request)
     test = _get_test(request, pk)
     question = test.questions.filter(pk=question_id).first()
     if question is None:
@@ -379,6 +399,7 @@ def test_submit_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method != "POST":
         return _method_not_allowed()
     check_perm(request, "placement:write")
+    _assert_test_creation_client(request)
     test = _service().submit_test(test=_get_test(request, pk))
     return success(placement_test_to_dict(test))
 

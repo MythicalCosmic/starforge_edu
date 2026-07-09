@@ -142,6 +142,7 @@ _SETTINGS_BOOL_FIELDS = (
     "require_group_acceptance",
     "ai_exam_generation_enabled",
     "show_classroom_rank",
+    "placement_test_creation_mobile_only",
 )
 _SETTINGS_STR_FIELDS = (
     "grading_scheme",
