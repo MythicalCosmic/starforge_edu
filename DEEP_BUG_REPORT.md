@@ -527,6 +527,12 @@ Re-ran the loop on the code ADDED this session (fault-isolation, envelope conver
 
 **Refuted (correctly did not reach the ≥2 bar):** co-teacher payout "over-count" (intentional per-teacher policy), `compute_payout` Python lesson-loop (bounded + correct), 503-before-auth (intentional fault-isolation), `_classify` `api_error` vs stable codes on the DRF reports app (1/2 — rare exceptions, minor).
 
+### Round 2 (money engine · concurrency/races · never-500 fuzz)
+
+A second round targeting fresh high-stakes ground. **concurrency/races and never-500 came back dry** (no confirmed defect — the money POSTs use `select_for_update` inside `@transaction.atomic`, the campaigns/enroll compare-and-swap claims hold, and the write paths validate before hitting the DB). One confirmed money defect (2/2 refuters):
+
+**MONEY-1 (MEDIUM, SoD bypass in the `reward` kind) — FIXED.** `reward` was in `_REQUEST_KINDS`, so the generic `POST /approvals/` accepted `kind="reward"` with a raw client payload — but `create_request` has no reward validation branch, so `recipient_id` (the self-dealing identity) and `party_label` (the immutable ledger payee) flowed through decoupled and un-coerced. The guard `_assert_not_beneficiary_self_dealing` compared `payload["recipient_id"] == actor.id`, bypassable two ways: **decoupling** (`recipient_id=999`, `party_label="pay me"` → guard checks the wrong identity) and **type confusion** (`recipient_id="5"` ≠ int `5`). A cashier holding `approvals:disburse` could thus approve+disburse their own cash reward. Fix (mirrors the `salary_prep` exclusion): **removed `reward` from `_REQUEST_KINDS`** so only `apps.rewards.grant_reward` can mint it (it pins `recipient_id` as int + derives `party_label` from the same recipient), **plus** hardened `_assert_not_beneficiary_self_dealing` to int-coerce the pinned id (defense-in-depth so a string can't slip past for ANY kind). +2 tests (endpoint rejects `kind=reward` 400; the guard blocks a string `recipient_id` matching the actor and never crashes on garbage). This was a pre-existing gap, not introduced this session.
+
 ---
 
 ## Appendix A — Refuted candidates

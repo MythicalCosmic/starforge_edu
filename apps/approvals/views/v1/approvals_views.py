@@ -45,7 +45,13 @@ _REQUEST_KINDS = frozenset(
         # a salary for an arbitrary teacher at a raw, uncomputed figure (F13-1 self-review).
         "event_split",
         "book_cash",
-        "reward",
+        # NOTE: "reward" is deliberately NOT here (same reasoning as salary_prep). A cash reward
+        # is real money OUT to a named STAFF member; only apps.rewards.grant_reward may create it
+        # (via the domain create_request), which pins recipient_id (int) AND derives party_label
+        # from the SAME recipient. Exposed on the generic POST /approvals/ a requester could
+        # decouple recipient_id (the SoD identity) from party_label (the ledger payee), or send
+        # recipient_id as a string, to bypass _assert_not_beneficiary_self_dealing and
+        # approve/disburse their own reward (MONEY-1).
         "other",
     }
 )

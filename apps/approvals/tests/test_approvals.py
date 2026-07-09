@@ -65,6 +65,50 @@ def test_request_approve_disburse_writes_ledger(tenant_a, as_role):
     )
 
 
+def test_reward_kind_not_accepted_by_generic_endpoint(tenant_a, as_role):
+    """MONEY-1: a cash reward is real money OUT to a named staff member. The generic
+    POST /approvals/ must NOT accept kind='reward' (only apps.rewards.grant_reward may mint
+    it, pinning recipient_id + party_label consistently) — else a requester could decouple the
+    SoD identity from the ledger payee and self-deal. Mirrors the salary_prep exclusion."""
+    director, _ = as_role(Role.DIRECTOR)
+    r = director.post(
+        REQ,
+        {"kind": "reward", "title": "Bonus", "amount_uzs": "5000000.00",
+         "payload": {"recipient_id": 999, "party_label": "Pay me"}},
+        format="json",
+    )
+    assert r.status_code == 400, r.content
+    assert r.json()["code"] == "validation_error"
+    assert "kind" in r.json()["errors"]
+
+
+def test_beneficiary_self_dealing_guard_int_coerces_id():
+    """MONEY-1 hardening: the beneficiary SoD guard int-coerces the pinned id, so a STRING
+    recipient_id equal to the actor still blocks (type-confusion can't bypass), and a
+    missing/garbage id neither blocks nor crashes."""
+    from apps.approvals.services import _assert_not_beneficiary_self_dealing
+    from core.exceptions import PermissionException
+
+    class _Req:
+        kind = "reward"
+
+        def __init__(self, rid):
+            self.payload = {"recipient_id": rid}
+
+    class _Actor:
+        id = 5
+        is_superuser = False
+
+    with pytest.raises(PermissionException):
+        _assert_not_beneficiary_self_dealing(_Req("5"), _Actor())  # string id == actor -> blocked
+    with pytest.raises(PermissionException):
+        _assert_not_beneficiary_self_dealing(_Req(5), _Actor())  # int id == actor -> blocked
+    # different / garbage / missing id -> allowed, no crash
+    _assert_not_beneficiary_self_dealing(_Req(999), _Actor())
+    _assert_not_beneficiary_self_dealing(_Req("not-a-number"), _Actor())
+    _assert_not_beneficiary_self_dealing(_Req(None), _Actor())
+
+
 def test_requester_sees_own_handler_sees_all(tenant_a, as_role, user_in, as_user):
     teacher, _ = as_role(Role.TEACHER)
     other = as_user(tenant_a, user_in(tenant_a, roles=[Role.TEACHER]))

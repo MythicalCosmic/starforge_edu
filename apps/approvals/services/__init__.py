@@ -842,7 +842,16 @@ def _assert_not_beneficiary_self_dealing(req: ApprovalRequest, actor) -> None:
     if spec is None:
         return
     key, code, message = spec
-    if req.payload.get(key) == getattr(actor, "id", None):
+    # Coerce the pinned beneficiary id to int before comparing: the SoD identity must match the
+    # actor's pk regardless of how it was stored, so a string "5" cannot slip past the guard for
+    # actor 5 (a type-confusion bypass). A missing/non-coercible id is nobody's pk, so it never
+    # blocks.
+    raw = req.payload.get(key)
+    try:
+        beneficiary_id = int(raw)
+    except (TypeError, ValueError):
+        return
+    if beneficiary_id == getattr(actor, "id", None):
         raise PermissionException(message, code=code)
 
 
