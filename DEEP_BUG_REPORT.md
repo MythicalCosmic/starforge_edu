@@ -445,6 +445,15 @@ All 13 reuse existing scope/permission guards, add no owner-facing behavior chan
 
 ---
 
+## Deploy + live-verification findings
+
+Deployed `day1-build`→`master` (auto-deploy: build → `migrate_schemas` → `up -d`). All 8 additive migrations applied OK across schemas; `/healthz/live` 200; a real tenant API route (`/api/v1/auth/login/`) returned 405 (correct, POST-only); Celery worker connected to the Redis broker. **Verifying the deploy surfaced one genuine latent bug:**
+
+### DEPLOY-1 · [MEDIUM][config/ops] `settings.REDIS_URL` was never defined → `get_redis()` `AttributeError` → `/healthz/ready` always 503 + task DLQ push 500s ✅ FIXED (commit `cc33929`)
+- **Where:** [config/settings/base.py](config/settings/base.py) / [infrastructure/cache/redis_client.py](infrastructure/cache/redis_client.py). `REDIS_URL` was only ever read as `env("REDIS_URL")` at the cache/broker/channel-layer config sites — never assigned as a settings attribute. But `get_redis()` reads `settings.REDIS_URL`, so on the REAL (unmocked) path it raised `AttributeError`: the readiness probe returned 503 "Cache unavailable" on the live server (even though the Django cache, broker, and a fresh redis client all worked), and the observability **dead-letter-queue** push (`get_redis().lpush`) 500'd on every failed task. Invisible to tests because the health unit tests mock `get_redis`. **Fix:** `REDIS_URL = env("REDIS_URL")` (the same call the cache/broker already use). +1 regression test on the real path. Pre-existing (not introduced this session) — the value of actually verifying the deploy.
+
+---
+
 ## Remaining-items triage (after the owner approved sweeping the flagged list)
 
 The owner authorized fixing everything + merge/push/deploy. **All MEDIUM+ findings are now FIXED** (the two security items R6/CONF3 + R1-05, plus R3-P3 this pass; everything else was fixed in the earlier rounds). What remains is either a genuine **decision** (which must not be guessed) or **LOW** edge-case concurrency whose fix carries more deploy risk than the bug:
