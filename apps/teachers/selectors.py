@@ -16,9 +16,38 @@ def teacher_profile_for(user) -> TeacherProfile | None:
     return TeacherProfile.objects.filter(user=user).first()
 
 
+def _pending_forms_for(*, teacher: TeacherProfile, user, roles, now) -> list[dict]:
+    """Published, currently-open forms that TARGET this teacher (by role or by user id) and
+    that they have not yet answered — the "forms you must fill" dashboard warning (F3-2).
+    An untargeted (open) form is not a personal to-do, so it never appears here."""
+    from django.db.models import Exists, OuterRef, Q
+
+    from apps.forms.models import Form, FormResponse
+
+    audience = Q(audience_user_ids__contains=[user.pk])
+    for role in roles:
+        audience |= Q(audience_roles__contains=[str(role)])
+
+    already_answered = FormResponse.objects.filter(form=OuterRef("pk"), respondent=user)
+    forms = (
+        Form.objects.filter(status=Form.Status.PUBLISHED)
+        .filter(Q(opens_at__isnull=True) | Q(opens_at__lte=now))
+        .filter(Q(closes_at__isnull=True) | Q(closes_at__gte=now))
+        .filter(Q(branch__isnull=True) | Q(branch_id=teacher.branch_id))
+        .filter(audience)
+        .annotate(_answered=Exists(already_answered))
+        .filter(_answered=False)
+        .order_by("closes_at", "created_at")[:10]
+    )
+    return [
+        {"id": f.id, "title": f.title, "closes_at": f.closes_at}
+        for f in forms
+    ]
+
+
 def teacher_dashboard(*, teacher: TeacherProfile, user, roles) -> dict:
     """A single read over the teacher's groups, schedule (with lesson types), exams,
-    expected graduations, and outstanding rule acknowledgments (F3-2)."""
+    expected graduations, outstanding rule acknowledgments, and forms to fill (F3-2)."""
     from apps.academics.models import Exam
     from apps.cohorts.models import Cohort, CohortMembership
     from apps.compliance import selectors as compliance_selectors
@@ -93,4 +122,5 @@ def teacher_dashboard(*, teacher: TeacherProfile, user, roles) -> dict:
             else None
         ),
         "pending_rule_acknowledgments": len(compliance_selectors.pending_rules(user, roles)),
+        "pending_forms": _pending_forms_for(teacher=teacher, user=user, roles=roles, now=now),
     }

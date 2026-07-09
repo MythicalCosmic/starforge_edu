@@ -28,6 +28,13 @@ class Form(models.Model):
     branch = models.ForeignKey(
         "org.Branch", on_delete=models.PROTECT, null=True, blank=True, related_name="forms"
     )
+    # F3-2: optional AUDIENCE targeting. Empty both = an open form (anyone in the branch may
+    # respond, the original behaviour). Non-empty = the form is TARGETED at those roles
+    # and/or specific users — it then shows as a "to-fill" warning on their dashboard until
+    # they submit. `audience_roles` is a list of Role values; `audience_user_ids` a list of
+    # user ids (the union is the target set).
+    audience_roles = models.JSONField(default=list, blank=True)
+    audience_user_ids = models.JSONField(default=list, blank=True)
     opens_at = models.DateTimeField(null=True, blank=True)
     closes_at = models.DateTimeField(null=True, blank=True)
     created_by = models.ForeignKey(

@@ -20,7 +20,16 @@ from apps.forms.interfaces.services import IFormService
 from apps.forms.models import Form, FormField, FormResponse
 from core.exceptions import PermissionException, ValidationException
 
-_UPDATABLE = ("title", "description", "is_anonymous", "allow_multiple", "opens_at", "closes_at")
+_UPDATABLE = (
+    "title",
+    "description",
+    "is_anonymous",
+    "allow_multiple",
+    "opens_at",
+    "closes_at",
+    "audience_roles",
+    "audience_user_ids",
+)
 
 
 class FormService(IFormService):
@@ -66,6 +75,8 @@ class FormService(IFormService):
             branch=branch,
             opens_at=data.opens_at,
             closes_at=data.closes_at,
+            audience_roles=data.audience_roles,
+            audience_user_ids=data.audience_user_ids,
         )
 
     def update(self, form: Form, changes: dict[str, Any]) -> Form:

@@ -15,6 +15,8 @@ class CreateFormDTO:
     branch_id: int | None = None
     opens_at: datetime | None = None
     closes_at: datetime | None = None
+    audience_roles: list[str] = field(default_factory=list)
+    audience_user_ids: list[int] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

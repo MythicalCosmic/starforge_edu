@@ -42,6 +42,40 @@ def _build_published_form(client, **form_kwargs):
     return fid, (f1, f2, f3)
 
 
+def test_create_and_update_form_audience(tenant_a, as_role):
+    """F3-2: a form can target roles and/or specific users; the audience round-trips."""
+    director, _ = as_role(Role.DIRECTOR)
+    created = director.post(
+        FORMS,
+        {"title": "Staff survey", "audience_roles": ["teacher", "teacher"], "audience_user_ids": [3, 3, 4]},
+        format="json",
+    )
+    assert created.status_code == 201, created.content
+    data = created.json()["data"]
+    assert data["audience_roles"] == ["teacher"]  # deduped
+    assert data["audience_user_ids"] == [3, 4]  # deduped
+
+    fid = data["id"]
+    patched = director.patch(f"{FORMS}{fid}/", {"audience_roles": ["registrar"]}, format="json")
+    assert patched.status_code == 200, patched.content
+    assert patched.json()["data"]["audience_roles"] == ["registrar"]
+
+
+def test_bad_audience_is_rejected(tenant_a, as_role):
+    director, _ = as_role(Role.DIRECTOR)
+    bad_role = director.post(
+        FORMS, {"title": "x", "audience_roles": ["teacher", "wizard"]}, format="json"
+    )
+    assert bad_role.status_code == 400
+    assert bad_role.json()["code"] == "validation_error"
+
+    bad_uid = director.post(
+        FORMS, {"title": "x", "audience_user_ids": [1, "nope"]}, format="json"
+    )
+    assert bad_uid.status_code == 400
+    assert bad_uid.json()["code"] == "validation_error"
+
+
 def test_build_publish_submit_and_summary(tenant_a, as_role):
     director, _ = as_role(Role.DIRECTOR)
     student, _ = as_role(Role.STUDENT)

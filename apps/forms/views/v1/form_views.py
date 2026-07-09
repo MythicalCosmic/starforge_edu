@@ -193,6 +193,8 @@ def _create(request: HttpRequest) -> HttpResponse:
         branch_id=int_field(body, "branch"),
         opens_at=_optional_datetime(body, "opens_at"),
         closes_at=_optional_datetime(body, "closes_at"),
+        audience_roles=_audience_roles(body.get("audience_roles", [])),
+        audience_user_ids=_audience_user_ids(body.get("audience_user_ids", [])),
     )
     is_unscoped, _can_write, branch_ids = _scope(request)
     form = _service().create(dto, creator=request.user, is_unscoped=is_unscoped, branch_ids=branch_ids)
@@ -218,7 +220,54 @@ def _update_changes(body: dict[str, Any]) -> dict[str, Any]:
         changes["opens_at"] = _optional_datetime(body, "opens_at")
     if "closes_at" in body:
         changes["closes_at"] = _optional_datetime(body, "closes_at")
+    if "audience_roles" in body:
+        changes["audience_roles"] = _audience_roles(body["audience_roles"])
+    if "audience_user_ids" in body:
+        changes["audience_user_ids"] = _audience_user_ids(body["audience_user_ids"])
     return changes
+
+
+def _audience_roles(raw: Any) -> list[str]:
+    """A deduped list of valid Role values the form targets (F3-2). A bad role is a 400."""
+    if not isinstance(raw, list):
+        raise ValidationException(
+            "audience_roles must be a list.",
+            code="validation_error",
+            fields={"audience_roles": ["Must be a list of role names."]},
+        )
+    valid = set(Role.ALL)
+    out: list[str] = []
+    for role in raw:
+        if not isinstance(role, str) or role not in valid:
+            raise ValidationException(
+                "Unknown role in audience_roles.",
+                code="validation_error",
+                fields={"audience_roles": [f"Unknown role: {role!r}."]},
+            )
+        if role not in out:
+            out.append(role)
+    return out
+
+
+def _audience_user_ids(raw: Any) -> list[int]:
+    """A deduped list of integer user ids the form targets (F3-2). A non-int is a 400."""
+    if not isinstance(raw, list):
+        raise ValidationException(
+            "audience_user_ids must be a list.",
+            code="validation_error",
+            fields={"audience_user_ids": ["Must be a list of user ids."]},
+        )
+    out: list[int] = []
+    for uid in raw:
+        if not isinstance(uid, int) or isinstance(uid, bool):
+            raise ValidationException(
+                "audience_user_ids must be integers.",
+                code="validation_error",
+                fields={"audience_user_ids": ["Each id must be an integer."]},
+            )
+        if uid not in out:
+            out.append(uid)
+    return out
 
 
 def _field_dto(body: dict[str, Any]) -> AddFieldDTO:

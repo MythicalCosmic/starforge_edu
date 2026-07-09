@@ -28,6 +28,8 @@ def form_to_dict(form: Form) -> dict[str, Any]:
         "is_anonymous": form.is_anonymous,
         "allow_multiple": form.allow_multiple,
         "branch": form.branch_id,
+        "audience_roles": form.audience_roles,
+        "audience_user_ids": form.audience_user_ids,
         "opens_at": form.opens_at.isoformat() if form.opens_at else None,
         "closes_at": form.closes_at.isoformat() if form.closes_at else None,
         "created_by": form.created_by_id,

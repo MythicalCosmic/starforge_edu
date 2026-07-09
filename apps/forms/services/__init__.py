@@ -71,7 +71,16 @@ def update_form(*, form: Form, **changes) -> Form:
     exist would misrepresent data already collected."""
     if form.status != Form.Status.DRAFT:
         raise UnprocessableEntity(_("Only a draft form can be edited."), code="form_not_draft")
-    allowed = {"title", "description", "is_anonymous", "allow_multiple", "opens_at", "closes_at"}
+    allowed = {
+        "title",
+        "description",
+        "is_anonymous",
+        "allow_multiple",
+        "opens_at",
+        "closes_at",
+        "audience_roles",
+        "audience_user_ids",
+    }
     for key, value in changes.items():
         if key in allowed:
             setattr(form, key, value)
