@@ -429,6 +429,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "celery_tasks.campaign_tasks.dispatch_scheduled_campaigns",
         "schedule": 60 * 5,  # every 5 min — send campaigns whose scheduled_at has arrived (F10-1)
     },
+    "prune-webhook-events": {
+        "task": "celery_tasks.payment_tasks.prune_webhook_events",
+        "schedule": 60 * 60 * 24,  # daily — bound WebhookEvent storage growth (R6/CONF3)
+    },
 }
 
 # ---------------------------------------------------------------------------

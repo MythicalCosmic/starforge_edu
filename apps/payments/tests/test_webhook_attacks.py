@@ -266,3 +266,77 @@ def test_inactive_center_slug_404(configured_a):
         assert resp.status_code == 404
     finally:
         Center.objects.filter(schema_name=configured_a.schema_name).update(is_active=True)
+
+
+# --------------------------------------------------------------------------- #
+# R6/CONF3 — storage-exhaustion DoS: throttle ONLY the invalid-signature path
+# (a valid provider callback is never touched), plus WebhookEvent retention.
+# --------------------------------------------------------------------------- #
+def test_invalid_webhook_flood_is_capped_per_ip(configured_a, monkeypatch):
+    """A forged-signature flood from one IP stops inserting WebhookEvent rows once the
+    per-IP invalid-webhook budget is spent — bounding the storage DoS — while still
+    recording the first few for audit."""
+    from django.core.cache import cache
+
+    from apps.payments import webhook_views
+
+    cache.clear()  # a clean per-IP bucket (LocMem cache persists across tests)
+    monkeypatch.setattr(webhook_views, "WEBHOOK_INVALID_RATELIMIT", 2)
+
+    for i in range(5):
+        body, headers = bld.make_uzum_webhook(
+            event_id=f"flood-{i}", order_id=ACCOUNT["order_id"], amount=AMOUNT_UZS, tamper_sign=True
+        )
+        _post_uzum(configured_a, body, headers)
+
+    events = helpers.webhook_event_rows(configured_a, provider="uzum")
+    assert len(events) == 2  # only the first 2 forged webhooks recorded; the rest dropped pre-INSERT
+    assert all(e.status == "rejected" for e in events)
+
+
+def test_valid_webhook_is_never_throttled(configured_a, monkeypatch):
+    """The invalid-path throttle must never touch a validly-signed callback (the money
+    path can't be re-broken — the reason R4-02 removed the blanket webhook limit). Even
+    after the invalid budget is exhausted for this IP, a valid webhook is recorded + acked."""
+    from django.core.cache import cache
+
+    from apps.payments import webhook_views
+
+    cache.clear()
+    monkeypatch.setattr(webhook_views, "WEBHOOK_INVALID_RATELIMIT", 1)
+
+    for i in range(3):  # exhaust the invalid budget for this IP
+        body, headers = bld.make_uzum_webhook(
+            event_id=f"bad-{i}", order_id=ACCOUNT["order_id"], amount=AMOUNT_UZS, tamper_sign=True
+        )
+        _post_uzum(configured_a, body, headers)
+
+    body, headers = bld.make_uzum_webhook(event_id="good-1", order_id=ACCOUNT["order_id"], amount=AMOUNT_UZS)
+    resp = _post_uzum(configured_a, body, headers)
+    assert resp.status_code in (200, 201, 202), resp.content
+    events = helpers.webhook_event_rows(configured_a, provider="uzum", event_id="good-1")
+    assert events
+    assert events[0].signature_valid is True
+
+
+def test_prune_webhook_events_removes_old_keeps_recent(configured_a):
+    """The retention beat sweep deletes WebhookEvent rows past the window and keeps recent
+    ones — bounding long-term growth even under a distributed flood."""
+    from datetime import timedelta
+
+    from django.utils import timezone
+    from django_tenants.utils import schema_context
+
+    from apps.payments.models import Provider, WebhookEvent
+    from celery_tasks.payment_tasks import WEBHOOK_RETENTION_DAYS, prune_webhook_events_for_schema
+
+    with schema_context(configured_a.schema_name):
+        old = WebhookEvent.objects.create(provider=Provider.UZUM, event_id="old-1")
+        recent = WebhookEvent.objects.create(provider=Provider.UZUM, event_id="recent-1")
+        WebhookEvent.objects.filter(pk=old.pk).update(
+            created_at=timezone.now() - timedelta(days=WEBHOOK_RETENTION_DAYS + 5)
+        )
+        deleted = prune_webhook_events_for_schema()
+        assert deleted == 1
+        assert not WebhookEvent.objects.filter(pk=old.pk).exists()
+        assert WebhookEvent.objects.filter(pk=recent.pk).exists()

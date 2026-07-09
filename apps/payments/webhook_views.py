@@ -30,10 +30,39 @@ from django_tenants.utils import schema_context
 
 from apps.payments import services
 from apps.payments.models import Provider, ProviderConfig
-from core.exceptions import ValidationException
+from core.exceptions import ThrottledException, ValidationException
+from core.ratelimit import check_rate
 from core.utils import client_ip
 
 logger = logging.getLogger(__name__)
+
+# R6/CONF3 — storage-exhaustion DoS guard. Every inbound webhook records a WebhookEvent
+# row for audit/replay-dedupe BEFORE the invoice is resolved; event_id is attacker-
+# controlled, so a forged flood from one IP could insert one unbounded row per POST. We
+# throttle ONLY the INVALID-signature path per client IP: a legitimate provider always
+# signs correctly, so its callbacks are NEVER counted here (the money path can't be
+# re-throttled — the reason R4-02 removed the blanket 60/min webhook limit), while an
+# attacker (who lacks the secret) can only produce invalid-signature requests and is
+# capped. The limit is generous because a real provider only lands here on a rare
+# misconfiguration. A module constant so tests can monkeypatch it. Retention
+# (celery_tasks.payment_tasks.prune_webhook_events) bounds long-term growth.
+WEBHOOK_INVALID_RATELIMIT = 120  # invalid-signature webhooks per IP per window
+WEBHOOK_INVALID_WINDOW = 60  # seconds
+
+
+def _invalid_webhook_allowed(request: HttpRequest) -> bool:
+    """True if this IP is still under the bad-webhook budget; False -> a forged flood, so
+    the caller SKIPS the audit INSERT (returning the normal invalid-signature response)."""
+    try:
+        check_rate(
+            scope="webhook_invalid",
+            key=client_ip(request) or "anon",
+            limit=WEBHOOK_INVALID_RATELIMIT,
+            window=WEBHOOK_INVALID_WINDOW,
+        )
+        return True
+    except ThrottledException:
+        return False
 
 
 def _resolve_center(center_slug: str):
@@ -82,6 +111,10 @@ def click_webhook_view(request: HttpRequest, center_slug: str) -> HttpResponse:
         )
 
         valid = bool(config) and get_click_client().verify_signature(payload=payload, secret_key=secret)
+        if not valid and not _invalid_webhook_allowed(request):
+            # Forged-webhook flood from this IP: return the normal bad-sign response but
+            # skip the audit INSERT so the table can't be exhausted (R6/CONF3).
+            return JsonResponse({"error": ERROR_SIGN_CHECK_FAILED, "error_note": "SIGN CHECK FAILED"})
         event_id = str(payload.get("click_trans_id", "")) + ":" + str(payload.get("action", ""))
         event, is_new = services.record_webhook_event(
             provider=Provider.CLICK,
@@ -163,14 +196,19 @@ def payme_webhook_view(request: HttpRequest, center_slug: str) -> HttpResponse:
             # Payme's CreateTransaction is idempotent on params.id — a repeat of the same
             # id is an EXPECTED retry, not a nonce-replay, so it must not be flagged
             # `duplicate`. The handler echoes the existing txn.
-            services.record_webhook_event(
-                provider=Provider.PAYME,
-                event_id=str(params["id"]),
-                payload=body,
-                remote_ip=client_ip(request),
-                signature_valid=client.verify_auth(auth_header=auth_header, key=key),
-                idempotent_retry=True,
-            )
+            sig_valid = client.verify_auth(auth_header=auth_header, key=key)
+            # Skip the audit pre-record for an invalid-auth flood from this IP (R6/CONF3);
+            # a valid callback is always recorded. Either way client.handle returns the
+            # correct JSON-RPC 200 below, so Payme's always-200 contract is preserved.
+            if sig_valid or _invalid_webhook_allowed(request):
+                services.record_webhook_event(
+                    provider=Provider.PAYME,
+                    event_id=str(params["id"]),
+                    payload=body,
+                    remote_ip=client_ip(request),
+                    signature_valid=sig_valid,
+                    idempotent_retry=True,
+                )
         response = client.handle(body=body, auth_header=auth_header, key=key, store=store)
         return JsonResponse(response)
 
@@ -193,6 +231,10 @@ def uzum_webhook_view(request: HttpRequest, center_slug: str) -> HttpResponse:
         valid = bool(config) and get_uzum_client().verify_signature(
             payload=payload, signature=signature, api_key=api_key
         )
+        if not valid and not _invalid_webhook_allowed(request):
+            # Forged-webhook flood from this IP: return the normal invalid-signature
+            # response but skip the audit INSERT so the table can't be exhausted (R6/CONF3).
+            return _error("invalid_signature", "Signature verification failed.", http_status=400)
         event_id = str(
             payload.get("event_id") or payload.get("transaction_id") or payload.get("order_id", "")
         )
