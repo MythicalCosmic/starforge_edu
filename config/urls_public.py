@@ -20,6 +20,14 @@ urlpatterns = [
     path("api/v1/webhooks/", include("apps.payments.webhook_urls")),
 ]
 
+# Serve /static/ (platform admin CSS/JS) from the app when DEBUG — see config/urls.py.
+from django.conf import settings  # noqa: E402
+
+if settings.DEBUG:
+    from django.contrib.staticfiles.urls import staticfiles_urlpatterns
+
+    urlpatterns += staticfiles_urlpatterns()
+
 # Backend API: Django's own error responses (unmatched URL, uncaught 500, CSRF
 # 403, suspicious-operation 400) return the JSON {"error": {...}} envelope.
 handler400 = "core.middleware.json_400"

@@ -53,6 +53,17 @@ urlpatterns = [
     path("api/schema/redoc/", SpectacularRedocView.as_view(url_name="schema"), name="redoc"),
 ]
 
+# Serve /static/ (admin CSS/JS, schema UI assets) from the app when DEBUG — under gunicorn
+# Django does NOT auto-serve static like runserver does, so without this route the admin
+# renders unstyled. DEBUG-guarded: a hardened (DEBUG=False) deploy must front static with a
+# real static server / CDN instead.
+from django.conf import settings  # noqa: E402
+
+if settings.DEBUG:
+    from django.contrib.staticfiles.urls import staticfiles_urlpatterns
+
+    urlpatterns += staticfiles_urlpatterns()
+
 # Backend API: Django's own error responses (unmatched URL, uncaught 500, CSRF
 # 403, suspicious-operation 400) return the JSON {"error": {...}} envelope.
 handler400 = "core.middleware.json_400"
