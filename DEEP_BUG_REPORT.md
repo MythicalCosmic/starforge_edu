@@ -106,10 +106,10 @@ test_deactivating_rule_clears_future_lessons_and_stops_regeneration
 - **Where:** [apps/finance/services/__init__.py:257](apps/finance/services/__init__.py#L257) (clamp), root cause `:321`–`:333` (sibling per-item cap but no aggregate cap).
 - **Status:** to fix — cap aggregate discount at the invoice subtotal so persisted lines can't sum below the clamped total.
 
-### R1-05 · [MEDIUM][security] WebSocket consumers authorize only at connect; session-revocation (force-logout / password-reset / `token_version` bump) and role-revocation never terminate a live socket ⏳ TODO
+### R1-05 · [MEDIUM][security] WebSocket consumers authorize only at connect; session-revocation (force-logout / password-reset) and role-revocation never terminate a live socket ✅ FIXED (owner-approved, commit `4d46a75`)
 
-- **Where:** [infrastructure/websocket/consumers.py:85](infrastructure/websocket/consumers.py#L85), also `apps/notifications/consumers.py:49`, `apps/attendance/consumers.py:63`.
-- **Status:** to fix — periodic re-validation or a revocation broadcast that closes affected sockets. (Sibling of prior finding on logout not bumping `token_version` for iCal, but this is the live-socket vector, not the URL feed.)
+- **Where:** [infrastructure/websocket/consumers.py](infrastructure/websocket/consumers.py), [infrastructure/websocket/middleware.py](infrastructure/websocket/middleware.py), [apps/attendance/consumers.py](apps/attendance/consumers.py).
+- **Fix:** the middleware stashes the raw session-key in `scope["_ws_token"]`; `HeartbeatConsumerMixin` re-authorizes every heartbeat cycle (~30s) — re-runs `validate_session_key` in the socket's tenant schema (via `database_sync_to_async`, mirroring the middleware's schema switch). A revoked/expired session → discard groups + close 4401. An overridable `_still_authorized()` hook lets a scoped consumer re-check its gate; `AttendanceConsumer` re-runs the branch/role check → close 4403 on a revoked role. Same teardown as the heartbeat-timeout path (no group leak). +2 tests (session-revoked→4401+group discarded; attendance role-revoked→4403).
 
 ### R1-06 · [MEDIUM][bug] A Redis/channel-layer error inside the `student_marked_absent` receiver propagates out of the post-commit hook → a committed attendance mark 500s and every remaining absent student in the batch loses their guardian notification ⏳ TODO
 
@@ -379,8 +379,8 @@ The owner handed back the two flagged task prompts (R2-04, R4/PLAUS1) as a go-ah
 ### R6/PLAUS3 · [LOW][injection] Audit CSV export wrote attacker User-Agent/actor_repr verbatim → spreadsheet formula injection (== prior #97 class) ✅ FIXED (batch T)
 - **Where:** [apps/audit/views/v1/audit_views.py:133](apps/audit/views/v1/audit_views.py#L133). Added `_safe_cell` (apostrophe-prefix leading `= + - @ \t \r`), mirroring `reports.generators.safe_cell`. +test.
 
-### R6-03 · [MEDIUM][DoS] Every inbound webhook inserts a `WebhookEvent` row before the signature gate (attacker-controlled `event_id`), and batch-M (R4-02) removed the rate limit → unauthenticated unbounded storage flood 🚩 FLAGGED — ops decision (`task_48799d5e`)
-- **Where:** [apps/payments/webhook_views.py](apps/payments/webhook_views.py) + [core/middleware.py](core/middleware.py) webhook exemption. In direct tension with the R4-02 exemption (which fixed legit-provider throttling). Fully fixing it needs a rate-limit value / event retention / provider IP allowlist decision that could re-break the money path if guessed — flagged rather than risked.
+### R6-03 (aka R6/CONF3) · [MEDIUM][DoS] Every inbound webhook inserts a `WebhookEvent` row before the signature gate (attacker-controlled `event_id`), and batch-M (R4-02) removed the rate limit → unauthenticated unbounded storage flood ✅ FIXED (owner-approved, commit `005d53a`)
+- **Where:** [apps/payments/webhook_views.py](apps/payments/webhook_views.py) + [celery_tasks/payment_tasks.py](celery_tasks/payment_tasks.py). Resolved the R4-02 money-path tension by throttling **only the invalid-signature path** per client IP (`WEBHOOK_INVALID_RATELIMIT=120/min`): a legitimate provider always signs correctly so its callbacks are NEVER counted/throttled (the money path can't be re-broken), while an attacker lacks the secret and so can only produce invalid-signature requests, which are capped — over budget the audit INSERT is skipped and the provider's normal bad-sign response is returned (Payme still gets JSON-RPC 200). Plus `prune_webhook_events` daily retention (90-day window) to bound long-term growth; a provider source-IP allowlist at the edge is recommended (ops) for the distributed case. Rejected webhooks are still recorded for audit up to the budget. +3 tests.
 
 ---
 
