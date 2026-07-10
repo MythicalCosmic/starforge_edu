@@ -30,13 +30,28 @@ def _session_ttl() -> timedelta:
     return timedelta(days=int(getattr(settings, "SESSION_TTL_DAYS", 7)))
 
 
-def create_session(user, *, ip: str = "", user_agent: str = "", device_id: str = "", read_only: bool = False):
-    """Issue a fresh session for ``user`` and return the row (``.key`` is the token)."""
+def create_session(
+    user,
+    *,
+    ip: str = "",
+    user_agent: str = "",
+    device_id: str = "",
+    read_only: bool = False,
+    principal_kind: str = "",
+    principal_id: int | None = None,
+):
+    """Issue a fresh session for ``user`` and return the row (``.key`` is the token).
+
+    For role-native login, pass ``principal_kind`` (student/teacher/parent/staff) +
+    ``principal_id`` (the role account's pk); ``user`` is still the account's linked User
+    so all downstream authz/audit is unchanged."""
     from apps.users.models import Session
 
     return Session.objects.create(
         user=user,
         key=secrets.token_urlsafe(40),
+        principal_kind=(principal_kind or "")[:16],
+        principal_id=principal_id,
         ip_address=(ip or "")[:64],
         user_agent=(user_agent or "")[:512],
         device_id=(device_id or "")[:128],
@@ -114,6 +129,9 @@ class SessionAuthentication(BaseAuthentication):
                 code="authentication_failed",
             )
         request.is_read_only_token = session.read_only
+        # Role-native identity the caller signed in as (blank for legacy sessions).
+        request.principal_kind = session.principal_kind
+        request.principal_id = session.principal_id
         return session.user, session
 
     def authenticate_header(self, request) -> str:

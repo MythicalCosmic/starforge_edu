@@ -12,6 +12,7 @@ from django_tenants.utils import schema_context
 pytestmark = pytest.mark.django_db
 
 LOGIN_URL = "/api/v1/auth/login/"
+ROLE_LOGIN_URL = "/api/v1/auth/role-login/"
 CHANGE_URL = "/api/v1/auth/password/change/"
 RESET_REQUEST_URL = "/api/v1/auth/password/reset/request/"
 RESET_CONFIRM_URL = "/api/v1/auth/password/reset/confirm/"
@@ -64,6 +65,74 @@ def test_login_happy_path_registers_device(tenant_a, client_for, user_in):
     me = authed.get(ME_URL)
     assert me.status_code == 200
     assert me.json()["data"]["username"] == user.username  # layered envelope
+
+
+def test_role_login_student_signs_in_as_their_role(tenant_a, client_for):
+    """Role-native login: a student authenticates with their student account's username and
+    the (linked-user) password. The session binds to the linked User so /me works exactly as
+    before, and the response reports which role they logged in as."""
+    from apps.students.tests.factories import StudentProfileFactory
+
+    with schema_context(tenant_a.schema_name):
+        student = StudentProfileFactory(username="ada.student")
+        student.user.set_password(PASSWORD)
+        student.user.save(update_fields=["password"])
+        user_id = student.user_id
+
+    client = client_for(tenant_a)
+    resp = client.post(ROLE_LOGIN_URL, {"username": "ada.student", "password": PASSWORD}, format="json")
+    assert resp.status_code == 200, resp.content
+    body = resp.json()["data"]
+    assert body["role"] == "student"
+    assert body["must_change_password"] is False
+    assert "access" in body
+
+    authed = client_for(tenant_a)
+    authed.credentials(HTTP_AUTHORIZATION=f"Bearer {body['access']}")
+    me = authed.get(ME_URL)
+    assert me.status_code == 200
+    assert me.json()["data"]["id"] == user_id  # authenticated as the student's linked account
+
+
+def test_role_login_wrong_password_401(tenant_a, client_for):
+    from apps.students.tests.factories import StudentProfileFactory
+
+    with schema_context(tenant_a.schema_name):
+        student = StudentProfileFactory(username="bob.student")
+        student.user.set_password(PASSWORD)
+        student.user.save(update_fields=["password"])
+
+    client = client_for(tenant_a)
+    resp = client.post(ROLE_LOGIN_URL, {"username": "bob.student", "password": "wrong-pass"}, format="json")
+    assert resp.status_code == 401
+    assert resp.json()["code"] == "invalid_credentials"
+
+
+def test_role_login_unknown_username_401(tenant_a, client_for):
+    client = client_for(tenant_a)
+    resp = client.post(ROLE_LOGIN_URL, {"username": "ghost.nobody", "password": PASSWORD}, format="json")
+    assert resp.status_code == 401
+    assert resp.json()["code"] == "invalid_credentials"
+
+
+def test_role_login_tracks_current_user_password_after_change(tenant_a, client_for):
+    """Regression (auth review): role-login checks the LINKED USER's password (single source
+    of truth), so a password change/reset takes effect immediately — the OLD password 401s and
+    the NEW one works — with no drift from a stale role-account snapshot."""
+    from apps.students.tests.factories import StudentProfileFactory
+    from apps.users.services import set_user_password
+
+    with schema_context(tenant_a.schema_name):
+        student = StudentProfileFactory(username="cy.student")
+        student.user.set_password(PASSWORD)
+        student.user.save(update_fields=["password"])
+        set_user_password(student.user, NEW_PASSWORD)  # a change / reset happens
+
+    client = client_for(tenant_a)
+    old = client.post(ROLE_LOGIN_URL, {"username": "cy.student", "password": PASSWORD}, format="json")
+    assert old.status_code == 401  # the old password no longer works on role-login
+    new = client.post(ROLE_LOGIN_URL, {"username": "cy.student", "password": NEW_PASSWORD}, format="json")
+    assert new.status_code == 200, new.content
 
 
 def test_login_wrong_password_401(tenant_a, client_for, user_in):

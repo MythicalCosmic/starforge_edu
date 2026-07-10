@@ -183,6 +183,11 @@ class Session(models.Model):
 
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="auth_sessions")
     key = models.CharField(max_length=64, unique=True, db_index=True)
+    # Role-native auth: which role account the caller signed in AS (student/teacher/parent/
+    # staff). Blank for legacy User-based sessions. ``user`` stays the linked account so all
+    # downstream authz + audit FKs are unchanged; the principal just records role identity.
+    principal_kind = models.CharField(max_length=16, blank=True)
+    principal_id = models.BigIntegerField(null=True, blank=True)
     ip_address = models.CharField(max_length=64, blank=True)
     user_agent = models.CharField(max_length=512, blank=True)
     device_id = models.CharField(max_length=128, blank=True)

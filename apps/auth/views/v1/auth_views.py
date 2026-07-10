@@ -66,6 +66,32 @@ def login_view(request: HttpRequest) -> HttpResponse:
 
 @csrf_exempt
 @require_POST
+@ratelimit(limit=10, window=60, scope="login_ip")
+def role_login_view(request: HttpRequest) -> HttpResponse:
+    """Role-native login: a student/teacher/parent/staff signs in with their OWN role
+    account's username+password (not a User). Same shape/limits as ``login_view``; returns
+    ``{access, role, must_change_password}``. Additive — the legacy /login/ stays live."""
+    body = read_json(request)
+    username = str_field(body, "username")
+    password = str_field(body, "password")
+    if not username or not password:
+        return validation_error({"username": ["required"], "password": ["required"]})
+    from core.utils import current_schema
+
+    check_rate(
+        scope="login_user", key=f"{current_schema()}:{username.strip().lower()}", limit=5, window=60
+    )
+    dto = LoginDTO(
+        username=username,
+        password=password,
+        device_id=str_field(body, "device_id"),
+        platform=str_field(body, "platform"),
+    )
+    return success(_service().role_login(dto, _ctx(request)))
+
+
+@csrf_exempt
+@require_POST
 @require_auth
 def logout_view(request: HttpRequest) -> HttpResponse:
     deny_read_only_token(request)  # an impersonation session must not force-logout

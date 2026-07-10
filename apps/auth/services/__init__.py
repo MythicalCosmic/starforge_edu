@@ -91,6 +91,80 @@ def login_with_password(*, username: str, password: str, ip: str = "", user_agen
     return user
 
 
+def _role_account_models() -> dict:
+    """The 4 authenticatable role accounts keyed by principal kind (role-native auth)."""
+    from apps.org.models import StaffProfile
+    from apps.parents.models import ParentProfile
+    from apps.students.models import StudentProfile
+    from apps.teachers.models import TeacherProfile
+
+    return {
+        "student": StudentProfile,
+        "teacher": TeacherProfile,
+        "parent": ParentProfile,
+        "staff": StaffProfile,
+    }
+
+
+def find_role_account(username: str):
+    """The single role account (student/teacher/parent/staff) with this username, or
+    ``(None, None)``. Usernames are globally unique across the role tables (backfilled
+    from the globally-unique ``User.username``), so at most one matches."""
+    for kind, model in _role_account_models().items():
+        account = model.objects.select_related("user").filter(username=username).first()
+        if account is not None:
+            return kind, account
+    return None, None
+
+
+def role_login(
+    *, username: str, password: str, ip: str = "", user_agent: str = "", device_id: str = ""
+) -> dict:
+    """Role-native login: authenticate a role account by its OWN username+password and issue
+    a session bound to the account's linked User (so all downstream authz/audit is unchanged)
+    plus the role principal. Unknown username, wrong password, and an inactive account are
+    indistinguishable (timing-equalized), mirroring ``login_with_password``."""
+    from core.session_auth import create_session
+
+    username = username.strip()
+    kind, account = find_role_account(username)
+    if account is None:
+        check_password(password, _dummy_hash())  # constant-time-ish equalizer
+        _fire_login_failed(username, ip, user_agent, reason="unknown_username")
+        raise AuthenticationException(_("Invalid username or password."), code="invalid_credentials")
+    # The username locates the role account, but the PASSWORD is checked against the linked
+    # User — the single source of truth that every change/reset flow (set_user_password)
+    # keeps current. Checking the role account's own snapshot column would drift (an old
+    # password would survive a reset; a provisioned account could never sign in). The
+    # account.password field stays a snapshot until the final cut-over moves the source there.
+    if not account.user.check_password(password) or not account.is_active or not account.user.is_active:
+        reason = "wrong_password" if account.is_active else "inactive_account"
+        _fire_login_failed(username, ip, user_agent, reason=reason)
+        raise AuthenticationException(_("Invalid username or password."), code="invalid_credentials")
+
+    now = timezone.now()
+    type(account).objects.filter(pk=account.pk).update(last_login_at=now)
+    account.user.last_seen_at = now
+    account.user.save(update_fields=["last_seen_at"])
+    login_succeeded.send(
+        sender=User,
+        username=username,
+        user_id=account.user_id,
+        ip=ip,
+        user_agent=user_agent,
+        schema_name=current_schema(),
+    )
+    session = create_session(
+        account.user,
+        ip=ip,
+        user_agent=user_agent,
+        device_id=device_id,
+        principal_kind=kind,
+        principal_id=account.pk,
+    )
+    return {"access": session.key, "role": kind, "must_change_password": account.must_change_password}
+
+
 def change_password(*, user: User, old_password: str, new_password: str) -> dict[str, str]:
     """Verify the old password, set the new one (ending every other session by bumping
     tv), and return a fresh access token so THIS device stays logged in."""

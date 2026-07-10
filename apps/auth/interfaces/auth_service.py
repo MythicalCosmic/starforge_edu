@@ -4,6 +4,7 @@ container). The implementation is ``apps.auth.services.v1.auth_service.AuthServi
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Any
 
 from apps.auth.dto.auth_dto import (
     ChangePasswordDTO,
@@ -22,6 +23,12 @@ class IAuthService(ABC):
         ``{"access": <session key>}``. Failures raise AuthenticationException
         (invalid_credentials) — unknown user, wrong password, and inactive account are
         indistinguishable."""
+
+    @abstractmethod
+    def role_login(self, credentials: LoginDTO, ctx: SessionContextDTO) -> dict[str, Any]:
+        """Role-native login: authenticate a role account (student/teacher/parent/staff) by
+        its OWN username+password; returns ``{access, role, must_change_password}``. Same
+        indistinguishable-failure contract as ``login``."""
 
     @abstractmethod
     def logout(self, user: User) -> None:

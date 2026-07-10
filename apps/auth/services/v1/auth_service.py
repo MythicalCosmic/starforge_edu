@@ -8,6 +8,8 @@ anti-enumeration OTP reset flow). Data access goes through the repositories.
 
 from __future__ import annotations
 
+from typing import Any
+
 from django.contrib.auth.hashers import check_password
 from django.utils.translation import gettext_lazy as _
 
@@ -67,6 +69,17 @@ class AuthService(IAuthService):
             user, ip=ctx.ip, user_agent=ctx.user_agent, device_id=credentials.device_id
         )
         return {"access": session.key}
+
+    def role_login(self, credentials: LoginDTO, ctx: SessionContextDTO) -> dict[str, Any]:
+        from apps.auth.services import role_login as _role_login
+
+        return _role_login(
+            username=credentials.username,
+            password=credentials.password,
+            ip=ctx.ip,
+            user_agent=ctx.user_agent,
+            device_id=credentials.device_id,
+        )
 
     def logout(self, user: User) -> None:
         self._sessions.revoke_all_for_user(user.pk)
