@@ -15,6 +15,8 @@ class StudentCreateDTO:
     first_name: str = ""
     last_name: str = ""
     middle_name: str = ""
+    birthdate: object | None = None  # datetime.date | None (loose to avoid an import cycle)
+    gender: str = ""
     status: str = StudentProfile.Status.LEAD
     academic_level: str = ""
     location: str = ""

@@ -45,10 +45,22 @@ def student_user(user) -> dict[str, Any]:
 
 
 def student_to_dict(s: StudentProfile) -> dict[str, Any]:
-    """List/action payload (StudentReadSerializer) — deliberately NO medical_notes."""
+    """List/action payload (StudentReadSerializer) — deliberately NO medical_notes.
+
+    Personal identity is now OWNED by the student model (role-native auth), surfaced at
+    the top level; ``user`` is retained for the login/username reference + back-compat."""
     return {
         "id": s.id,
         "student_id": s.student_id,
+        # Identity owned by the student model.
+        "first_name": s.first_name,
+        "last_name": s.last_name,
+        "middle_name": s.middle_name,
+        "full_name": s.get_full_name(),
+        "phone": s.phone,
+        "email": s.email,
+        "birthdate": s.birthdate.isoformat() if s.birthdate else None,
+        "gender": s.gender,
         "status": s.status,
         "branch": s.branch_id,
         "current_cohort": s.current_cohort_id,

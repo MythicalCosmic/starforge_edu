@@ -32,9 +32,9 @@ class EnrollmentEventInline(admin.TabularInline):
 
 @admin.register(StudentProfile)
 class StudentProfileAdmin(admin.ModelAdmin):
-    list_display = ("student_id", "login_username", "status", "branch", "current_cohort", "enrollment_date")
-    list_filter = ("status", "branch")
-    search_fields = ("student_id", "user__first_name", "user__last_name", "user__phone", "user__username")
+    list_display = ("student_id", "first_name", "last_name", "phone", "status", "branch", "enrollment_date")
+    list_filter = ("status", "branch", "gender")
+    search_fields = ("student_id", "first_name", "last_name", "phone", "email", "user__username")
     autocomplete_fields = ("user", "branch", "current_cohort")
     list_select_related = ("user", "branch", "current_cohort")
     readonly_fields = ("login_account",)

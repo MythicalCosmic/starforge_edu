@@ -18,8 +18,24 @@ class StudentProfile(models.Model):
         GRADUATED = "graduated", _("Graduated")
         WITHDRAWN = "withdrawn", _("Withdrawn")
 
+    class Gender(models.TextChoices):
+        MALE = "m", _("Male")
+        FEMALE = "f", _("Female")
+
+    # The account this student signs in with. During the role-native-auth migration the
+    # student model OWNS the personal identity below; `user` is being reduced to the
+    # login/credential principal (and, at cut-over, /admin/-only). See TD role-native auth.
     user = models.OneToOneField("users.User", on_delete=models.CASCADE, related_name="student_profile")
     student_id = models.CharField(max_length=32, unique=True)
+
+    # --- Identity (owned by the student, moving off users.User) ---------------
+    first_name = models.CharField(max_length=150, blank=True)
+    last_name = models.CharField(max_length=150, blank=True)
+    middle_name = models.CharField(max_length=150, blank=True)
+    phone = models.CharField(max_length=32, blank=True, db_index=True)
+    email = models.EmailField(blank=True)
+    birthdate = models.DateField(null=True, blank=True)
+    gender = models.CharField(max_length=8, choices=Gender.choices, blank=True)
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.LEAD, db_index=True)
     branch = models.ForeignKey("org.Branch", on_delete=models.PROTECT, related_name="students")
     current_cohort = models.ForeignKey(
@@ -56,6 +72,10 @@ class StudentProfile(models.Model):
 
     def __str__(self) -> str:  # pragma: no cover
         return self.student_id
+
+    def get_full_name(self) -> str:
+        parts = [self.first_name, self.middle_name, self.last_name]
+        return " ".join(p for p in parts if p)
 
     @property
     def is_blocked(self) -> bool:

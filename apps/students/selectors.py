@@ -49,8 +49,8 @@ def students_with_upcoming_birthdays(
     }
     window = Q()
     for month, day in month_days:
-        window |= Q(user__birthdate__month=month, user__birthdate__day=day)
-    qs = (base if base is not None else _base_qs()).filter(user__birthdate__isnull=False).filter(window)
+        window |= Q(birthdate__month=month, birthdate__day=day)
+    qs = (base if base is not None else _base_qs()).filter(birthdate__isnull=False).filter(window)
     if branch:
         qs = qs.filter(branch_id=branch)
     if cohort:

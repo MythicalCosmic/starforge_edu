@@ -51,9 +51,9 @@ class StudentFilter(django_filters.FilterSet):
     def _filter_age_min(self, qs, name, value):
         # age >= value  <=>  born on or before (today minus `value` years)
         cutoff = timezone.now().date() - relativedelta(years=int(value))
-        return qs.filter(user__birthdate__lte=cutoff)
+        return qs.filter(birthdate__lte=cutoff)
 
     def _filter_age_max(self, qs, name, value):
         # age <= value  <=>  born after (today minus `value + 1` years)
         cutoff = timezone.now().date() - relativedelta(years=int(value) + 1)
-        return qs.filter(user__birthdate__gt=cutoff)
+        return qs.filter(birthdate__gt=cutoff)

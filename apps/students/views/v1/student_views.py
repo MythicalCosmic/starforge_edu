@@ -39,7 +39,7 @@ from core.scoping import assert_branch_id_in_scope, assert_in_branch_scope
 from core.utils import current_schema
 
 _RESOURCE = "students"
-_SEARCH = ("user__first_name", "user__last_name", "user__phone", "student_id")
+_SEARCH = ("first_name", "last_name", "phone", "student_id")
 _ORDERING = ("created_at", "enrollment_date", "student_id")
 
 
@@ -364,6 +364,28 @@ def _list(request: HttpRequest) -> HttpResponse:
     return paginated([student_to_dict(s) for s in items], total=total, page=page, page_size=size)
 
 
+def _date_or_none(data: dict[str, Any], name: str):
+    """Parse an optional YYYY-MM-DD date: None when absent/blank; 400 on a bad value."""
+    raw = data.get(name)
+    if raw in (None, ""):
+        return None
+    parsed = None
+    if isinstance(raw, str):
+        from django.utils.dateparse import parse_date
+
+        try:
+            parsed = parse_date(raw)
+        except ValueError:
+            parsed = None
+    if parsed is None:
+        raise ValidationException(
+            f"Invalid {name}.",
+            code="validation_error",
+            fields={name: ["Enter a valid date (YYYY-MM-DD)."]},
+        )
+    return parsed
+
+
 def _create(request: HttpRequest) -> HttpResponse:
     body = read_json(request)
     phone, email = str_field(body, "phone"), str_field(body, "email")
@@ -386,6 +408,8 @@ def _create(request: HttpRequest) -> HttpResponse:
         first_name=str_field(body, "first_name"),
         last_name=str_field(body, "last_name"),
         middle_name=str_field(body, "middle_name"),
+        birthdate=_date_or_none(body, "birthdate"),
+        gender=_choice(body, "gender", StudentProfile.Gender.values, allow_blank=True),
         status=_choice(body, "status", StudentProfile.Status.values, default=StudentProfile.Status.LEAD),
         academic_level=str_field(body, "academic_level"),
         location=str_field(body, "location"),
