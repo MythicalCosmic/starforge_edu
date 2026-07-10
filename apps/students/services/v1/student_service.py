@@ -134,14 +134,15 @@ class StudentService(IStudentService):
     def events(self, student: StudentProfile) -> QuerySet[EnrollmentEvent]:
         return student.enrollment_events.all()
 
-    def set_password(self, student: StudentProfile, *, password: str, actor) -> dict[str, Any]:
-        """Staff-issued login password for the student's account. Reuses the auth
-        flow's strength check (weak_password -> 400) and set_user_password (which
-        hashes AND ends every existing session for that user). The username (the
-        login identifier) is returned so staff can hand both to the student."""
+    def issue_credentials(self, student: StudentProfile, *, actor) -> dict[str, Any]:
+        """Issue a ONE-TIME login password for the student so they can sign in at
+        /role-login/ (accounts are created passwordless). Generates a temp password, sets
+        it on the linked User (the single source of truth role-login checks), flags the
+        student account must-change (so the client forces a reset on first login), ends any
+        existing session, and returns {username, temporary_password} — the temp is never
+        stored/echoed again."""
         from apps.audit.services import audit_log
-        from apps.auth.services import _validate_new_password
-        from apps.users.services import set_user_password
+        from apps.users.services import generate_temp_password, set_user_password
 
         user = student.user
         # Defense in depth: this student-scoped endpoint must NEVER be a lever to reset
@@ -150,15 +151,13 @@ class StudentService(IStudentService):
             raise PermissionException(
                 "Cannot set login credentials for a staff account here.", code="forbidden"
             )
-        _validate_new_password(password, user)
-        set_user_password(user, password)
-        audit_log(
-            actor=actor,
-            action="update",
-            resource_type="users.User",
-            resource_id=str(user.pk),
-        )
-        return {"username": user.username}
+        temp = generate_temp_password()
+        set_user_password(user, temp)  # sets user.password + ends existing sessions
+        if not student.must_change_password:
+            student.must_change_password = True
+            student.save(update_fields=["must_change_password"])
+        audit_log(actor=actor, action="update", resource_type="users.User", resource_id=str(user.pk))
+        return {"username": student.username or user.username, "temporary_password": temp}
 
     # --- collection actions ------------------------------------------------
     def import_csv(self, *, file_obj, branch_id: int) -> dict[str, Any]:

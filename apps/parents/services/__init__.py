@@ -37,6 +37,8 @@ def create_parent(
         user=user,
         # Identity is OWNED by the parent model (role-native auth). name/phone/email
         # mirror the login account during the transition; birthdate/gender live only here.
+        # username makes the account findable by /role-login/ (password stays on the User).
+        username=user.username,
         first_name=user.first_name,
         last_name=user.last_name,
         middle_name=user.middle_name,

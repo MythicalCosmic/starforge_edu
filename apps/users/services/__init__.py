@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import random
+import secrets
 from typing import TYPE_CHECKING
 
 from django.contrib.auth import get_user_model
@@ -89,6 +91,22 @@ def set_user_password(user: User, raw_password: str) -> None:
     from apps.auth.services import logout_everywhere
 
     logout_everywhere(user)
+
+
+# Unambiguous alphabet for one-time passwords (no 0/O/1/I/l) — easy to read aloud/type.
+_TEMP_LETTERS = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz"
+_TEMP_DIGITS = "23456789"
+
+
+def generate_temp_password(length: int = 10) -> str:
+    """A readable, strong one-time password (>=1 digit + letters -> clears the password
+    validators; drops ambiguous characters for easy typing/hand-off)."""
+    length = max(length, 8)
+    chars = [secrets.choice(_TEMP_LETTERS) for _ in range(length - 2)]
+    chars.append(secrets.choice(_TEMP_DIGITS))
+    chars.append(secrets.choice(_TEMP_LETTERS))
+    random.SystemRandom().shuffle(chars)
+    return "".join(chars)
 
 
 def register_device(

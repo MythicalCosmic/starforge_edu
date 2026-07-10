@@ -62,8 +62,9 @@ class IStudentService(ABC):
     def events(self, student: StudentProfile) -> QuerySet[EnrollmentEvent]: ...
 
     @abstractmethod
-    def set_password(self, student: StudentProfile, *, password: str, actor) -> dict[str, Any]:
-        """Set the student's login password (staff-issued). Returns {username}."""
+    def issue_credentials(self, student: StudentProfile, *, actor) -> dict[str, Any]:
+        """Issue a one-time login password for the student (temp + force-change on first
+        login). Returns {username, temporary_password} — shown once."""
 
     # --- collection actions ------------------------------------------------
     @abstractmethod

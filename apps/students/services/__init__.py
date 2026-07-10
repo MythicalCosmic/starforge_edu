@@ -131,6 +131,9 @@ def create_student(
         status=status,
         # Identity is OWNED by the student model (role-native auth). name/phone/email
         # mirror the login account during the transition; birthdate/gender live only here.
+        # username makes the account findable by /role-login/ (password stays on the
+        # linked User — the single source of truth — until the final cut-over).
+        username=user.username,
         first_name=user.first_name,
         last_name=user.last_name,
         middle_name=user.middle_name,
