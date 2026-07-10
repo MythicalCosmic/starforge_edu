@@ -92,8 +92,9 @@ class EnrollmentEvent(models.Model):
     from_status = models.CharField(max_length=16)
     to_status = models.CharField(max_length=16)
     # A slug validated at write time against the active EnrollmentReason rows (kept
-    # denormalized so history survives a reason being renamed/retired).
-    reason_code = models.CharField(max_length=32, blank=True)
+    # denormalized so history survives a reason being renamed/retired). Width MUST
+    # match EnrollmentReason.slug (64) so any active reason can actually be recorded.
+    reason_code = models.CharField(max_length=64, blank=True)
     note = models.TextField(blank=True)
     actor = models.ForeignKey(
         "users.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"

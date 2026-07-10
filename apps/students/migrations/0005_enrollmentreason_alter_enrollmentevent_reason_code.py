@@ -52,7 +52,7 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name='enrollmentevent',
             name='reason_code',
-            field=models.CharField(blank=True, max_length=32),
+            field=models.CharField(blank=True, max_length=64),
         ),
         migrations.RunPython(seed_defaults, unseed),
     ]

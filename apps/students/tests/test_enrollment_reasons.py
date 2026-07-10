@@ -66,3 +66,21 @@ def test_transition_accepts_configured_reason_and_rejects_unknown(tenant_a, user
         format="json",
     )
     assert bad.status_code == 400
+
+
+def test_long_reason_slug_can_be_recorded(tenant_a, user_in, as_user):
+    """Regression: a valid active reason whose slug is >32 chars (up to the 64-char
+    SlugField limit) must actually be recordable by a transition — the denormalized
+    reason_code column has to match the slug width, not the old varchar(32)."""
+    branch, client = _registrar(tenant_a, user_in, as_user)
+    long_slug = "relocated-to-another-country-for-family-reasons"  # 47 chars
+    made = client.post(URL, {"name": "Relocated abroad", "slug": long_slug}, format="json")
+    assert made.status_code == 201, made.content
+    with schema_context(tenant_a.schema_name):
+        sid = create_student(branch=branch, phone="+998905558030").id
+    resp = client.post(
+        f"/api/v1/students/{sid}/transition/",
+        {"to_status": "application", "reason_code": long_slug},
+        format="json",
+    )
+    assert resp.status_code == 200, resp.content  # was DataError->400 before the width fix
