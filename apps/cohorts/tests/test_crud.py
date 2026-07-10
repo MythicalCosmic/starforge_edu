@@ -96,3 +96,30 @@ def test_detail_out_of_scope_is_403(tenant_a, user_in, as_user):
 def test_role_without_cohorts_read_is_denied(tenant_a, as_role):
     client, _ = as_role(Role.CASHIER)  # cashier holds no cohorts permission
     assert client.get(URL).status_code == 403
+
+
+def test_list_row_carries_readable_name_companions(tenant_a, as_role):
+    """Each bare FK id on a list row ships a readable `_name` companion (branch /
+    department / primary_teacher / default_room) so a client renders a cohort without a
+    second call — select_related keeps it N+1-free."""
+    from apps.cohorts.tests.factories import CohortFactory
+    from apps.org.tests.factories import BranchFactory, DepartmentFactory, RoomFactory
+    from apps.teachers.tests.factories import TeacherProfileFactory
+
+    client, _ = as_role(Role.DIRECTOR)
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        department = DepartmentFactory(branch=branch)
+        room = RoomFactory(branch=branch)
+        teacher = TeacherProfileFactory(branch=branch)
+        cohort = CohortFactory(
+            branch=branch, department=department, primary_teacher=teacher, default_room=room
+        )
+        expected_teacher_name = teacher.user.get_full_name()
+
+    rows = client.get(URL).json()["data"]
+    row = next(c for c in rows if c["id"] == cohort.id)
+    assert row["branch_name"] == branch.name
+    assert row["department_name"] == department.name
+    assert row["primary_teacher_name"] == expected_teacher_name
+    assert row["default_room_name"] == room.name

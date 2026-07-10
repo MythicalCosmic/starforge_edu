@@ -243,6 +243,28 @@ def test_role_without_campaign_is_denied(tenant_a, as_role):
     assert teacher.get(CAMPAIGNS).status_code == 403
 
 
+def test_list_and_recipients_carry_readable_names(tenant_a, user_in, as_user):
+    """Denormalized companions: the campaign list carries branch_name + created_by_name
+    next to the bare ids, and the recipients list carries student_name — so a client
+    renders labels without a second call (owner ask)."""
+    branch = _branch(tenant_a)
+    with schema_context(tenant_a.schema_name):
+        student = _student(branch)
+    creator = user_in(tenant_a, roles=[Role.REGISTRAR], branch=branch)
+    client = as_user(tenant_a, creator)
+    cid = _create(client, branch=branch.id)["id"]
+
+    row = next(c for c in client.get(CAMPAIGNS).json()["data"] if c["id"] == cid)
+    assert row["branch"] == branch.id
+    assert row["branch_name"] == branch.name
+    assert row["created_by"] == creator.id
+    assert row["created_by_name"] == creator.get_full_name()
+
+    recip = _recipients(client, cid)[0]
+    assert recip["student"] == student.id
+    assert recip["student_name"] == student.user.get_full_name()
+
+
 def test_recipients_endpoint_is_paginated(tenant_a, user_in, as_user):
     """Scale (audit): the recipients list is paginated (was an uncapped full fetch — a
     center-wide campaign freezes one row per student). data stays the page's item list."""

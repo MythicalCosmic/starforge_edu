@@ -96,6 +96,30 @@ def test_transfers_are_read_only(as_role, tenant_a):
     assert client.post("/api/v1/org/transfers/", {}, format="json").status_code == 405
 
 
+def test_department_list_surfaces_readable_fk_names(as_role, tenant_a):
+    """The departments list must carry branch_name + head_name next to the bare
+    branch/head ids so a client needn't make a second call. branch/head are
+    select_related on the list queryset, so this adds JOINs, not queries."""
+    from apps.org.services import set_department_head
+    from apps.org.tests.factories import BranchFactory, DepartmentFactory
+    from apps.teachers.services import create_teacher
+
+    client, _ = as_role(Role.DIRECTOR)
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory(name="Central Campus")
+        dept = DepartmentFactory(branch=branch)
+        teacher = create_teacher(branch=branch, phone="+998905559050", first_name="Dana")
+        set_department_head(dept, teacher.user)
+        expected_head = teacher.user.get_full_name()
+        head_user_id = teacher.user_id
+
+    row = next(d for d in client.get("/api/v1/org/departments/").json()["data"] if d["id"] == dept.id)
+    assert row["branch"] == branch.id
+    assert row["branch_name"] == "Central Campus"
+    assert row["head"] == head_user_id
+    assert row["head_name"] == expected_head
+
+
 def test_department_list_and_detail_branch_scoped(tenant_a, user_in, as_user):
     from apps.org.tests.factories import BranchFactory, DepartmentFactory
 

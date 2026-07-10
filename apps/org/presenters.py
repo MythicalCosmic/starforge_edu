@@ -29,11 +29,18 @@ def department_to_dict(d: Department) -> dict[str, Any]:
     return {
         "id": d.id,
         "branch": d.branch_id,
+        # Readable companions so a client need not fetch the branch/head separately.
+        # branch/head are select_related on the department list + prefetched
+        # (departments__head) when nested under a branch, so no extra query per row.
+        "branch_name": d.branch.name if d.branch_id else None,
         "name": d.name,
         "slug": d.slug,
         "description": d.description,
         "is_active": d.is_active,
         "head": d.head_id,
+        # Object-guard (not head_id): a null FK short-circuits with no query, a set
+        # FK is select_related/prefetched — and it narrows the Optional for the checker.
+        "head_name": d.head.get_full_name() if d.head else None,
         "budget": _dec(d.budget),
         "created_at": d.created_at.isoformat(),
     }
@@ -62,6 +69,8 @@ def room_to_dict(r: Room) -> dict[str, Any]:
     return {
         "id": r.id,
         "branch": r.branch_id,
+        # Readable companion; the room list select_related("branch"), so no extra query.
+        "branch_name": r.branch.name if r.branch_id else None,
         "name": r.name,
         "capacity": r.capacity,
         "equipment": r.equipment,
@@ -112,13 +121,19 @@ def branch_detail_to_dict(b: Branch) -> dict[str, Any]:
 
 
 def transfer_to_dict(t: BranchTransfer) -> dict[str, Any]:
+    # Readable companions for every FK — the transfer list select_related("from_branch",
+    # "to_branch", "user", "actor"), so these add JOINs, not queries. actor is nullable.
     return {
         "id": t.id,
         "user": t.user_id,
+        "user_name": t.user.get_full_name() if t.user_id else None,
         "from_branch": t.from_branch_id,
+        "from_branch_name": t.from_branch.name if t.from_branch_id else None,
         "to_branch": t.to_branch_id,
+        "to_branch_name": t.to_branch.name if t.to_branch_id else None,
         "reason": t.reason,
         "actor": t.actor_id,
+        "actor_name": t.actor.get_full_name() if t.actor else None,
         "created_at": t.created_at.isoformat(),
     }
 

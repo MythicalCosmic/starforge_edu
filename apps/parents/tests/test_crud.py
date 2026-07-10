@@ -94,6 +94,38 @@ def test_guardian_duplicate_link_is_400(tenant_a, as_role):
     assert dup.json()["code"] == "guardian_exists"
 
 
+def test_guardian_list_includes_readable_names(tenant_a, as_role):
+    """The guardian list denormalizes parent/student ids to readable `*_name`
+    companions (resolved from select_related — no second call needed)."""
+    from apps.org.tests.factories import BranchFactory
+    from apps.parents.services import create_parent
+    from apps.students.services import create_student
+
+    client, _ = as_role(Role.DIRECTOR)
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        student = create_student(
+            branch=branch, phone="+998905553060", first_name="Kid", last_name="Smith"
+        )
+        parent = create_parent(phone="+998905553061", first_name="Ada", last_name="Lovelace")
+        expected_parent_name = parent.user.get_full_name()
+        expected_student_name = student.user.get_full_name()
+
+    resp = client.post(
+        GUARDIANS,
+        {"parent": parent.id, "student": student.id, "relationship": "mother"},
+        format="json",
+    )
+    assert resp.status_code == 201, resp.content
+    gid = resp.json()["data"]["id"]
+
+    row = next(g for g in client.get(GUARDIANS).json()["data"] if g["id"] == gid)
+    assert row["parent"] == parent.id
+    assert row["parent_name"] == expected_parent_name
+    assert row["student"] == student.id
+    assert row["student_name"] == expected_student_name
+
+
 def test_pickup_create_and_list(tenant_a, as_role):
     from apps.org.tests.factories import BranchFactory
     from apps.students.services import create_student

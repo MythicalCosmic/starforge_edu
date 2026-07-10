@@ -19,10 +19,15 @@ def parent_to_dict(parent: ParentProfile) -> dict[str, Any]:
 
 
 def guardian_to_dict(g: Guardian) -> dict[str, Any]:
+    # Denormalized names resolved from the repo's select_related("parent__user",
+    # "student__user") — a family link answers "which parent / which child" without
+    # a second call, no extra query per row.
     return {
         "id": g.id,
         "parent": g.parent_id,
+        "parent_name": g.parent.user.get_full_name() if g.parent_id else None,
         "student": g.student_id,
+        "student_name": g.student.user.get_full_name() if g.student_id else None,
         "relationship": g.relationship,
         "is_primary": g.is_primary,
         "custody_notes": g.custody_notes,
@@ -30,9 +35,13 @@ def guardian_to_dict(g: Guardian) -> dict[str, Any]:
 
 
 def pickup_to_dict(p: PickupAuthorization) -> dict[str, Any]:
+    # `full_name` is the authorized pickup person; `student_name` (from the repo's
+    # select_related("student__user")) names the child being picked up — so the row
+    # is self-describing without a second call.
     return {
         "id": p.id,
         "student": p.student_id,
+        "student_name": p.student.user.get_full_name() if p.student_id else None,
         "full_name": p.full_name,
         "phone": p.phone,
         "relationship": p.relationship,

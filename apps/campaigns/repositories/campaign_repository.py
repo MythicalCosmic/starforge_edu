@@ -25,4 +25,5 @@ class CampaignRepository(BaseRepository[Campaign], ICampaignRepository):
         return self.scoped(is_unscoped=is_unscoped, branch_ids=branch_ids).filter(pk=pk).first()
 
     def recipients_of(self, campaign: Campaign) -> QuerySet[CampaignRecipient]:
-        return CampaignRecipient.objects.filter(campaign=campaign).select_related("student")
+        # student__user so recipient_to_dict can emit student_name without a per-row query.
+        return CampaignRecipient.objects.filter(campaign=campaign).select_related("student__user")
