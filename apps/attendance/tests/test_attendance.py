@@ -533,6 +533,27 @@ def test_records_list_scoping_student_parent_teacher(tenant_a, user_in, as_user)
     assert all(r["lesson"] != foreign_lesson_id for r in teacher_body["data"])
 
 
+def test_record_payload_surfaces_group_and_teacher(tenant_a, user_in, as_user):
+    """The attendance record answers 'which group / which teacher' (the owner's
+    screenshot gap) directly from the lesson, with no extra query per row."""
+    teacher_user = user_in(tenant_a, roles=["teacher"])
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        profile = TeacherProfileFactory(user=teacher_user, branch=branch)
+        lesson = _make_lesson(branch=branch, teacher=profile)
+        (student,) = _enroll(lesson.cohort, branch=branch)
+        AttendanceRecordFactory(student=student, lesson=lesson, status=Status.PRESENT)
+        cohort_id, cohort_name, teacher_id = lesson.cohort_id, lesson.cohort.name, profile.id
+
+    body = as_user(tenant_a, teacher_user).get("/api/v1/attendance/records/").json()
+    rec = body["data"][0]
+    assert rec["cohort"] == cohort_id
+    assert rec["cohort_name"] == cohort_name
+    assert rec["teacher"] == teacher_id
+    assert rec["teacher_name"] == teacher_user.get_full_name()
+    assert "lesson_starts_at" in rec
+
+
 def test_csv_export_shape(tenant_a, user_in, as_user):
     director = user_in(tenant_a, roles=["director"])
     with schema_context(tenant_a.schema_name):

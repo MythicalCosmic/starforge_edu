@@ -16,7 +16,11 @@ STAFF_ROLES = {Role.DIRECTOR, Role.HEAD_OF_DEPT}
 
 
 def _base() -> QuerySet[AttendanceRecord]:
-    return AttendanceRecord.objects.select_related("student__user", "lesson")
+    # lesson__cohort (the group) + lesson__teacher__user (the teacher) are surfaced in
+    # the presenter, so join them here — no extra query per row.
+    return AttendanceRecord.objects.select_related(
+        "student__user", "lesson__cohort", "lesson__teacher__user"
+    )
 
 
 def scoped_records(*, user, roles: set[str] | None = None) -> QuerySet[AttendanceRecord]:
