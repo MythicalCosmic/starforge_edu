@@ -27,10 +27,12 @@ def can_see_medical_notes(request: Any) -> bool:
 
 
 def student_user(user) -> dict[str, Any]:
-    """The embedded person view (was StudentUserSerializer — note: no username,
-    unlike the shared user_brief)."""
+    """The embedded person view. Includes ``username`` — the student's login
+    identifier — so staff (and the student/parent) can see the account they sign in
+    with; the password is set via the credentials endpoint, never echoed."""
     return {
         "id": user.id,
+        "username": user.username,
         "phone": user.phone,
         "email": user.email,
         "first_name": user.first_name,

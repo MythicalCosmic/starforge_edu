@@ -24,7 +24,7 @@ from apps.students.interfaces.student_service import (
     IStudentService,
 )
 from apps.students.models import EnrollmentEvent, EnrollmentReason, StudentProfile
-from core.exceptions import NotFoundException, ValidationException
+from core.exceptions import NotFoundException, PermissionException, ValidationException
 
 
 def _reject(field: str, message: str) -> ValidationException:
@@ -131,6 +131,32 @@ class StudentService(IStudentService):
 
     def events(self, student: StudentProfile) -> QuerySet[EnrollmentEvent]:
         return student.enrollment_events.all()
+
+    def set_password(self, student: StudentProfile, *, password: str, actor) -> dict[str, Any]:
+        """Staff-issued login password for the student's account. Reuses the auth
+        flow's strength check (weak_password -> 400) and set_user_password (which
+        hashes AND ends every existing session for that user). The username (the
+        login identifier) is returned so staff can hand both to the student."""
+        from apps.audit.services import audit_log
+        from apps.auth.services import _validate_new_password
+        from apps.users.services import set_user_password
+
+        user = student.user
+        # Defense in depth: this student-scoped endpoint must NEVER be a lever to reset
+        # a staff/superuser password, even if a StudentProfile were somehow linked to one.
+        if user.is_staff or user.is_superuser:
+            raise PermissionException(
+                "Cannot set login credentials for a staff account here.", code="forbidden"
+            )
+        _validate_new_password(password, user)
+        set_user_password(user, password)
+        audit_log(
+            actor=actor,
+            action="update",
+            resource_type="users.User",
+            resource_id=str(user.pk),
+        )
+        return {"username": user.username}
 
     # --- collection actions ------------------------------------------------
     def import_csv(self, *, file_obj, branch_id: int) -> dict[str, Any]:

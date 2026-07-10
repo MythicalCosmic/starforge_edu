@@ -13,6 +13,7 @@ from apps.students.views.v1.student_views import (
     enrollment_reason_detail_view,
     enrollment_reasons_collection_view,
     student_block_view,
+    student_credentials_view,
     student_dashboard_view,
     student_detail_view,
     student_events_view,
@@ -45,4 +46,5 @@ urlpatterns = [
     path("<int:pk>/block/", student_block_view, name="students-block"),
     path("<int:pk>/unblock/", student_unblock_view, name="students-unblock"),
     path("<int:pk>/events/", student_events_view, name="students-events"),
+    path("<int:pk>/credentials/", student_credentials_view, name="students-credentials"),
 ]

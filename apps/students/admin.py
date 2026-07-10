@@ -1,4 +1,6 @@
 from django.contrib import admin
+from django.urls import reverse
+from django.utils.html import format_html
 
 from core.admin_mixins import ReadOnlyAdmin
 
@@ -30,11 +32,26 @@ class EnrollmentEventInline(admin.TabularInline):
 
 @admin.register(StudentProfile)
 class StudentProfileAdmin(admin.ModelAdmin):
-    list_display = ("student_id", "status", "branch", "current_cohort", "enrollment_date")
+    list_display = ("student_id", "login_username", "status", "branch", "current_cohort", "enrollment_date")
     list_filter = ("status", "branch")
     search_fields = ("student_id", "user__first_name", "user__last_name", "user__phone", "user__username")
     autocomplete_fields = ("user", "branch", "current_cohort")
+    list_select_related = ("user", "branch", "current_cohort")
+    readonly_fields = ("login_account",)
     inlines = (EnrollmentEventInline,)
+
+    @admin.display(description="Login username", ordering="user__username")
+    def login_username(self, obj: StudentProfile) -> str:
+        return obj.user.username
+
+    @admin.display(description="Login account")
+    def login_account(self, obj: StudentProfile):
+        """Link to the User change page, where the login username + password are set
+        (accounts are created passwordless; set a password so the student can sign in)."""
+        if not obj.user_id:
+            return "—"
+        url = reverse("admin:users_user_change", args=[obj.user_id])
+        return format_html('<a href="{}">{}</a> — set the login password here', url, obj.user.username)
 
 
 @admin.register(EnrollmentEvent)

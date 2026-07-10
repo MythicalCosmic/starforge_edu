@@ -61,6 +61,10 @@ class IStudentService(ABC):
     @abstractmethod
     def events(self, student: StudentProfile) -> QuerySet[EnrollmentEvent]: ...
 
+    @abstractmethod
+    def set_password(self, student: StudentProfile, *, password: str, actor) -> dict[str, Any]:
+        """Set the student's login password (staff-issued). Returns {username}."""
+
     # --- collection actions ------------------------------------------------
     @abstractmethod
     def import_csv(self, *, file_obj, branch_id: int) -> dict[str, Any]: ...

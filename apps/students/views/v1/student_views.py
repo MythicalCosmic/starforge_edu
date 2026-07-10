@@ -143,6 +143,27 @@ def student_events_view(request: HttpRequest, pk: int) -> HttpResponse:
     return success([enrollment_event_to_dict(e) for e in _service().events(student)])
 
 
+@csrf_exempt
+@require_auth
+def student_credentials_view(request: HttpRequest, pk: int) -> HttpResponse:
+    """Staff-issue a login password for the student's account so they can actually
+    sign in (accounts are created passwordless). students:write + role/branch scope
+    of the student; writes are already blocked under a read-only impersonation token
+    by middleware, like every other students write action."""
+    if request.method != "POST":
+        return error("Method not allowed.", code="method_not_allowed", status=405)
+    check_perm(request, f"{_RESOURCE}:write")
+    student = _get_in_scope(request, pk)
+    password = str_field(read_json(request), "password", max_length=128)
+    if not password:
+        raise ValidationException(
+            "password is required.",
+            code="validation_error",
+            fields={"password": ["This field is required."]},
+        )
+    return success(_service().set_password(student, password=password, actor=request.user))
+
+
 # --- enrollment reasons (per-Center configurable) --------------------------
 def _reason_reject(field: str, message: str) -> ValidationException:
     return ValidationException("Invalid input.", code="validation_error", fields={field: [message]})
