@@ -1,6 +1,7 @@
 from django.contrib import admin
 
 from apps.ai.models import AIPrompt, AIRequest, TenantAIBudget
+from core.admin_mixins import ReadOnlyAdmin
 
 
 @admin.register(TenantAIBudget)
@@ -25,11 +26,16 @@ class AIPromptAdmin(admin.ModelAdmin):
 
 
 @admin.register(AIRequest)
-class AIRequestAdmin(admin.ModelAdmin):
+class AIRequestAdmin(ReadOnlyAdmin):
+    """One AI feature invocation — a system-written request LOG (queued/run via
+    Celery, tokens/cost reconciled by the budget service), so view-only here
+    (matches the audit/ledger pattern)."""
+
     list_display = (
         "id",
         "feature",
         "status",
+        "requested_by",
         "input_tokens",
         "output_tokens",
         "cost_microusd",
@@ -37,6 +43,8 @@ class AIRequestAdmin(admin.ModelAdmin):
     )
     list_filter = ("feature", "status")
     search_fields = ("idempotency_key", "source_app")
+    autocomplete_fields = ("prompt", "requested_by")
+    list_select_related = ("requested_by",)
     # redaction_map is the decrypted PII the redaction subsystem exists to protect,
     # and output_text can carry un-redacted model output. readonly_fields still
     # RENDERS them on the change page, so exclude them from the form entirely; they
