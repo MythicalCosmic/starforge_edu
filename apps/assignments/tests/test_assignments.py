@@ -517,6 +517,11 @@ def test_student_submits_own_cohort_201(tenant_a, user_in, as_user):
     body = resp.json()["data"]
     assert body["attempt_number"] == 1
     assert body["status"] == "submitted"
+    # Self-describing submission (owner: "when was it due / was it late / which attempt").
+    assert body["student_name"] == student_user.get_full_name()
+    assert body["assignment_title"]  # the assignment's title travels with the submission
+    assert "assignment_due_at" in body
+    assert body["is_late"] is False
 
 
 def test_assignment_create_requires_write(tenant_a, as_role):

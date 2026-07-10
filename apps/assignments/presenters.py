@@ -19,6 +19,7 @@ def assignment_to_dict(a: Assignment) -> dict[str, Any]:
     return {
         "id": a.id,
         "cohort": a.cohort_id,
+        "cohort_name": a.cohort.name,
         "title": a.title,
         "description": a.description,
         "due_at": a.due_at.isoformat() if a.due_at else None,
@@ -60,7 +61,12 @@ def submission_to_dict(s: Submission) -> dict[str, Any]:
     return {
         "id": s.id,
         "assignment": s.assignment_id,
+        # Self-describing: which assignment, its deadline, and who turned it in — so a
+        # submission answers "when was it due / was it late / which attempt" on its own.
+        "assignment_title": s.assignment.title,
+        "assignment_due_at": s.assignment.due_at.isoformat() if s.assignment.due_at else None,
         "student": s.student_id,
+        "student_name": s.student.user.get_full_name(),
         "text": s.text,
         "attachments": s.attachments,
         "submitted_at": s.submitted_at.isoformat() if s.submitted_at else None,
