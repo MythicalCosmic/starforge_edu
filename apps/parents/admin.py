@@ -15,8 +15,9 @@ class GuardianInline(admin.TabularInline):
 
 @admin.register(ParentProfile)
 class ParentProfileAdmin(admin.ModelAdmin):
-    list_display = ("user", "workplace", "created_at")
-    search_fields = ("user__first_name", "user__last_name", "user__phone")
+    list_display = ("user", "first_name", "last_name", "phone", "workplace", "created_at")
+    list_filter = ("gender",)
+    search_fields = ("first_name", "last_name", "phone", "email", "user__username")
     autocomplete_fields = ("user",)
     list_select_related = ("user",)
     inlines = (GuardianInline,)

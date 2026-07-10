@@ -12,6 +12,8 @@ class ParentCreateDTO:
     first_name: str = ""
     last_name: str = ""
     middle_name: str = ""
+    birthdate: object | None = None  # datetime.date | None (loose to avoid an import cycle)
+    gender: str = ""
     workplace: str = ""
     notes: str = ""
 

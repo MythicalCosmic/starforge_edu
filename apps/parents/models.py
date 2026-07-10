@@ -12,7 +12,23 @@ from django.utils.translation import gettext_lazy as _
 
 
 class ParentProfile(models.Model):
+    class Gender(models.TextChoices):
+        MALE = "m", _("Male")
+        FEMALE = "f", _("Female")
+
+    # The account this parent signs in with. During the role-native-auth migration the
+    # parent model OWNS the personal identity below; `user` is being reduced to the
+    # login/credential principal (and, at cut-over, /admin/-only). See TD role-native auth.
     user = models.OneToOneField("users.User", on_delete=models.CASCADE, related_name="parent_profile")
+
+    # --- Identity (owned by the parent, moving off users.User) ----------------
+    first_name = models.CharField(max_length=150, blank=True)
+    last_name = models.CharField(max_length=150, blank=True)
+    middle_name = models.CharField(max_length=150, blank=True)
+    phone = models.CharField(max_length=32, blank=True, db_index=True)
+    email = models.EmailField(blank=True)
+    birthdate = models.DateField(null=True, blank=True)
+    gender = models.CharField(max_length=8, choices=Gender.choices, blank=True)
     workplace = models.CharField(max_length=200, blank=True)
     notes = models.TextField(blank=True)
 
@@ -24,6 +40,10 @@ class ParentProfile(models.Model):
 
     def __str__(self) -> str:  # pragma: no cover
         return f"parent#{self.user_id}"
+
+    def get_full_name(self) -> str:
+        parts = [self.first_name, self.middle_name, self.last_name]
+        return " ".join(p for p in parts if p)
 
 
 class Guardian(models.Model):

@@ -29,7 +29,7 @@ from core.scoping import assert_branch_id_in_scope, assert_in_branch_scope, scop
 
 _RESOURCE = "teachers"
 _FILTERS = ("branch", "department", "is_substitute")
-_SEARCH = ("user__first_name", "user__last_name", "user__phone")
+_SEARCH = ("first_name", "last_name", "phone")
 _ORDERING = ("created_at", "hire_date")
 _SCALARS = ("hire_date", "subjects", "qualifications", "salary_type", "rate", "is_substitute")
 
@@ -181,6 +181,8 @@ def _create(request: HttpRequest) -> HttpResponse:
         first_name=str_field(body, "first_name"),
         last_name=str_field(body, "last_name"),
         middle_name=str_field(body, "middle_name"),
+        birthdate=_date(body, "birthdate"),
+        gender=_gender(body),
         hire_date=_date(body, "hire_date"),
         subjects=_list_field(body, "subjects"),
         qualifications=str_field(body, "qualifications"),
@@ -223,6 +225,20 @@ def _date(body: dict[str, Any], name: str) -> date | None:
         raise ValidationException(
             "Invalid date.", code="validation_error", fields={name: ["Must be an ISO date."]}
         ) from None
+
+
+def _gender(body: dict[str, Any]) -> str:
+    """Optional gender via the profile's own choice set; blank allowed, 400 on a bad value."""
+    value = str_field(body, "gender")
+    if value == "":
+        return ""
+    if value not in TeacherProfile.Gender.values:
+        raise ValidationException(
+            "Invalid gender.",
+            code="validation_error",
+            fields={"gender": ["Not a valid choice."]},
+        )
+    return value
 
 
 def _salary_type(body: dict[str, Any]) -> str:

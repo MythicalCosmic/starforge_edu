@@ -17,6 +17,8 @@ class TeacherCreateDTO:
     first_name: str = ""
     last_name: str = ""
     middle_name: str = ""
+    birthdate: date | None = None
+    gender: str = ""
     department_id: int | None = None
     hire_date: date | None = None
     subjects: list = field(default_factory=list)

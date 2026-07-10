@@ -9,8 +9,19 @@ from apps.users.presenters import user_brief
 
 
 def parent_to_dict(parent: ParentProfile) -> dict[str, Any]:
+    """Personal identity is now OWNED by the parent model (role-native auth), surfaced at
+    the top level; ``user`` is retained for the login/username reference + back-compat."""
     return {
         "id": parent.id,
+        # Identity owned by the parent model.
+        "first_name": parent.first_name,
+        "last_name": parent.last_name,
+        "middle_name": parent.middle_name,
+        "full_name": parent.get_full_name(),
+        "phone": parent.phone,
+        "email": parent.email,
+        "birthdate": parent.birthdate.isoformat() if parent.birthdate else None,
+        "gender": parent.gender,
         "user": user_brief(parent.user),
         "workplace": parent.workplace,
         "notes": parent.notes,

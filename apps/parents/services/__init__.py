@@ -23,6 +23,8 @@ def create_parent(
     first_name: str = "",
     last_name: str = "",
     middle_name: str = "",
+    birthdate=None,
+    gender: str = "",
     workplace: str = "",
     notes: str = "",
 ) -> ParentProfile:
@@ -31,7 +33,20 @@ def create_parent(
     )
     if ParentProfile.objects.filter(user=user).exists():
         raise ValidationException(_("This person already has a parent profile."), code="duplicate_parent")
-    return ParentProfile.objects.create(user=user, workplace=workplace, notes=notes)
+    return ParentProfile.objects.create(
+        user=user,
+        # Identity is OWNED by the parent model (role-native auth). name/phone/email
+        # mirror the login account during the transition; birthdate/gender live only here.
+        first_name=user.first_name,
+        last_name=user.last_name,
+        middle_name=user.middle_name,
+        phone=user.phone or "",
+        email=user.email or "",
+        birthdate=birthdate,
+        gender=gender,
+        workplace=workplace,
+        notes=notes,
+    )
 
 
 @transaction.atomic

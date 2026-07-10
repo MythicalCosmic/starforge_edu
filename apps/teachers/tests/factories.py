@@ -14,4 +14,13 @@ class TeacherProfileFactory(factory.django.DjangoModelFactory[TeacherProfile]):
         model = TeacherProfile
 
     user = factory.SubFactory(UserFactory)
+    # Identity is owned by the teacher model now; mirror it off the user (as create_teacher
+    # does) so a test that sets user.first_name / user.birthdate flows through.
+    first_name = factory.LazyAttribute(lambda o: o.user.first_name)
+    last_name = factory.LazyAttribute(lambda o: o.user.last_name)
+    middle_name = factory.LazyAttribute(lambda o: o.user.middle_name)
+    phone = factory.LazyAttribute(lambda o: o.user.phone or "")
+    email = factory.LazyAttribute(lambda o: o.user.email or "")
+    birthdate = factory.LazyAttribute(lambda o: o.user.birthdate)
+    gender = factory.LazyAttribute(lambda o: o.user.gender)
     branch = factory.SubFactory(BranchFactory)

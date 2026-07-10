@@ -30,6 +30,16 @@ def teacher_to_dict(teacher: TeacherProfile) -> dict[str, Any]:
     # these add JOINs, not queries. `branch` is non-null; `department` is nullable.
     return {
         "id": teacher.id,
+        # Identity owned by the teacher model (role-native auth); `user` kept for the
+        # login/username reference + back-compat.
+        "first_name": teacher.first_name,
+        "last_name": teacher.last_name,
+        "middle_name": teacher.middle_name,
+        "full_name": teacher.get_full_name(),
+        "phone": teacher.phone,
+        "email": teacher.email,
+        "birthdate": teacher.birthdate.isoformat() if teacher.birthdate else None,
+        "gender": teacher.gender,
         "user": user_brief(teacher.user),
         "branch": teacher.branch_id,
         "branch_name": teacher.branch.name if teacher.branch_id else None,
