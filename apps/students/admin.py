@@ -37,7 +37,8 @@ class StudentProfileAdmin(admin.ModelAdmin):
     search_fields = ("student_id", "first_name", "last_name", "phone", "email", "user__username")
     autocomplete_fields = ("user", "branch", "current_cohort")
     list_select_related = ("user", "branch", "current_cohort")
-    readonly_fields = ("login_account",)
+    readonly_fields = ("login_account", "last_login_at")
+    exclude = ("password",)  # never render the login hash as an editable field
     inlines = (EnrollmentEventInline,)
 
     @admin.display(description="Login username", ordering="user__username")

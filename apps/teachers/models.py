@@ -5,8 +5,10 @@ from __future__ import annotations
 from django.db import models
 from django.utils.translation import gettext_lazy as _
 
+from apps.users.models import RoleAccount
 
-class TeacherProfile(models.Model):
+
+class TeacherProfile(RoleAccount):
     class SalaryType(models.TextChoices):
         HOURLY = "hourly", _("Hourly")
         MONTHLY = "monthly", _("Monthly")

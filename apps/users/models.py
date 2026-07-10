@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+from django.contrib.auth.hashers import check_password as _check_password
+from django.contrib.auth.hashers import is_password_usable, make_password
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin
 from django.contrib.auth.validators import UnicodeUsernameValidator
 from django.db import models
@@ -21,6 +23,45 @@ from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
 from .managers import UserManager
+
+
+class RoleAccount(models.Model):
+    """Abstract login credentials for a role-native account.
+
+    Each role (student / teacher / parent / staff) authenticates against its OWN table
+    — the profile IS the account (role-native auth). Django's ``User`` is retained only
+    for the ``/admin/`` panel; the app's login uses these fields. ``username`` is unique
+    within each role table; global uniqueness across roles is enforced at create time.
+    Passwords use Django's standard hashers, so the same policies/validators apply.
+    """
+
+    username = models.CharField(
+        max_length=150,
+        unique=True,
+        null=True,
+        blank=True,
+        validators=[UnicodeUsernameValidator()],
+        help_text=_("Login identifier for this role account."),
+    )
+    password = models.CharField(_("password"), max_length=128, blank=True)
+    is_active = models.BooleanField(default=True)  # can this account sign in?
+    must_change_password = models.BooleanField(default=False)
+    last_login_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        abstract = True
+
+    def set_password(self, raw_password: str) -> None:
+        self.password = make_password(raw_password)
+
+    def check_password(self, raw_password: str) -> bool:
+        return _check_password(raw_password, self.password)
+
+    def set_unusable_password(self) -> None:
+        self.password = make_password(None)
+
+    def has_usable_password(self) -> bool:
+        return is_password_usable(self.password)
 
 
 class User(AbstractBaseUser, PermissionsMixin):

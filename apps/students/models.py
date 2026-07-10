@@ -5,10 +5,11 @@ from __future__ import annotations
 from django.db import models
 from django.utils.translation import gettext_lazy as _
 
+from apps.users.models import RoleAccount
 from core.fields import EncryptedTextField
 
 
-class StudentProfile(models.Model):
+class StudentProfile(RoleAccount):
     class Status(models.TextChoices):
         LEAD = "lead", _("Lead")
         APPLICATION = "application", _("Application")

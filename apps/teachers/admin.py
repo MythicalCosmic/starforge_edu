@@ -10,3 +10,5 @@ class TeacherProfileAdmin(admin.ModelAdmin):
     search_fields = ("first_name", "last_name", "phone", "email", "user__username")
     autocomplete_fields = ("user", "branch", "department")
     list_select_related = ("user", "branch", "department")
+    readonly_fields = ("last_login_at",)
+    exclude = ("password",)  # never render the login hash as an editable field

@@ -13,6 +13,8 @@ from decimal import Decimal
 from django.db import models
 from django.utils.translation import gettext_lazy as _
 
+from apps.users.models import RoleAccount
+
 
 def _default_allowed_file_types() -> list[str]:
     return ["pdf", "mp4", "pptx", "docx", "mp3", "jpg", "jpeg", "png", "webp"]  # D2-E-2
@@ -20,6 +22,39 @@ def _default_allowed_file_types() -> list[str]:
 
 def _default_otp_channel_prefs() -> dict[str, bool]:
     return {"sms": True, "email": True}
+
+
+class StaffProfile(RoleAccount):
+    """A staff member (director / registrar / cashier / accountant / librarian / …) as a
+    role-native account: it OWNS the person's identity + login credentials (via RoleAccount).
+    Their specific roles + branch scope come from users.RoleMembership. Distinct from
+    teachers (TeacherProfile) and platform admins (who stay plain Django Users for /admin/).
+    Tenant-scoped — platform staff on the public schema get NO StaffProfile."""
+
+    class Gender(models.TextChoices):
+        MALE = "m", _("Male")
+        FEMALE = "f", _("Female")
+
+    user = models.OneToOneField("users.User", on_delete=models.CASCADE, related_name="staff_profile")
+    first_name = models.CharField(max_length=150, blank=True)
+    last_name = models.CharField(max_length=150, blank=True)
+    middle_name = models.CharField(max_length=150, blank=True)
+    phone = models.CharField(max_length=32, blank=True, db_index=True)
+    email = models.EmailField(blank=True)
+    birthdate = models.DateField(null=True, blank=True)
+    gender = models.CharField(max_length=8, choices=Gender.choices, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("last_name", "first_name")
+
+    def __str__(self) -> str:  # pragma: no cover
+        return self.get_full_name() or f"staff#{self.user_id}"
+
+    def get_full_name(self) -> str:
+        parts = [self.first_name, self.middle_name, self.last_name]
+        return " ".join(p for p in parts if p)
 
 
 class Branch(models.Model):

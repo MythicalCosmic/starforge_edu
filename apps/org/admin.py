@@ -8,7 +8,19 @@ from .models import (
     CenterSettings,
     Department,
     Room,
+    StaffProfile,
 )
+
+
+@admin.register(StaffProfile)
+class StaffProfileAdmin(admin.ModelAdmin):
+    list_display = ("first_name", "last_name", "phone", "email", "is_active", "created_at")
+    list_filter = ("is_active", "gender")
+    search_fields = ("first_name", "last_name", "phone", "email", "username", "user__username")
+    autocomplete_fields = ("user",)
+    list_select_related = ("user",)
+    readonly_fields = ("last_login_at", "created_at", "updated_at")
+    exclude = ("password",)  # never render the login hash as an editable field
 
 
 class BranchWorkingHoursInline(admin.TabularInline):

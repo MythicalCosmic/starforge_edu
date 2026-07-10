@@ -10,8 +10,10 @@ from django.db import models
 from django.db.models import Q
 from django.utils.translation import gettext_lazy as _
 
+from apps.users.models import RoleAccount
 
-class ParentProfile(models.Model):
+
+class ParentProfile(RoleAccount):
     class Gender(models.TextChoices):
         MALE = "m", _("Male")
         FEMALE = "f", _("Female")
