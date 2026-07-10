@@ -701,6 +701,29 @@ def test_libraries_list_query_budget(tenant_a, user_in, as_user, django_assert_m
     assert body["pagination"]["total"] == 5
 
 
+def test_folders_list_surfaces_readable_fk_names(tenant_a, user_in, as_user):
+    """The folders list emits `library_name`/`parent_name` beside the bare FK ids so a
+    client renders the tree without a second call. A root folder's null parent yields a
+    null `parent_name` (no crash), and the list select_relateds library + parent (N+1
+    guard: this GET rides the same query budget as before)."""
+    director = user_in(tenant_a, roles=["director"])
+    with schema_context(tenant_a.schema_name):
+        lib = ContentLibraryFactory(name="Physics Library")
+        parent = FolderFactory(library=lib, name="Unit 1")
+        FolderFactory(library=lib, parent=parent, name="Chapter A")
+
+    client = as_user(tenant_a, director)
+    body = client.get("/api/v1/content/folders/").json()
+    rows = {row["name"]: row for row in body["data"]}
+
+    child = rows["Chapter A"]
+    assert child["library_name"] == "Physics Library"
+    assert child["parent_name"] == "Unit 1"
+    # Root folder: parent is null -> parent_name null, library_name still resolved.
+    assert rows["Unit 1"]["library_name"] == "Physics Library"
+    assert rows["Unit 1"]["parent_name"] is None
+
+
 def test_library_clean_file_round_trip_api(tenant_a, user_in, as_user, monkeypatch):
     """A clean file is listable + downloadable through the API by a director."""
     _stub_s3(monkeypatch)

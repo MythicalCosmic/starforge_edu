@@ -8,6 +8,10 @@ from apps.notifications.models import Notification, NotificationPreference, Noti
 def notification_to_dict(n: Notification) -> dict:
     return {
         "id": n.id,
+        # Recipient id + a readable companion, resolved from the feed selector's
+        # select_related("user") — a client renders "for <name>" without a second call.
+        "user": n.user_id,
+        "user_name": n.user.get_full_name(),
         "event_type": n.event_type,
         "title": n.title,
         "body": n.body,

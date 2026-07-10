@@ -762,6 +762,36 @@ def test_archive_ended_term_lessons(tenant_a):
         assert lesson.status == Lesson.Status.ARCHIVED
 
 
+def test_lessons_list_includes_readable_names(tenant_a, as_role):
+    """Additive denormalization: the lesson feed carries readable companions next to
+    the bare FK ids (cohort_name / teacher_name / term_name / room_name /
+    lesson_type_name) so a frontend needs no second call. The id fields are kept."""
+    from core.permissions import Role
+
+    client, _ = as_role(Role.DIRECTOR)
+    with schema_context(tenant_a.schema_name):
+        ctx = _setup()
+        _make_rule(ctx)
+        cohort_name = ctx["cohort"].name
+        teacher_name = ctx["teacher"].user.get_full_name()
+        room_name = ctx["room"].name
+        term_name = ctx["term"].name
+    body = client.get("/api/v1/schedule/lessons/").json()
+    assert body["data"], body
+    row = body["data"][0]
+    # id fields preserved alongside the new readable companions
+    assert row["cohort_name"] == cohort_name
+    assert row["teacher_name"] == teacher_name
+    assert row["term_name"] == term_name
+    assert row["room_name"] == room_name
+    # id fields are still present, not replaced
+    assert row["cohort"] is not None
+    assert row["teacher"] is not None
+    # nullable lesson_type is unset on a materialized rule -> key present, value null
+    assert row["lesson_type"] is None
+    assert row["lesson_type_name"] is None
+
+
 def test_lessons_list_query_budget(tenant_a, as_role, django_assert_max_num_queries):
     from core.permissions import Role
 

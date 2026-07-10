@@ -40,10 +40,13 @@ def _rate(value: Any) -> str | None:
 
 
 def fee_schedule_to_dict(fs: FeeSchedule) -> dict[str, Any]:
+    # `cohort` is a nullable FK (center-wide default when null) — surface its readable
+    # name alongside the id. The list selector select_relateds cohort (no N+1).
     return {
         "id": fs.id,
         "name": fs.name,
         "cohort": fs.cohort_id,
+        "cohort_name": fs.cohort.name if fs.cohort else None,
         "amount_uzs": _money(fs.amount_uzs),
         "billing_period": fs.billing_period,
         "due_day_of_month": fs.due_day_of_month,
@@ -79,7 +82,9 @@ def invoice_to_dict(inv: Invoice) -> dict[str, Any]:
         "student": inv.student_id,
         "student_name": inv.student.user.get_full_name() if inv.student_id else "",
         "cohort": inv.cohort_id,
+        "cohort_name": inv.cohort.name if inv.cohort else None,
         "fee_schedule": inv.fee_schedule_id,
+        "fee_schedule_name": inv.fee_schedule.name if inv.fee_schedule else None,
         "period": inv.period,
         "status": inv.status,
         "issue_date": _iso(inv.issue_date),
@@ -90,6 +95,7 @@ def invoice_to_dict(inv: Invoice) -> dict[str, Any]:
         "fx_source": inv.fx_source,
         "total_usd": _money(inv.total_usd),
         "created_by": inv.created_by_id,
+        "created_by_name": inv.created_by.get_full_name() if inv.created_by else None,
         "created_at": _iso(inv.created_at),
         "lines": [invoice_line_to_dict(line) for line in inv.lines.all()],
         "allocations": [payment_allocation_to_dict(a) for a in inv.allocations.all()],
@@ -97,15 +103,19 @@ def invoice_to_dict(inv: Invoice) -> dict[str, Any]:
 
 
 def discount_to_dict(d: Discount) -> dict[str, Any]:
+    # `student` is a non-null FK; `approved_by` is a nullable User FK. The list
+    # selector select_relateds student__user + approved_by (no N+1).
     return {
         "id": d.id,
         "student": d.student_id,
+        "student_name": d.student.user.get_full_name(),
         "discount_type": d.discount_type,
         "percent": _money(d.percent),
         "fixed_amount_uzs": _money(d.fixed_amount_uzs),
         "valid_from": _iso(d.valid_from),
         "valid_until": _iso(d.valid_until),
         "approved_by": d.approved_by_id,
+        "approved_by_name": d.approved_by.get_full_name() if d.approved_by else None,
         "is_active": d.is_active,
         "created_at": _iso(d.created_at),
     }
@@ -139,18 +149,25 @@ def payment_method_to_dict(pm: PaymentMethod) -> dict[str, Any]:
 
 
 def expense_to_dict(e: Expense) -> dict[str, Any]:
+    # Each bare FK keeps a readable companion (branch/payment_method names + the
+    # three User actors). ExpenseRepository.query select_relateds all five (no N+1).
     return {
         "id": e.id,
         "branch": e.branch_id,
+        "branch_name": e.branch.name,
         "category": e.category,
         "description": e.description,
         "amount_uzs": _money(e.amount_uzs),
         "status": e.status,
         "payment_method": e.payment_method_id,
+        "payment_method_name": e.payment_method.name if e.payment_method else None,
         "reject_reason": e.reject_reason,
         "created_by": e.created_by_id,
+        "created_by_name": e.created_by.get_full_name() if e.created_by else None,
         "approved_by": e.approved_by_id,
+        "approved_by_name": e.approved_by.get_full_name() if e.approved_by else None,
         "paid_by": e.paid_by_id,
+        "paid_by_name": e.paid_by.get_full_name() if e.paid_by else None,
         "created_at": _iso(e.created_at),
         "approved_at": _iso(e.approved_at),
         "paid_at": _iso(e.paid_at),
@@ -158,10 +175,14 @@ def expense_to_dict(e: Expense) -> dict[str, Any]:
 
 
 def cashier_shift_to_dict(s: CashierShift) -> dict[str, Any]:
+    # `cashier` (User) + `branch` are non-null FKs; the repository query
+    # select_relateds both (no N+1).
     return {
         "id": s.id,
         "cashier": s.cashier_id,
+        "cashier_name": s.cashier.get_full_name(),
         "branch": s.branch_id,
+        "branch_name": s.branch.name,
         "status": s.status,
         "opened_at": _iso(s.opened_at),
         "closed_at": _iso(s.closed_at),

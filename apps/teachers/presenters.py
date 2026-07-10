@@ -24,11 +24,17 @@ def payout_policy_to_dict(policy: PayoutPolicy) -> dict[str, Any]:
 
 
 def teacher_to_dict(teacher: TeacherProfile) -> dict[str, Any]:
+    # Each bare FK id keeps a readable `_name` companion so a client renders the teacher
+    # without a second call. `branch`/`department` are select_related on both the list
+    # queryset (repository.get_queryset + selectors.list_teachers) and detail path, so
+    # these add JOINs, not queries. `branch` is non-null; `department` is nullable.
     return {
         "id": teacher.id,
         "user": user_brief(teacher.user),
         "branch": teacher.branch_id,
+        "branch_name": teacher.branch.name if teacher.branch_id else None,
         "department": teacher.department_id,
+        "department_name": teacher.department.name if teacher.department else None,
         "hire_date": teacher.hire_date.isoformat() if teacher.hire_date else None,
         "subjects": teacher.subjects,
         "qualifications": teacher.qualifications,

@@ -109,11 +109,11 @@ class RecurrenceRuleRepository(BaseRepository[RecurrenceRule], IRecurrenceRuleRe
     model = RecurrenceRule
 
     def list_rules(self) -> QuerySet[RecurrenceRule]:
-        return RecurrenceRule.objects.select_related("term", "cohort", "teacher__user", "room")
+        return RecurrenceRule.objects.select_related("term", "cohort", "teacher__user", "room", "lesson_type")
 
     def get(self, *, pk: int) -> RecurrenceRule | None:
         return (
-            RecurrenceRule.objects.select_related("term", "cohort", "teacher__user", "room")
+            RecurrenceRule.objects.select_related("term", "cohort", "teacher__user", "room", "lesson_type")
             .filter(pk=pk)
             .first()
         )

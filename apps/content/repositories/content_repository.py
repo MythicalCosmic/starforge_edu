@@ -71,7 +71,7 @@ class CourseRepository(_CrudRepo, BaseRepository[Course], ICourseRepository):
     model = Course
 
     def scoped(self, *, user: Any, roles: set[str] | None) -> QuerySet[Course]:
-        return Course.objects.filter(library__in=_libs(user, roles)).select_related("subject")
+        return Course.objects.filter(library__in=_libs(user, roles)).select_related("subject", "library")
 
     def get_scoped(self, *, pk: int, user: Any, roles: set[str] | None):
         return self.scoped(user=user, roles=roles).filter(pk=pk).first()
@@ -81,7 +81,7 @@ class ModuleRepository(_CrudRepo, BaseRepository[Module], IModuleRepository):
     model = Module
 
     def scoped(self, *, user: Any, roles: set[str] | None) -> QuerySet[Module]:
-        return Module.objects.filter(course__library__in=_libs(user, roles))
+        return Module.objects.filter(course__library__in=_libs(user, roles)).select_related("course")
 
     def get_scoped(self, *, pk: int, user: Any, roles: set[str] | None):
         return self.scoped(user=user, roles=roles).filter(pk=pk).first()
@@ -97,7 +97,9 @@ class ContentLessonRepository(_CrudRepo, BaseRepository[ContentLesson], IContent
     model = ContentLesson
 
     def scoped(self, *, user: Any, roles: set[str] | None) -> QuerySet[ContentLesson]:
-        return ContentLesson.objects.filter(module__course__library__in=_libs(user, roles))
+        return ContentLesson.objects.filter(module__course__library__in=_libs(user, roles)).select_related(
+            "module"
+        )
 
     def get_scoped(self, *, pk: int, user: Any, roles: set[str] | None):
         return self.scoped(user=user, roles=roles).filter(pk=pk).first()
@@ -107,7 +109,7 @@ class FolderRepository(_CrudRepo, BaseRepository[Folder], IFolderRepository):
     model = Folder
 
     def scoped(self, *, user: Any, roles: set[str] | None) -> QuerySet[Folder]:
-        return Folder.objects.filter(library__in=_libs(user, roles))
+        return Folder.objects.filter(library__in=_libs(user, roles)).select_related("library", "parent")
 
     def get_scoped(self, *, pk: int, user: Any, roles: set[str] | None):
         return self.scoped(user=user, roles=roles).filter(pk=pk).first()

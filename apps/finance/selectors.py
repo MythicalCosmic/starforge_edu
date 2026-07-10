@@ -21,9 +21,9 @@ OPEN_STATUSES = (Invoice.Status.ISSUED, Invoice.Status.PARTIALLY_PAID, Invoice.S
 
 
 def _invoice_base() -> QuerySet[Invoice]:
-    return Invoice.objects.select_related("student__user", "cohort", "fee_schedule").prefetch_related(
-        "lines", "allocations"
-    )
+    return Invoice.objects.select_related(
+        "student__user", "cohort", "fee_schedule", "created_by"
+    ).prefetch_related("lines", "allocations")
 
 
 def scoped_invoices(*, user, roles: set[str] | None = None) -> QuerySet[Invoice]:

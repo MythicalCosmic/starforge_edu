@@ -45,7 +45,7 @@ def check_conflicts(
 
 
 def _base_lessons() -> QuerySet[Lesson]:
-    return Lesson.objects.select_related("cohort", "teacher__user", "room", "term", "rule")
+    return Lesson.objects.select_related("cohort", "teacher__user", "room", "term", "rule", "lesson_type")
 
 
 def scoped_lessons(*, user, roles: set[str] | None = None) -> QuerySet[Lesson]:

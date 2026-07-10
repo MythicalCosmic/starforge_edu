@@ -53,7 +53,10 @@ def _visibility_filter(user, roles: set[str], memberships) -> Q:
 
 
 def scoped_libraries(*, user, roles: set[str] | None = None, memberships=None) -> QuerySet[ContentLibrary]:
-    qs = ContentLibrary.objects.filter(is_active=True)
+    # select_related the labelled FKs the presenter dereferences (department/cohort
+    # names) — no N+1 on the list, and harmless when this qs is used as an `__in=`
+    # subquery elsewhere (Django selects only the pk there).
+    qs = ContentLibrary.objects.filter(is_active=True).select_related("department", "cohort")
     if user.is_superuser:
         return qs
     if memberships is None:

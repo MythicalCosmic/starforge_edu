@@ -14,7 +14,9 @@ from apps.notifications.models import Notification, NotificationPreference
 
 def feed_for_user(*, user) -> QuerySet[Notification]:
     """The user's own notifications, newest first (cursor-paginated by the view)."""
-    return Notification.objects.filter(user=user).order_by("-created_at")
+    # user is surfaced (id + user_name) in notification_to_dict, so join it here —
+    # no extra query per row (keeps the feed query budget flat).
+    return Notification.objects.select_related("user").filter(user=user).order_by("-created_at")
 
 
 def unread_count(*, user) -> int:

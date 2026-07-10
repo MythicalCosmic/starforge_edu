@@ -270,3 +270,25 @@ def test_invoice_list_query_budget(as_role, tenant_a, django_assert_max_num_quer
     with django_assert_max_num_queries(10):  # +1: A-2 per-request permission-override load
         body = client.get(INVOICES_URL).json()
     assert set(body) == {"success", "data", "pagination"}
+
+
+# --------------------------------------------------------------------------- #
+# denormalized `_name` companions on the invoice list (frontend needs no 2nd call)
+# --------------------------------------------------------------------------- #
+
+
+def test_invoice_list_includes_readable_name_companions(tenant_a, as_role):
+    """Each bare FK id on an invoice row carries a readable `_name` companion,
+    resolved from the selector's select_related (no extra query per row)."""
+    from apps.cohorts.tests.factories import CohortFactory
+
+    client, _ = as_role(Role.DIRECTOR)
+    with schema_context(tenant_a.schema_name):
+        cohort = CohortFactory(name="Algebra A")
+        fs = FeeScheduleFactory(name="Monthly Tuition", cohort=cohort)
+        InvoiceFactory(cohort=cohort, fee_schedule=fs)
+
+    row = client.get(INVOICES_URL).json()["data"][0]
+    assert "student_name" in row
+    assert row["cohort_name"] == "Algebra A"
+    assert row["fee_schedule_name"] == "Monthly Tuition"

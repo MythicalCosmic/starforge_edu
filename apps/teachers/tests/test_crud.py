@@ -70,3 +70,23 @@ def test_list_is_branch_scoped(tenant_a, user_in, as_user):
 def test_role_without_teachers_read_is_denied(tenant_a, as_role):
     client, _ = as_role(Role.CASHIER)  # cashier holds no teachers permission
     assert client.get(URL).status_code == 403
+
+
+def test_list_emits_branch_and_department_names(tenant_a, user_in, as_user):
+    """The list rows carry readable `branch_name`/`department_name` next to the bare ids
+    so a client needs no second call (select_related keeps it 1 query)."""
+    from apps.org.tests.factories import BranchFactory, DepartmentFactory
+    from apps.teachers.tests.factories import TeacherProfileFactory
+
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory(name="North Campus")
+        department = DepartmentFactory(branch=branch, name="Mathematics")
+        teacher = TeacherProfileFactory(branch=branch, department=department)
+
+    client = as_user(tenant_a, user_in(tenant_a, roles=["registrar"], branch=branch))
+    rows = {t["id"]: t for t in client.get(URL).json()["data"]}
+    row = rows[teacher.id]
+    assert row["branch"] == branch.id
+    assert row["branch_name"] == "North Campus"
+    assert row["department"] == department.id
+    assert row["department_name"] == "Mathematics"

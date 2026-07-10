@@ -54,6 +54,17 @@ def test_feed_returns_only_own_rows(tenant_a, user_in, as_user):
     assert set(body) == {"results", "next", "previous"}  # cursor pagination shape
 
 
+def test_feed_row_includes_user_name(tenant_a, user_in, as_user):
+    """Each feed row carries the recipient id + a readable `user_name` companion
+    (resolved via select_related("user"), so no second call / no N+1)."""
+    user = user_in(tenant_a, first_name="Ada", last_name="Lovelace", roles=[Role.PARENT])
+    _make_notif(tenant_a, user, title="hi")
+    client = as_user(tenant_a, user)
+    row = client.get(FEED_URL).json()["results"][0]
+    assert row["user"] == user.pk
+    assert row["user_name"] == "Ada Lovelace"
+
+
 def test_feed_event_type_filter(tenant_a, user_in, as_user):
     """The feed preserves the old filterset_fields=("event_type","read_at") — ?event_type
     scopes the caller's own feed (a lost filter would silently return everything)."""
