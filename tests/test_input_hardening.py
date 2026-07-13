@@ -48,6 +48,42 @@ def test_card_type_is_active_rejects_null_and_garbage(director, bad):
     assert "is_active" in response.json()["errors"]
 
 
+def test_academics_subject_patch_rejects_boolean_typo(director, tenant_a):
+    from apps.academics.tests.factories import SubjectFactory
+
+    with schema_context(tenant_a.schema_name):
+        subject = SubjectFactory(is_active=True)
+    response = director.patch(
+        f"/api/v1/academics/subjects/{subject.pk}/", {"is_active": "treu"}, format="json"
+    )
+    assert response.status_code == 400
+    assert "is_active" in response.json()["errors"]
+
+
+@pytest.mark.parametrize(
+    ("url", "model_path", "create_kwargs"),
+    [
+        ("/api/v1/content/libraries/{pk}/", "content.ContentLibrary", {}),
+        (
+            "/api/v1/schedule/lesson-types/{pk}/",
+            "schedule.LessonType",
+            {"slug": "strict-boolean"},
+        ),
+    ],
+)
+def test_app_local_boolean_patch_rejects_typo(
+    director, tenant_a, url, model_path, create_kwargs
+):
+    from django.apps import apps
+
+    model = apps.get_model(model_path)
+    with schema_context(tenant_a.schema_name):
+        instance = model.objects.create(name="Strict boolean", **create_kwargs)
+    response = director.patch(url.format(pk=instance.pk), {"is_active": "fasle"}, format="json")
+    assert response.status_code == 400
+    assert "is_active" in response.json()["errors"]
+
+
 def test_fk_filter_garbage_is_400_not_500(director):
     resp = director.get("/api/v1/teachers/?branch=abc")
     assert resp.status_code == 400

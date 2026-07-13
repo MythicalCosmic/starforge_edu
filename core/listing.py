@@ -15,9 +15,7 @@ from django.db.models import Q, QuerySet
 from django.http import HttpRequest
 
 from core.exceptions import ValidationException
-
-_TRUE = ("true", "1", "yes", "t")
-_FALSE = ("false", "0", "no", "f")
+from core.http import parse_bool
 
 DEFAULT_PAGE_SIZE = 25
 MAX_PAGE_SIZE = 100
@@ -50,13 +48,10 @@ def apply_filters(
         except Exception:
             model_field = None
         if isinstance(model_field, models.BooleanField):
-            low = raw.lower()
-            if low in _TRUE:
-                value = True
-            elif low in _FALSE:
-                value = False
-            else:
-                continue  # unparseable boolean — ignore the filter rather than 500
+            try:
+                value = parse_bool(raw, field)
+            except ValidationException:
+                raise _bad_filter(field) from None
         elif "\x00" in raw:
             raise _bad_filter(field)  # NUL bytes crash psycopg at bind time
         # A bad value for a typed field raises at query-build time — ValueError for an

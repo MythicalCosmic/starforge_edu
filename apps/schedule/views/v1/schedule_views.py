@@ -33,7 +33,7 @@ from apps.schedule.presenters import (
 from core.api_auth import check_perm, require_auth
 from core.container import container
 from core.exceptions import NotFoundException, ValidationException
-from core.http import bool_field, read_json
+from core.http import bool_field, parse_bool, read_json
 from core.listing import apply_filters, paginate
 from core.permissions import get_user_roles
 from core.responses import created, error, no_content, paginated, success
@@ -117,17 +117,6 @@ def _int_value(raw: Any, name: str, *, min_value: int | None = None, max_value: 
     return value
 
 
-def _bool_value(raw: Any, name: str) -> bool:
-    # Coerce string booleans exactly like core.http.bool_field so create and update
-    # accept the same forms; an explicit JSON null (or any other type) is rejected here
-    # (a NOT-NULL column must not be silently reset to a default via PATCH null).
-    if isinstance(raw, bool):
-        return raw
-    if isinstance(raw, str):
-        return raw.strip().lower() in ("true", "1", "yes", "t")
-    raise _reject(name, "Must be a valid boolean.")
-
-
 def _date_value(raw: Any, name: str):
     if not isinstance(raw, str):
         raise _reject(name, "Enter a valid date (YYYY-MM-DD).")
@@ -206,7 +195,7 @@ def _term_changes(request: HttpRequest) -> dict[str, Any]:
     if "end_date" in data:
         changes["end_date"] = _date_value(data["end_date"], "end_date")
     if "is_current" in data:
-        changes["is_current"] = _bool_value(data["is_current"], "is_current")
+        changes["is_current"] = parse_bool(data["is_current"], "is_current")
     return changes
 
 
@@ -349,7 +338,7 @@ def _lesson_type_changes(request: HttpRequest) -> dict[str, Any]:
     if "color" in data:
         changes["color"] = _str_value(data["color"], "color", max_length=16, allow_blank=True)
     if "is_active" in data:
-        changes["is_active"] = _bool_value(data["is_active"], "is_active")
+        changes["is_active"] = parse_bool(data["is_active"], "is_active")
     return changes
 
 
@@ -430,7 +419,7 @@ def _rule_write_data(request: HttpRequest, *, partial: bool) -> dict[str, Any]:
     # is_active would silently reactivate a deactivated rule and re-materialize its lessons
     # (the old DRF ModelSerializer dropped an omitted is_active via SkipField).
     if "is_active" in data:
-        changes["is_active"] = _bool_value(data["is_active"], "is_active")
+        changes["is_active"] = parse_bool(data["is_active"], "is_active")
     return changes
 
 

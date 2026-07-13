@@ -36,7 +36,7 @@ from apps.content.selectors import REVIEWER_ROLES, scoped_libraries
 from core.api_auth import check_perm, require_auth
 from core.container import container
 from core.exceptions import NotFoundException, PermissionException, ValidationException
-from core.http import bool_field, read_json
+from core.http import bool_field, parse_bool, read_json
 from core.listing import apply_filters, paginate
 from core.permissions import get_user_roles, has_permission_code
 from core.responses import created, error, no_content, paginated, success
@@ -125,14 +125,6 @@ def _int_value(raw: Any, name: str, *, min_value: int | None = None) -> int:
     if min_value is not None and value < min_value:
         raise _reject(name, f"Ensure this value is greater than or equal to {min_value}.")
     return value
-
-
-def _bool_value(raw: Any, name: str) -> bool:
-    if isinstance(raw, bool):
-        return raw
-    if isinstance(raw, str):
-        return raw.strip().lower() in ("true", "1", "yes", "t")
-    raise _reject(name, "Must be a valid boolean.")
 
 
 def _choice_value(raw: Any, name: str, choices) -> str:
@@ -239,7 +231,7 @@ def _library_changes(request: HttpRequest) -> dict[str, Any]:
     if "allowed_roles" in data:
         changes["allowed_roles"] = _str_list_value(data["allowed_roles"], "allowed_roles")
     if "is_active" in data:
-        changes["is_active"] = _bool_value(data["is_active"], "is_active")
+        changes["is_active"] = parse_bool(data["is_active"], "is_active")
     if "department" in data:
         changes["department"] = (
             None if data["department"] is None else _int_value(data["department"], "department")
@@ -606,7 +598,7 @@ def file_approve_manager_view(request: HttpRequest, pk: int) -> HttpResponse:
     file = _get_file_in_scope(request, pk)
     data = read_json(request)
     is_downloadable = (
-        None if "is_downloadable" not in data else _bool_value(data["is_downloadable"], "is_downloadable")
+        None if "is_downloadable" not in data else parse_bool(data["is_downloadable"], "is_downloadable")
     )
     file = _file_service().approve_manager(
         file=file, actor=request.user, actor_roles=_roles(request), is_downloadable=is_downloadable

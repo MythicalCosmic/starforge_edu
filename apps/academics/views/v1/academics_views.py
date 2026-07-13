@@ -39,7 +39,7 @@ from apps.students.models import StudentProfile
 from core.api_auth import check_perm, require_auth
 from core.container import container
 from core.exceptions import NotFoundException, PermissionException, ValidationException
-from core.http import bool_field, decimal_field, read_json
+from core.http import bool_field, decimal_field, parse_bool, read_json
 from core.listing import apply_filters, paginate
 from core.permissions import Role, get_user_roles, has_permission_code
 from core.ratelimit import check_rate
@@ -113,14 +113,6 @@ def _int_value(raw: Any, name: str) -> int:
         raise _reject(name, "A valid integer is required.") from None
 
 
-def _bool_value(raw: Any, name: str) -> bool:
-    if isinstance(raw, bool):
-        return raw
-    if isinstance(raw, str):
-        return raw.strip().lower() in ("true", "1", "yes", "t")
-    raise _reject(name, "Must be a valid boolean.")
-
-
 def _slug_value(raw: Any, name: str, *, max_length: int) -> str:
     import re
 
@@ -186,7 +178,7 @@ def _subject_changes(request: HttpRequest) -> dict[str, Any]:
     if "description" in data:
         changes["description"] = _str_value(data["description"], "description", allow_blank=True)
     if "is_active" in data:
-        changes["is_active"] = _bool_value(data["is_active"], "is_active")
+        changes["is_active"] = parse_bool(data["is_active"], "is_active")
     if "department" in data:
         changes["department_id"] = (
             None if data["department"] is None else _int_value(data["department"], "department")
@@ -259,7 +251,7 @@ def _exam_type_changes(request: HttpRequest) -> dict[str, Any]:
     if "color" in data:
         changes["color"] = _str_value(data["color"], "color", max_length=16, allow_blank=True)
     if "is_active" in data:
-        changes["is_active"] = _bool_value(data["is_active"], "is_active")
+        changes["is_active"] = parse_bool(data["is_active"], "is_active")
     return changes
 
 

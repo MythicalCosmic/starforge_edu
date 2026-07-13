@@ -97,16 +97,8 @@ def decimal_field(
     return value
 
 
-def bool_field(data: dict[str, Any], name: str, *, default: bool = False) -> bool:
-    """A strict bool field with DRF-compatible string forms.
-
-    Missing uses ``default``; an explicit null or an unknown string is invalid.
-    Silently coercing a typo such as ``"treu"`` to ``False`` can invert an
-    activation/publish flag, so both true and false spellings are enumerated.
-    """
-    if name not in data:
-        return default
-    value = data[name]
+def parse_bool(value: Any, name: str) -> bool:
+    """Parse one explicit bool value using DRF-compatible string forms."""
     if value is None:
         raise _bad(name, "Must be a boolean.")
     if isinstance(value, bool):
@@ -118,3 +110,15 @@ def bool_field(data: dict[str, Any], name: str, *, default: bool = False) -> boo
         if normalized in ("false", "0", "no", "f", "n", "off"):
             return False
     raise _bad(name, "Must be a boolean.")
+
+
+def bool_field(data: dict[str, Any], name: str, *, default: bool = False) -> bool:
+    """A strict bool field; missing uses ``default``, explicit bad input is 400.
+
+    Silently coercing a typo such as ``"treu"`` to ``False`` can invert an
+    activation/publish flag, so both true and false spellings are enumerated by
+    :func:`parse_bool` and every other value is rejected.
+    """
+    if name not in data:
+        return default
+    return parse_bool(data[name], name)

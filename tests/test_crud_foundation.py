@@ -8,7 +8,7 @@ import pytest
 from django.test import RequestFactory
 from django_tenants.utils import schema_context
 
-from core.exceptions import PermissionException
+from core.exceptions import PermissionException, ValidationException
 from core.listing import apply_filters, paginate
 from core.scoping import assert_in_branch_scope, branch_ids, scope_to_branches
 
@@ -47,6 +47,35 @@ def test_listing_filter_search_order_paginate(tenant_a):
         assert total == 3
         assert [b.name for b in items] == ["ZZAlpha", "ZZBeta"]  # first page of 2
         assert (page, size) == (1, 2)
+
+
+@pytest.mark.parametrize("value", ["banana", "null", "tru"])
+def test_boolean_filter_rejects_unparseable_values(tenant_a, value):
+    from apps.org.models import Branch
+
+    with schema_context(tenant_a.schema_name), pytest.raises(ValidationException):
+        apply_filters(
+            _RF.get("/", {"is_active": value}),
+            Branch.objects.all(),
+            filter_fields=("is_active",),
+        )
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"), [("on", True), ("y", True), ("off", False), ("n", False)]
+)
+def test_boolean_filter_accepts_drf_forms(tenant_a, value, expected):
+    from apps.org.models import Branch
+
+    with schema_context(tenant_a.schema_name):
+        active = Branch.objects.create(name="Filter active", slug="filter-active", is_active=True)
+        inactive = Branch.objects.create(name="Filter inactive", slug="filter-inactive", is_active=False)
+        queryset = apply_filters(
+            _RF.get("/", {"is_active": value}),
+            Branch.objects.filter(pk__in=(active.pk, inactive.pk)),
+            filter_fields=("is_active",),
+        )
+        assert list(queryset.values_list("is_active", flat=True)) == [expected]
 
 
 def test_paginate_is_stable_across_pages_on_a_non_unique_sort(tenant_a):
