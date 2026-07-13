@@ -252,4 +252,11 @@ class RoleMembership(models.Model):
 
     class Meta:
         unique_together = (("user", "branch", "department", "role"),)
+        constraints = [
+            models.UniqueConstraint(
+                fields=("user", "branch", "role"),
+                condition=models.Q(department__isnull=True),
+                name="role_membership_unique_branch_role",
+            ),
+        ]
         ordering = ("-granted_at",)

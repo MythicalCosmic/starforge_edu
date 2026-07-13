@@ -128,6 +128,11 @@ class Folder(models.Model):
         ordering = ("library", "name")
         constraints = [
             models.UniqueConstraint(fields=("library", "parent", "name"), name="folder_unique_path"),
+            models.UniqueConstraint(
+                fields=("library", "name"),
+                condition=Q(parent__isnull=True),
+                name="folder_unique_root_name",
+            ),
         ]
 
     def __str__(self) -> str:  # pragma: no cover

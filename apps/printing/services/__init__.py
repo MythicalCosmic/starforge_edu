@@ -24,7 +24,7 @@ import secrets
 from datetime import timedelta
 from typing import Any
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
@@ -188,20 +188,41 @@ def enqueue_print(
 
     _assert_within_quota(cohort_id=cohort_id, pages=pages, copies=copies)
 
-    job = PrintJob.objects.create(
-        branch_id=branch_id,
-        status=PrintJob.Status.QUEUED,
-        source=source,
-        source_id=source_id,
-        payload_s3_key=payload_s3_key,
-        pages=pages,
-        copies=copies,
-        color=color,
-        duplex=duplex,
-        cohort_id=cohort_id,
-        requested_by=requested_by if getattr(requested_by, "pk", None) else None,
-        next_attempt_at=timezone.now(),
-    )
+    try:
+        # The savepoint keeps the outer transaction usable if a concurrent
+        # request wins the partial unique constraint between our SELECT and
+        # INSERT. PostgreSQL waits for that transaction before raising, so the
+        # winning open job is visible to the recovery query below.
+        with transaction.atomic():
+            job = PrintJob.objects.create(
+                branch_id=branch_id,
+                status=PrintJob.Status.QUEUED,
+                source=source,
+                source_id=source_id,
+                payload_s3_key=payload_s3_key,
+                pages=pages,
+                copies=copies,
+                color=color,
+                duplex=duplex,
+                cohort_id=cohort_id,
+                requested_by=requested_by if getattr(requested_by, "pk", None) else None,
+                next_attempt_at=timezone.now(),
+            )
+    except IntegrityError:
+        existing = (
+            PrintJob.objects.filter(
+                branch_id=branch_id,
+                source=source,
+                source_id=source_id,
+                payload_s3_key=payload_s3_key,
+                status__in=OPEN_STATUSES,
+            )
+            .order_by("created_at")
+            .first()
+        )
+        if existing is None:
+            raise
+        return existing
 
     schema_name = current_schema()
     job_id = job.pk

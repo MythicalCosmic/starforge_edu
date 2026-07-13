@@ -11,7 +11,7 @@ from __future__ import annotations
 import threading
 
 import pytest
-from django.db import connection, connections
+from django.db import IntegrityError, connection, connections, transaction
 from django.utils import timezone
 from django_tenants.utils import schema_context
 
@@ -409,6 +409,34 @@ def test_enqueue_print_new_job_after_previous_done(tenant_a):
             pages=1,
         )
         assert first.pk != second.pk  # a new job once the prior one closed
+
+
+def test_database_rejects_duplicate_open_print_job(tenant_a):
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        common = {
+            "branch": branch,
+            "source": PrintJob.Source.TRANSCRIPT,
+            "source_id": 9,
+            "payload_s3_key": "t/9.pdf",
+        }
+        PrintJobFactory(**common, status=PrintJob.Status.PICKED)
+
+        with pytest.raises(IntegrityError), transaction.atomic():
+            PrintJobFactory(**common, status=PrintJob.Status.QUEUED)
+
+
+def test_database_allows_new_print_job_after_closed_job(tenant_a):
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        common = {
+            "branch": branch,
+            "source": PrintJob.Source.RECEIPT,
+            "source_id": 10,
+            "payload_s3_key": "r/10.pdf",
+        }
+        PrintJobFactory(**common, status=PrintJob.Status.DONE)
+        PrintJobFactory(**common, status=PrintJob.Status.QUEUED)
 
 
 # --------------------------------------------------------------------------- #

@@ -117,6 +117,13 @@ class PrintJob(models.Model):
 
     class Meta:
         ordering = ("-created_at",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=("branch", "source", "source_id", "payload_s3_key"),
+                condition=models.Q(status__in=("queued", "picked", "printing")),
+                name="printing_unique_open_source",
+            ),
+        ]
         indexes = [
             models.Index(fields=("branch", "status", "next_attempt_at"), name="printing_job_claim_idx"),
             models.Index(fields=("source", "source_id"), name="printing_job_source_idx"),
