@@ -39,7 +39,7 @@ def _segment_queryset(segment: dict, branch):
     if branch is not None:
         qs = qs.filter(branch=branch)
     status = segment.get("status")
-    if status:
+    if status is not None:
         if status not in StudentProfile.Status.values:
             raise ValidationException(
                 _("Unknown student status in the segment."), code="segment_status_invalid"

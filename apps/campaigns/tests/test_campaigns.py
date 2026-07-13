@@ -120,6 +120,21 @@ def test_segment_filters_the_audience(tenant_a, user_in, as_user):
     assert data["total"] == 2  # the withdrawn student is excluded
 
 
+@pytest.mark.parametrize("bad_status", [False, 0, [], {}])
+def test_falsy_invalid_segment_status_is_rejected(tenant_a, user_in, as_user, bad_status):
+    branch = _branch(tenant_a)
+    client = as_user(tenant_a, user_in(tenant_a, roles=[Role.REGISTRAR], branch=branch))
+
+    response = client.post(
+        CAMPAIGNS,
+        {"name": "Bad segment", "message": "hi", "branch": branch.id, "segment": {"status": bad_status}},
+        format="json",
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "segment_status_invalid"
+
+
 def test_campaign_branch_scope(tenant_a, user_in, as_user):
     home = _branch(tenant_a)
     other = _branch(tenant_a)

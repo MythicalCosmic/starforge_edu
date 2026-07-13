@@ -89,6 +89,25 @@ def test_hod_can_approve_teacher_global_request(tenant_a, user_in, as_user):
     assert approved.json()["data"]["status"] == "active"
 
 
+def test_dynamic_approve_only_role_can_see_and_action_pending_queue(tenant_a, user_in, as_user):
+    """An override may grant approve independently of write; the scoped repository
+    must not hide every approvable row from that valid actor."""
+    from apps.access.services import set_override
+    from apps.org.tests.factories import BranchFactory
+
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory.create()
+        set_override(role=Role.LIBRARIAN, permission="achievements:read", effect="grant")
+        set_override(role=Role.LIBRARIAN, permission="achievements:approve", effect="grant")
+    teacher = _teacher_in_branch(tenant_a, user_in, as_user, branch)
+    approver = as_user(tenant_a, user_in(tenant_a, roles=[Role.LIBRARIAN], branch=branch))
+
+    gid = teacher.post(ACH, {"name": "Service", "scope": "global"}, format="json").json()["data"]["id"]
+    listed = {row["id"] for row in _rows(approver.get(f"{ACH}?status=pending").json())}
+    assert gid in listed
+    assert approver.post(f"{ACH}{gid}/approve/", {}, format="json").status_code == 200
+
+
 def test_group_achievement_requires_a_cohort(tenant_a, as_role):
     teacher_client, _t = as_role(Role.TEACHER)
     r = teacher_client.post(ACH, {"name": "x", "scope": "group"}, format="json")

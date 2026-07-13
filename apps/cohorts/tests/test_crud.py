@@ -65,6 +65,72 @@ def test_create_rejects_end_before_start(tenant_a, as_role):
     assert "end_date" in resp.json()["errors"]
 
 
+def test_create_rejects_cross_branch_relationships(tenant_a, as_role):
+    from apps.org.tests.factories import BranchFactory, DepartmentFactory, RoomFactory
+    from apps.teachers.tests.factories import TeacherProfileFactory
+
+    client, _ = as_role(Role.DIRECTOR)
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        other = BranchFactory()
+        department = DepartmentFactory(branch=other)
+        room = RoomFactory(branch=other)
+        teacher = TeacherProfileFactory(branch=other)
+
+    response = client.post(
+        URL,
+        {
+            "name": "Mixed branch",
+            "branch": branch.id,
+            "start_date": "2026-01-01",
+            "end_date": "2026-06-30",
+            "department": department.id,
+            "default_room": room.id,
+            "primary_teacher": teacher.id,
+        },
+        format="json",
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "cross_branch_relationship"
+    assert set(response.json()["errors"]) == {"department", "default_room", "primary_teacher"}
+
+
+def test_update_rejects_blank_name_negative_capacity_and_cross_branch_room(tenant_a, as_role):
+    from apps.cohorts.tests.factories import CohortFactory
+    from apps.org.tests.factories import BranchFactory, RoomFactory
+    from apps.teachers.tests.factories import TeacherProfileFactory
+
+    client, _ = as_role(Role.DIRECTOR)
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        other = BranchFactory()
+        cohort = CohortFactory(branch=branch, name="Valid", capacity=12)
+        other_room = RoomFactory(branch=other)
+        other_teacher = TeacherProfileFactory(branch=other)
+
+    for body, field in (
+        ({"name": "   "}, "name"),
+        ({"capacity": -1}, "capacity"),
+        ({"default_room": other_room.id}, "default_room"),
+    ):
+        response = client.patch(f"{URL}{cohort.id}/", body, format="json")
+        assert response.status_code == 400
+        assert field in response.json()["errors"]
+
+    teacher_response = client.post(
+        f"{URL}{cohort.id}/teachers/", {"teacher": other_teacher.id}, format="json"
+    )
+    assert teacher_response.status_code == 400
+    assert "teacher" in teacher_response.json()["errors"]
+
+    with schema_context(tenant_a.schema_name):
+        cohort.refresh_from_db()
+        assert cohort.name == "Valid"
+        assert cohort.capacity == 12
+        assert cohort.default_room_id is None
+
+
 def test_list_is_branch_scoped(tenant_a, user_in, as_user):
     from apps.cohorts.tests.factories import CohortFactory
     from apps.org.tests.factories import BranchFactory

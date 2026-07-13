@@ -21,16 +21,18 @@ class AchievementRepository(BaseRepository[Achievement], IAchievementRepository)
         qs = self.get_queryset()
         if is_unscoped:
             return qs  # the director manages the whole centre
-        if can_write:
-            # Staff manage their own branch's achievements + the active centre-wide
-            # globals, plus anything they created (so a teacher sees their own pending
-            # request). An approver (HOD/reception) also sees the pending-global queue
-            # so they can action the teacher->manager approval flow.
-            visible = (
-                Q(created_by=user)
-                | Q(branch_id__in=branch_ids)
-                | (Q(branch__isnull=True) & Q(status=Achievement.Status.ACTIVE))
-            )
+        if can_write or can_approve:
+            # Keep write and approval capabilities independent: dynamic permission
+            # overrides can grant achievements:approve without achievements:write.
+            # Such an approver must still see the pending-global queue that their
+            # approve/reject endpoint authorizes them to action.
+            visible = Q(pk__in=[])
+            if can_write:
+                visible |= (
+                    Q(created_by=user)
+                    | Q(branch_id__in=branch_ids)
+                    | (Q(branch__isnull=True) & Q(status=Achievement.Status.ACTIVE))
+                )
             if can_approve:
                 visible |= Q(branch__isnull=True) & Q(status=Achievement.Status.PENDING)
             return qs.filter(visible)

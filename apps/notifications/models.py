@@ -13,6 +13,7 @@ Each value is the ``"<domain>.<event>"`` form the source signal maps to (see
 from __future__ import annotations
 
 from django.db import models
+from django.db.models.fields.json import KeyTransform
 from django.utils.translation import gettext_lazy as _
 
 
@@ -112,7 +113,21 @@ class NotificationDelivery(models.Model):
 
     class Meta:
         ordering = ("-created_at",)
-        indexes = [models.Index(fields=("notification", "channel"))]
+        indexes = [
+            models.Index(fields=("notification", "channel")),
+            # Push dead-token tracking looks up the newest three attempts for one
+            # provider device id. The id lives in JSON, so the ordinary delivery
+            # indexes cannot support that equality + newest-first query; without
+            # this partial expression index, every failure scans/sorts a table that
+            # grows forever.
+            models.Index(
+                KeyTransform("device_id", models.F("provider_response")),
+                models.F("created_at").desc(),
+                condition=models.Q(channel=Channel.PUSH),
+                include=("notification", "status"),
+                name="notif_push_device_created_idx",
+            ),
+        ]
 
     def __str__(self) -> str:  # pragma: no cover
         return f"delivery#{self.pk}:{self.channel}:{self.status}"

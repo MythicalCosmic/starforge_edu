@@ -52,6 +52,7 @@ class CohortService(ICohortService):
             default_room=self._resolve_room(data.default_room_id),
             is_archived=data.is_archived,
         )
+        self._validate_cohort(cohort)
         return self._save(cohort)
 
     def update(self, cohort: Cohort, changes: dict[str, Any]) -> Cohort:
@@ -71,7 +72,7 @@ class CohortService(ICohortService):
         for field in _SCALAR_FIELDS:
             if field in changes:
                 setattr(cohort, field, changes[field])
-        self._assert_date_order(cohort.start_date, cohort.end_date)
+        self._validate_cohort(cohort)
         return self._save(cohort)
 
     def delete(self, cohort: Cohort) -> None:
@@ -125,6 +126,12 @@ class CohortService(ICohortService):
         from apps.cohorts.services import assign_cohort_teacher
 
         teacher = self._resolve_teacher(data.teacher_id)  # 400 if not found
+        if teacher.branch_id != cohort.branch_id:
+            raise ValidationException(
+                _("The teacher must belong to the cohort's branch."),
+                code="cross_branch_relationship",
+                fields={"teacher": ["Must belong to the cohort's branch."]},
+            )
         return assign_cohort_teacher(cohort=cohort, teacher=teacher, role=data.role)
 
     def remove_teacher(self, cohort: Cohort, teacher_id: int) -> None:
@@ -140,6 +147,36 @@ class CohortService(ICohortService):
                 _("end_date must be on or after start_date."),
                 code="validation_error",
                 fields={"end_date": ["Must be on or after start_date."]},
+            )
+
+    @classmethod
+    def _validate_cohort(cls, cohort: Cohort) -> None:
+        name = str(cohort.name or "").strip()
+        if not name:
+            raise ValidationException(
+                _("Name is required."),
+                code="validation_error",
+                fields={"name": ["This field may not be blank."]},
+            )
+        cohort.name = name
+        if cohort.capacity is not None and cohort.capacity < 0:
+            raise ValidationException(
+                _("Capacity cannot be negative."),
+                code="validation_error",
+                fields={"capacity": ["Must be zero or greater."]},
+            )
+        cls._assert_date_order(cohort.start_date, cohort.end_date)
+
+        mismatches: dict[str, list[str]] = {}
+        for field_name in ("department", "primary_teacher", "default_room"):
+            related = getattr(cohort, field_name)
+            if related is not None and related.branch_id != cohort.branch_id:
+                mismatches[field_name] = ["Must belong to the cohort's branch."]
+        if mismatches:
+            raise ValidationException(
+                _("Cohort relationships must belong to the same branch."),
+                code="cross_branch_relationship",
+                fields=mismatches,
             )
 
     def _save(self, cohort: Cohort) -> Cohort:

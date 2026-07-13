@@ -18,6 +18,15 @@ from django_tenants.utils import schema_context
 pytestmark = pytest.mark.django_db
 
 
+def test_push_device_history_has_targeted_expression_index():
+    from apps.notifications.models import NotificationDelivery
+
+    indexes = {index.name: index for index in NotificationDelivery._meta.indexes}
+    index = indexes["notif_push_device_created_idx"]
+    assert index.include == ("notification", "status")
+    assert len(index.expressions) == 2
+
+
 def _user_with_phone(tenant):
     from apps.users.tests.factories import UserFactory
 
