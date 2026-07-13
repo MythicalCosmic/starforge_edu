@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import csv
 import io
+from datetime import timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 from django.db import transaction
@@ -270,7 +271,53 @@ def recompute_cohort_term(*, cohort, subject, term, publish: bool = False) -> li
 
 @transaction.atomic
 def request_transcript(*, student, term=None, requested_by=None) -> Transcript:
-    """Create a pending Transcript and enqueue PDF generation after commit."""
+    """Idempotently admit a transcript under strict user/tenant queue caps."""
+    from django.conf import settings
+
+    from core.exceptions import ThrottledException
+    from core.job_limits import lock_tenant_job_queue
+
+    lock_tenant_job_queue("documents")
+    active = (Transcript.Status.PENDING, Transcript.Status.PROCESSING)
+    duplicate = (
+        Transcript.objects.filter(
+            student=student,
+            term=term,
+            requested_by=requested_by,
+            status__in=active,
+        )
+        .order_by("-created_at")
+        .first()
+    )
+    if duplicate is not None:
+        return duplicate
+
+    now = timezone.now()
+    user_active = Transcript.objects.filter(requested_by=requested_by, status__in=active).count()
+    tenant_active = Transcript.objects.filter(status__in=active).count()
+    user_hourly = Transcript.objects.filter(
+        requested_by=requested_by, created_at__gte=now - timedelta(hours=1)
+    ).count()
+    tenant_hourly = Transcript.objects.filter(created_at__gte=now - timedelta(hours=1)).count()
+    from apps.reports.models import ReportRun
+
+    report_active = ReportRun.objects.filter(
+        status__in=(ReportRun.Status.QUEUED, ReportRun.Status.RUNNING)
+    ).count()
+    report_hourly = ReportRun.objects.filter(created_at__gte=now - timedelta(hours=1)).count()
+    if user_active >= getattr(settings, "TRANSCRIPT_MAX_ACTIVE_PER_USER", 3):
+        raise ThrottledException(code="transcript_user_queue_full", wait=60)
+    if tenant_active >= getattr(settings, "TRANSCRIPT_MAX_ACTIVE_PER_TENANT", 20):
+        raise ThrottledException(code="transcript_tenant_queue_full", wait=60)
+    if tenant_active + report_active >= getattr(settings, "DOCUMENT_MAX_ACTIVE_PER_TENANT", 20):
+        raise ThrottledException(code="document_tenant_queue_full", wait=60)
+    if user_hourly >= getattr(settings, "TRANSCRIPT_MAX_HOURLY_PER_USER", 10):
+        raise ThrottledException(code="transcript_user_hourly_limit", wait=3600)
+    if tenant_hourly >= getattr(settings, "TRANSCRIPT_MAX_HOURLY_PER_TENANT", 100):
+        raise ThrottledException(code="transcript_tenant_hourly_limit", wait=3600)
+    if tenant_hourly + report_hourly >= getattr(settings, "DOCUMENT_MAX_HOURLY_PER_TENANT", 100):
+        raise ThrottledException(code="document_tenant_hourly_limit", wait=3600)
+
     transcript = Transcript.objects.create(student=student, term=term, requested_by=requested_by)
     schema = current_schema()
     transaction.on_commit(lambda: _enqueue_transcript(transcript.pk, schema))
@@ -309,6 +356,20 @@ def render_transcript_pdf(transcript: Transcript) -> bytes:
 
 
 def generate_transcript(transcript_id: int) -> str:
+    from core.exceptions import ConflictException
+    from core.job_limits import release_job_execution, try_acquire_job_execution
+
+    if not try_acquire_job_execution("transcript", transcript_id):
+        raise ConflictException(
+            _("This transcript is already being generated."), code="transcript_in_progress"
+        )
+    try:
+        return _generate_transcript(transcript_id)
+    finally:
+        release_job_execution("transcript", transcript_id)
+
+
+def _generate_transcript(transcript_id: int) -> str:
     """Idempotent task body: pending → processing → done, uploading the PDF to
     `{schema}/transcripts/{id}.pdf`. A `done` transcript short-circuits (re-run
     safe). Runs under the active tenant schema."""

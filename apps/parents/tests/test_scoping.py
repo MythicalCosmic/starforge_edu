@@ -88,3 +88,141 @@ def test_student_sees_only_self(tenant_a, user_in, as_user, family):
 
     body = client.get("/api/v1/students/").json()
     assert [s["id"] for s in body["data"]] == [own_profile.id]
+
+
+def test_registrar_parent_surfaces_and_write_targets_are_department_scoped(tenant_a, user_in, as_user):
+    """List/detail joins and guardian/pickup FK ids must share one exact scope."""
+    from apps.cohorts.tests.factories import CohortFactory
+    from apps.org.tests.factories import DepartmentFactory
+    from apps.parents.tests.factories import GuardianFactory, ParentProfileFactory
+    from apps.users.models import RoleMembership
+
+    registrar = user_in(tenant_a)
+    branch_registrar = user_in(tenant_a)
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        other_branch = BranchFactory()
+        own_department = DepartmentFactory(branch=branch)
+        sibling_department = DepartmentFactory(branch=branch)
+        foreign_department = DepartmentFactory(branch=other_branch)
+        own_cohort = CohortFactory(branch=branch, department=own_department)
+        sibling_cohort = CohortFactory(branch=branch, department=sibling_department)
+        foreign_cohort = CohortFactory(branch=other_branch, department=foreign_department)
+
+        own_student = StudentProfileFactory(branch=branch, current_cohort=own_cohort)
+        own_student_2 = StudentProfileFactory(branch=branch, current_cohort=own_cohort)
+        sibling_student = StudentProfileFactory(branch=branch, current_cohort=sibling_cohort)
+        foreign_student = StudentProfileFactory(
+            branch=other_branch,
+            current_cohort=foreign_cohort,
+        )
+
+        own_parent = ParentProfileFactory()
+        sibling_parent = ParentProfileFactory()
+        foreign_parent = ParentProfileFactory()
+        shared_parent = ParentProfileFactory(workplace="Before")
+        own_guardian = GuardianFactory(parent=own_parent, student=own_student)
+        GuardianFactory(parent=sibling_parent, student=sibling_student)
+        GuardianFactory(parent=foreign_parent, student=foreign_student)
+        shared_own_guardian = GuardianFactory(parent=shared_parent, student=own_student_2)
+        GuardianFactory(parent=shared_parent, student=sibling_student)
+
+        own_pickup = PickupAuthorization.objects.create(
+            student=own_student,
+            full_name="Own pickup",
+            phone="+998905559001",
+        )
+        sibling_pickup = PickupAuthorization.objects.create(
+            student=sibling_student,
+            full_name="Sibling pickup",
+            phone="+998905559002",
+        )
+        foreign_pickup = PickupAuthorization.objects.create(
+            student=foreign_student,
+            full_name="Foreign pickup",
+            phone="+998905559003",
+        )
+        orphan_for_own = ParentProfileFactory()
+        orphan_for_foreign = ParentProfileFactory()
+
+        RoleMembership.objects.create(
+            user=registrar,
+            branch=branch,
+            department=own_department,
+            role=Role.REGISTRAR,
+        )
+        RoleMembership.objects.create(
+            user=branch_registrar,
+            branch=branch,
+            role=Role.REGISTRAR,
+        )
+        registrar.refresh_from_db()
+        branch_registrar.refresh_from_db()
+
+    client = as_user(tenant_a, registrar)
+    parent_ids = {row["id"] for row in client.get("/api/v1/parents/").json()["data"]}
+    assert parent_ids == {own_parent.id, shared_parent.id}
+    assert client.get(f"/api/v1/parents/{sibling_parent.id}/").status_code == 404
+
+    guardian_ids = {row["id"] for row in client.get("/api/v1/parents/guardians/").json()["data"]}
+    assert guardian_ids == {own_guardian.id, shared_own_guardian.id}
+    pickup_ids = {row["id"] for row in client.get("/api/v1/parents/pickups/").json()["data"]}
+    assert pickup_ids == {own_pickup.id}
+    assert client.get(f"/api/v1/parents/pickups/{sibling_pickup.id}/").status_code == 404
+    assert client.get(f"/api/v1/parents/pickups/{foreign_pickup.id}/").status_code == 404
+
+    shared_children = client.get(f"/api/v1/parents/{shared_parent.id}/students/")
+    assert shared_children.status_code == 200
+    assert {row["id"] for row in shared_children.json()["data"]} == {own_student_2.id}
+    shared_update = client.patch(
+        f"/api/v1/parents/{shared_parent.id}/",
+        {"workplace": "Cross-scope mutation"},
+        format="json",
+    )
+    assert shared_update.status_code == 404
+
+    allowed_guardian = client.post(
+        "/api/v1/parents/guardians/",
+        {
+            "parent": orphan_for_own.id,
+            "student": own_student.id,
+            "relationship": "other",
+        },
+        format="json",
+    )
+    assert allowed_guardian.status_code == 201, allowed_guardian.content
+    denied_guardian = client.post(
+        "/api/v1/parents/guardians/",
+        {
+            "parent": orphan_for_foreign.id,
+            "student": foreign_student.id,
+            "relationship": "other",
+        },
+        format="json",
+    )
+    assert denied_guardian.status_code == 400
+    assert denied_guardian.json()["code"] == "invalid_student"
+
+    denied_pickup = client.post(
+        "/api/v1/parents/pickups/",
+        {
+            "student": foreign_student.id,
+            "full_name": "Denied",
+            "phone": "+998905559004",
+        },
+        format="json",
+    )
+    assert denied_pickup.status_code == 400
+    assert denied_pickup.json()["code"] == "invalid_student"
+    denied_move = client.patch(
+        f"/api/v1/parents/pickups/{own_pickup.id}/",
+        {"student": sibling_student.id},
+        format="json",
+    )
+    assert denied_move.status_code == 400
+    assert denied_move.json()["code"] == "invalid_student"
+
+    branch_client = as_user(tenant_a, branch_registrar)
+    branch_parent_ids = {row["id"] for row in branch_client.get("/api/v1/parents/").json()["data"]}
+    assert {own_parent.id, sibling_parent.id, shared_parent.id} <= branch_parent_ids
+    assert foreign_parent.id not in branch_parent_ids

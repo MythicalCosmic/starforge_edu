@@ -23,15 +23,27 @@ def _approved_test(tenant, branch, builder, approver):
     with schema_context(tenant.schema_name):
         test = services.create_test(title="EN placement", created_by=builder, branch=branch)
         q1 = services.add_question(
-            test=test, prompt="2+2?", question_type="single_choice", options=["3", "4", "5"],
-            correct_answer="4", points=2,
+            test=test,
+            prompt="2+2?",
+            question_type="single_choice",
+            options=["3", "4", "5"],
+            correct_answer="4",
+            points=2,
         )
         q2 = services.add_question(
-            test=test, prompt="Capital of France?", question_type="single_choice",
-            options=["London", "Paris"], correct_answer="Paris", points=2,
+            test=test,
+            prompt="Capital of France?",
+            question_type="single_choice",
+            options=["London", "Paris"],
+            correct_answer="Paris",
+            points=2,
         )
         q3 = services.add_question(
-            test=test, prompt="Sky is blue?", question_type="true_false", correct_answer=True, points=1,
+            test=test,
+            prompt="Sky is blue?",
+            question_type="true_false",
+            correct_answer=True,
+            points=1,
         )
         q4 = services.add_question(test=test, prompt="Describe your day.", question_type="writing")
         services.submit_for_review(test=test)
@@ -144,7 +156,11 @@ def test_lead_never_sees_per_question_correctness(tenant_a, user_in, as_user):
     gets only {question, response}; the full grading is staff-only."""
     s = _setup(tenant_a, user_in, as_user)
     aid = _assign(s)
-    body = s["lead_c"].post(f"{ATTEMPTS}{aid}/submit/", {"answers": _all_correct(s)}, format="json").json()["data"]
+    body = (
+        s["lead_c"]
+        .post(f"{ATTEMPTS}{aid}/submit/", {"answers": _all_correct(s)}, format="json")
+        .json()["data"]
+    )
     assert body["answers"], "the lead still sees their own responses"
     assert all("is_correct" not in a and "awarded_points" not in a for a in body["answers"])
     # but a staff member (proctor/manager) sees the full grading
@@ -202,7 +218,10 @@ def test_duplicate_assignment_conflicts(tenant_a, user_in, as_user):
 def test_cannot_submit_twice(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     aid = _assign(s)
-    assert s["lead_c"].post(f"{ATTEMPTS}{aid}/submit/", {"answers": _all_correct(s)}, format="json").status_code == 200
+    assert (
+        s["lead_c"].post(f"{ATTEMPTS}{aid}/submit/", {"answers": _all_correct(s)}, format="json").status_code
+        == 200
+    )
     again = s["lead_c"].post(f"{ATTEMPTS}{aid}/submit/", {"answers": _all_correct(s)}, format="json")
     assert again.status_code == 409
     assert again.json()["code"] == "already_submitted"
@@ -247,7 +266,9 @@ def test_another_lead_cannot_see_or_submit(tenant_a, user_in, as_user):
         StudentProfileFactory.create(user=other_u, branch=s["branch"], status=StudentProfile.Status.LEAD)
     other = as_user(tenant_a, other_u)
     assert other.get(f"{ATTEMPTS}{aid}/").status_code == 404
-    assert other.post(f"{ATTEMPTS}{aid}/submit/", {"answers": _all_correct(s)}, format="json").status_code == 404
+    assert (
+        other.post(f"{ATTEMPTS}{aid}/submit/", {"answers": _all_correct(s)}, format="json").status_code == 404
+    )
 
 
 def test_proctor_can_submit_on_behalf(tenant_a, user_in, as_user):

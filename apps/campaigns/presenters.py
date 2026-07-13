@@ -28,6 +28,8 @@ def campaign_to_dict(c: Campaign) -> dict[str, Any]:
         "sent_by_name": c.sent_by.get_full_name() if c.sent_by else None,
         "scheduled_at": c.scheduled_at.isoformat() if c.scheduled_at else None,
         "sent_at": c.sent_at.isoformat() if c.sent_at else None,
+        "send_attempts": c.send_attempts,
+        "last_error": c.last_error,
         "created_at": c.created_at.isoformat(),
     }
 

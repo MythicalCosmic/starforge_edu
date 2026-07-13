@@ -34,7 +34,9 @@ def guardians_collection_view(request: HttpRequest) -> HttpResponse:
     if request.method == "GET":
         check_perm(request, f"{_RESOURCE}:read")
         qs = _service().scoped_list(user=request.user, roles=get_user_roles(request))
-        qs = apply_filters(request, qs, filter_fields=_FILTERS, ordering_fields=("id",), default_ordering="id")
+        qs = apply_filters(
+            request, qs, filter_fields=_FILTERS, ordering_fields=("id",), default_ordering="id"
+        )
         items, total, page, size = paginate(request, qs)
         return paginated([guardian_to_dict(g) for g in items], total=total, page=page, page_size=size)
     if request.method == "POST":
@@ -47,7 +49,9 @@ def guardians_collection_view(request: HttpRequest) -> HttpResponse:
             is_primary=bool_field(body, "is_primary"),
             custody_notes=str_field(body, "custody_notes"),
         )
-        return created(guardian_to_dict(_service().create(dto)))
+        return created(
+            guardian_to_dict(_service().create(dto, user=request.user, roles=get_user_roles(request)))
+        )
     return error("Method not allowed.", code="method_not_allowed", status=405)
 
 

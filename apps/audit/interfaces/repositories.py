@@ -11,10 +11,6 @@ from core.interfaces import IBaseRepository
 
 
 class IAuditRepository(IBaseRepository[AuditLog]):
-    def timeline(self) -> QuerySet[AuditLog]:
-        """The full timeline (newest first, actor pre-joined)."""
-        raise NotImplementedError
-
     def filtered(self, filters: AuditFilterDTO) -> QuerySet[AuditLog]:
         """The timeline narrowed by the shared filter (actor / action / resource / ts range)."""
         raise NotImplementedError

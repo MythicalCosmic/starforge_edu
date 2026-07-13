@@ -74,11 +74,14 @@ def test_platform_admin_can_obtain_api_session_from_public_login(platform_admin,
     assert login.status_code == 200, login.content
     client.credentials(HTTP_AUTHORIZATION=f"Bearer {login.json()['data']['access']}")
     assert client.get("/api/v1/platform/centers/").status_code == 200
-    assert client.post(
-        "/api/v1/auth/role-login/",
-        {"username": platform_admin.username, "password": PASSWORD},
-        format="json",
-    ).status_code == 404
+    assert (
+        client.post(
+            "/api/v1/auth/role-login/",
+            {"username": platform_admin.username, "password": PASSWORD},
+            format="json",
+        ).status_code
+        == 404
+    )
 
 
 def _ensure_plan(max_students=1000):
@@ -330,11 +333,11 @@ def test_impersonation_both_sides_audited(staff_client, tenant_a, user_in):
     after_pe = PlatformEvent.objects.filter(event="impersonation.minted").count()
     assert after_pe == before_pe + 1
 
-    # Exactly one tenant-schema AuditLog "impersonation.started" with the impersonator.
+    # Exactly one tenant-schema IMPERSONATE audit row with the impersonator snapshot.
     with schema_context(tenant_a.schema_name):
         from apps.audit.models import AuditLog
 
-        rows = AuditLog.objects.filter(action="impersonation.started", resource_id=str(target.pk))
+        rows = AuditLog.objects.filter(action=AuditLog.Action.IMPERSONATE, resource_id=str(target.pk))
         assert rows.count() == 1
         assert rows.first().after.get("read_only") is True
 

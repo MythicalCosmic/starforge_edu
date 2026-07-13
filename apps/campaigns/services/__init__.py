@@ -8,15 +8,28 @@ externally: tests use ``_resolve_phone``/``request_template_generation``, and ce
 
 from __future__ import annotations
 
-from django.db import transaction
-from django.db.models import Count
+import logging
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import timedelta
+
+from django.db import connection, transaction
+from django.db.models import Count, Q
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
 from apps.campaigns.models import Campaign, CampaignRecipient, DoNotContact, MessageTemplate
 from apps.students.models import StudentProfile
 from core.exceptions import NotFoundException, UnprocessableEntity, ValidationException
+from core.utils import current_schema
 from infrastructure.sms.eskiz_client import get_sms_client
+
+logger = logging.getLogger(__name__)
+
+_CAMPAIGN_SEND_LEASE = timedelta(minutes=15)
+_CAMPAIGN_DISPATCH_BATCH_SIZE = 100
+_CAMPAIGN_HEARTBEAT_EVERY = 25
 
 
 def _resolve_phone(student: StudentProfile) -> str:
@@ -109,99 +122,271 @@ def create_campaign(
 
 
 def send_campaign(*, campaign_id: int, actor=None) -> Campaign:
-    """Send (or resume) a campaign. Three phases on purpose:
+    """Atomically claim a campaign and enqueue its background delivery.
 
-    1. CLAIM (a short locked transaction): flip DRAFT -> SENDING so a concurrent or
-       retried send serialises on the lock and the loser sees SENDING; a terminal
-       SENT/FAILED campaign 422s. A campaign already in SENDING (a previous run died
-       mid-send) is RESUMABLE — re-invoking processes only its remaining PENDING rows.
-    2. SEND (outside any transaction): the external SMS calls must NOT run inside a DB
-       transaction — a rollback can't unsend a message, and a row lock must not be held
-       across network I/O. Recipients are deduped by phone (siblings sharing a guardian
-       are texted once), and neither a send NOR a save failure aborts the batch.
-    3. FINALIZE: recompute counts from the persisted recipient rows, so the totals are
-       correct even after a partial/earlier run; leftover PENDING keeps it SENDING.
+    A current SENDING lease makes repeated clicks/task redeliveries idempotent. A stale
+    lease is replaced and resumed from the durable recipient rows. The provider loop is
+    never executed in the HTTP request in production.
     """
-    R = CampaignRecipient.Status
+    now = timezone.now()
+    stale_before = now - _CAMPAIGN_SEND_LEASE
+    claimed = False
     with transaction.atomic():
         campaign = Campaign.objects.select_for_update().filter(pk=campaign_id).first()
         if campaign is None:
             raise NotFoundException(_("Campaign not found."), code="campaign_not_found")
+        if campaign.status == Campaign.Status.FAILED:
+            # Provider failures can be ambiguous (a timeout may occur after Eskiz
+            # accepted the SMS). Automatically retrying those rows could double-text
+            # families, so expose an honest terminal error instead of claiming the
+            # failed campaign was already sent.
+            raise UnprocessableEntity(
+                _("Campaign delivery failed and cannot be retried safely; create a new campaign."),
+                code="campaign_delivery_failed",
+            )
         if campaign.status not in (Campaign.Status.DRAFT, Campaign.Status.SENDING):
             raise UnprocessableEntity(_("This campaign has already been sent."), code="campaign_already_sent")
-        if campaign.status == Campaign.Status.DRAFT:
-            campaign.status = Campaign.Status.SENDING
-            campaign.sent_by = actor
-            campaign.save(update_fields=["status", "sent_by", "updated_at"])
-
-    client = get_sms_client()
-    # Phones already delivered (this run or a prior partial run) — never text twice.
-    texted = set(campaign.recipients.filter(status=R.SENT).values_list("phone", flat=True))
-    # Honour an opt-out recorded AFTER the build: a now-suppressed phone is skipped, not
-    # sent (consent wins over a frozen recipient list).
-    suppressed = set(DoNotContact.objects.values_list("phone", flat=True))
-    for recipient in campaign.recipients.filter(status=R.PENDING):
-        now = timezone.now()
-        if recipient.phone in suppressed:
-            # Claim atomically (PENDING -> SKIPPED) so a racing invocation processes it once.
-            CampaignRecipient.objects.filter(pk=recipient.pk, status=R.PENDING).update(
-                status=R.SKIPPED, error="do_not_contact"
-            )
-            continue
-        # Per-recipient compare-and-swap CLAIM: flip PENDING -> SENT so exactly ONE worker
-        # owns this recipient even though the send loop runs outside the campaign row lock.
-        # The scheduled-dispatch beat can race a manual "send now" (or a redelivered task)
-        # on the same SENDING campaign; without this claim BOTH loops would call client.send
-        # for every recipient and the paid SMS provider would double-charge + double-text
-        # (a consent breach). A racer's UPDATE affects 0 rows -> it skips. We claim to SENT
-        # optimistically (never double-send is safer than never-under-send for paid SMS);
-        # a send failure rolls the row to FAILED below.
-        claimed = CampaignRecipient.objects.filter(pk=recipient.pk, status=R.PENDING).update(
-            status=R.SENT, sent_at=now, error=""
+        has_live_lease = bool(
+            campaign.status == Campaign.Status.SENDING
+            and campaign.send_claim_token
+            and campaign.send_heartbeat_at
+            and campaign.send_heartbeat_at > stale_before
         )
-        if not claimed:
-            continue  # another concurrent worker already claimed/sent this recipient
-        try:
-            if recipient.phone not in texted:  # siblings sharing a guardian -> texted once
-                client.send(phone=recipient.phone, text=campaign.message)
-                texted.add(recipient.phone)
-        except Exception as exc:  # one bad recipient must not abort the batch
-            CampaignRecipient.objects.filter(pk=recipient.pk).update(
-                status=R.FAILED, error=str(exc)[:255], sent_at=now
+        if not has_live_lease:
+            campaign.status = Campaign.Status.SENDING
+            campaign.send_claim_token = uuid.uuid4()
+            campaign.send_claimed_at = now
+            campaign.send_heartbeat_at = now
+            campaign.send_attempts += 1
+            campaign.last_error = ""
+            if campaign.sent_by_id is None:
+                campaign.sent_by = actor
+            campaign.save(
+                update_fields=[
+                    "status",
+                    "sent_by",
+                    "send_claim_token",
+                    "send_claimed_at",
+                    "send_heartbeat_at",
+                    "send_attempts",
+                    "last_error",
+                    "updated_at",
+                ]
             )
+            claimed = True
 
-    by = {row["status"]: row["n"] for row in campaign.recipients.values("status").annotate(n=Count("id"))}
-    campaign.sent_count = by.get(R.SENT, 0)
-    campaign.failed_count = by.get(R.FAILED, 0)
-    campaign.skipped_count = by.get(R.SKIPPED, 0)
-    campaign.sent_at = timezone.now()
-    if by.get(R.PENDING, 0):
-        campaign.status = Campaign.Status.SENDING  # partial — still resumable
-    elif campaign.sent_count == 0 and campaign.failed_count > 0:
-        campaign.status = Campaign.Status.FAILED
-    else:
-        campaign.status = Campaign.Status.SENT
-    campaign.save(
-        update_fields=["sent_count", "failed_count", "skipped_count", "sent_at", "status", "updated_at"]
-    )
+    if claimed:
+        _enqueue_campaign_delivery(campaign)
+        campaign.refresh_from_db()
     return campaign
 
 
-def dispatch_due_campaigns() -> int:
-    """Send every campaign whose scheduled send-time has arrived (F10-1 dynamic send date).
+def _enqueue_campaign_delivery(campaign: Campaign) -> None:
+    from celery_tasks.campaign_tasks import deliver_campaign
 
-    Runs inside the current tenant schema (the beat task fans it out per Center). Picks up
-    DRAFT campaigns with a non-null ``scheduled_at`` that is now in the past and sends each
-    via ``send_campaign``. Double-send safety does NOT come from this filter alone (a
-    dispatch can race a manual "send now" on the same campaign, and Celery may redeliver
-    the task): it comes from ``send_campaign``'s per-recipient compare-and-swap claim, which
-    guarantees each recipient's SMS is sent at most once even under concurrent invocations.
-    One campaign's failure never aborts the rest. Returns the number of campaigns dispatched."""
+    try:
+        deliver_campaign.delay(
+            campaign.pk,
+            str(campaign.send_claim_token),
+            _schema_name=current_schema(),
+        )
+    except Exception as exc:
+        # The durable SENDING row is the outbox. Make the lease immediately stale so
+        # the periodic dispatcher retries publication instead of stranding the blast.
+        logger.exception("Could not enqueue campaign %s delivery", campaign.pk)
+        Campaign.objects.filter(
+            pk=campaign.pk,
+            status=Campaign.Status.SENDING,
+            send_claim_token=campaign.send_claim_token,
+        ).update(
+            send_heartbeat_at=None,
+            last_error=f"queue: {exc}"[:255],
+        )
+
+
+def process_campaign_delivery(*, campaign_id: int, claim_token: str) -> str | None:
+    """Deliver recipients only while ``claim_token`` owns the campaign lease.
+
+    Recipient PENDING->SENT is an atomic compare-and-swap performed before the provider
+    call. This deliberately preserves the existing at-most-once policy for paid SMS:
+    after an ambiguous worker crash we may under-deliver, but never knowingly
+    double-charge/double-text a family.
+    """
+    with _campaign_delivery_mutex(campaign_id=campaign_id) as acquired:
+        if not acquired:
+            # A redelivered copy of this task is already running. The live worker owns
+            # the durable lease and will either finish or become recoverable after its
+            # heartbeat expires.
+            return None
+        return _process_campaign_delivery_owned(
+            campaign_id=campaign_id,
+            claim_token=claim_token,
+        )
+
+
+@contextmanager
+def _campaign_delivery_mutex(*, campaign_id: int) -> Iterator[bool]:
+    """Prevent concurrent workers from delivering one campaign.
+
+    Recipient CAS updates prevent duplicate *rows*, but two workers could otherwise
+    claim different siblings that share a guardian phone and both send it. PostgreSQL
+    session advisory locks are non-blocking, survive transaction boundaries used by the
+    per-recipient writes, and are automatically released if a worker connection dies.
+    """
+    if connection.vendor != "postgresql":  # pragma: no cover - production is PostgreSQL
+        yield True
+        return
+
+    key = f"campaign-delivery:{current_schema()}:{campaign_id}"
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", [key])
+        acquired = bool(cursor.fetchone()[0])
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", [key])
+
+
+def _process_campaign_delivery_owned(*, campaign_id: int, claim_token: str) -> str | None:
+    campaign = Campaign.objects.filter(
+        pk=campaign_id,
+        status=Campaign.Status.SENDING,
+        send_claim_token=claim_token,
+    ).first()
+    if campaign is None:
+        return None
+
+    R = CampaignRecipient.Status
+    client = get_sms_client()
+    texted = set(campaign.recipients.filter(status=R.SENT).values_list("phone", flat=True))
+    suppressed = set(DoNotContact.objects.values_list("phone", flat=True))
+
+    pending = campaign.recipients.filter(status=R.PENDING).only("id", "phone").iterator(chunk_size=100)
+    for index, recipient in enumerate(pending):
+        if index % _CAMPAIGN_HEARTBEAT_EVERY == 0 and not _heartbeat_campaign(
+            campaign_id=campaign_id,
+            claim_token=claim_token,
+        ):
+            return None
+
+        now = timezone.now()
+        if recipient.phone in suppressed:
+            CampaignRecipient.objects.filter(pk=recipient.pk, status=R.PENDING).update(
+                status=R.SKIPPED,
+                error="do_not_contact",
+            )
+            continue
+
+        recipient_claimed = CampaignRecipient.objects.filter(
+            pk=recipient.pk,
+            status=R.PENDING,
+        ).update(
+            status=R.SENT,
+            sent_at=now,
+            error="",
+        )
+        if not recipient_claimed:
+            continue
+        try:
+            if recipient.phone not in texted:
+                client.send(phone=recipient.phone, text=campaign.message)
+                texted.add(recipient.phone)
+        except Exception as exc:
+            CampaignRecipient.objects.filter(pk=recipient.pk).update(
+                status=R.FAILED,
+                error=str(exc)[:255],
+                sent_at=now,
+            )
+
+    return _finalize_campaign_delivery(campaign_id=campaign_id, claim_token=claim_token)
+
+
+def _heartbeat_campaign(*, campaign_id: int, claim_token: str) -> bool:
+    return bool(
+        Campaign.objects.filter(
+            pk=campaign_id,
+            status=Campaign.Status.SENDING,
+            send_claim_token=claim_token,
+        ).update(send_heartbeat_at=timezone.now())
+    )
+
+
+def _finalize_campaign_delivery(*, campaign_id: int, claim_token: str) -> str | None:
+    R = CampaignRecipient.Status
+    with transaction.atomic():
+        campaign = (
+            Campaign.objects.select_for_update()
+            .filter(
+                pk=campaign_id,
+                status=Campaign.Status.SENDING,
+                send_claim_token=claim_token,
+            )
+            .first()
+        )
+        if campaign is None:
+            return None
+        by = {row["status"]: row["n"] for row in campaign.recipients.values("status").annotate(n=Count("id"))}
+        campaign.sent_count = by.get(R.SENT, 0)
+        campaign.failed_count = by.get(R.FAILED, 0)
+        campaign.skipped_count = by.get(R.SKIPPED, 0)
+        campaign.send_claim_token = None
+        campaign.send_heartbeat_at = None
+        if by.get(R.PENDING, 0):
+            campaign.status = Campaign.Status.SENDING
+            campaign.last_error = "pending recipients remain"
+        elif campaign.sent_count == 0 and campaign.failed_count > 0:
+            campaign.status = Campaign.Status.FAILED
+            campaign.sent_at = timezone.now()
+        else:
+            campaign.status = Campaign.Status.SENT
+            campaign.sent_at = timezone.now()
+            campaign.last_error = ""
+        campaign.save(
+            update_fields=[
+                "sent_count",
+                "failed_count",
+                "skipped_count",
+                "sent_at",
+                "status",
+                "send_claim_token",
+                "send_heartbeat_at",
+                "last_error",
+                "updated_at",
+            ]
+        )
+        return campaign.status
+
+
+def record_campaign_delivery_error(*, campaign_id: int, claim_token: str, error: Exception) -> None:
+    Campaign.objects.filter(
+        pk=campaign_id,
+        status=Campaign.Status.SENDING,
+        send_claim_token=claim_token,
+    ).update(last_error=str(error)[:255])
+
+
+def dispatch_due_campaigns() -> int:
+    """Queue due drafts and recover stale SENDING leases in a bounded sweep."""
     now = timezone.now()
+    stale_before = now - _CAMPAIGN_SEND_LEASE
     due_ids = list(
         Campaign.objects.filter(
-            status=Campaign.Status.DRAFT, scheduled_at__isnull=False, scheduled_at__lte=now
-        ).values_list("pk", flat=True)
+            Q(
+                status=Campaign.Status.DRAFT,
+                scheduled_at__isnull=False,
+                scheduled_at__lte=now,
+            )
+            | Q(status=Campaign.Status.SENDING)
+            & (
+                Q(send_claim_token__isnull=True)
+                | Q(send_heartbeat_at__isnull=True)
+                | Q(send_heartbeat_at__lte=stale_before)
+            )
+        )
+        .order_by("scheduled_at", "send_heartbeat_at", "pk")
+        .values_list("pk", flat=True)[:_CAMPAIGN_DISPATCH_BATCH_SIZE]
     )
     dispatched = 0
     for campaign_id in due_ids:
@@ -209,6 +394,7 @@ def dispatch_due_campaigns() -> int:
             send_campaign(campaign_id=campaign_id)
             dispatched += 1
         except Exception:  # a single bad campaign must not stop the sweep
+            logger.exception("Could not dispatch due campaign %s", campaign_id)
             continue
     return dispatched
 

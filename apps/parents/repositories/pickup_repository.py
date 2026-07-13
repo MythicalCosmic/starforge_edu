@@ -24,6 +24,8 @@ class PickupRepository(BaseRepository[PickupAuthorization], IPickupRepository):
             user=user,
             roles=roles,
             own_filter={"student__guardians__parent__user": user},
+            branch_field="student__branch_id",
+            department_field="student__current_cohort__department_id",
         )
 
     def get_scoped(self, *, user, roles, pk: int) -> PickupAuthorization | None:

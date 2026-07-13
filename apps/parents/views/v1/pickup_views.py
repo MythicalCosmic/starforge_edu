@@ -33,7 +33,11 @@ def pickups_collection_view(request: HttpRequest) -> HttpResponse:
         check_perm(request, f"{_RESOURCE}:read")
         qs = _service().scoped_list(user=request.user, roles=get_user_roles(request))
         qs = apply_filters(
-            request, qs, filter_fields=_FILTERS, ordering_fields=("created_at",), default_ordering="-created_at"
+            request,
+            qs,
+            filter_fields=_FILTERS,
+            ordering_fields=("created_at",),
+            default_ordering="-created_at",
         )
         items, total, page, size = paginate(request, qs)
         return paginated([pickup_to_dict(p) for p in items], total=total, page=page, page_size=size)
@@ -56,7 +60,9 @@ def pickups_collection_view(request: HttpRequest) -> HttpResponse:
             relationship=str_field(body, "relationship"),
             is_active=bool_field(body, "is_active", default=True),
         )
-        return created(pickup_to_dict(_service().create(dto)))
+        return created(
+            pickup_to_dict(_service().create(dto, user=request.user, roles=get_user_roles(request)))
+        )
     return error("Method not allowed.", code="method_not_allowed", status=405)
 
 
@@ -72,7 +78,16 @@ def pickup_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
         return success(pickup_to_dict(pickup))
     if request.method in ("PUT", "PATCH"):
         # PUT and PATCH are both partial here — the deliberate off-DRF convention.
-        return success(pickup_to_dict(_service().update(pickup, _changes(read_json(request)))))
+        return success(
+            pickup_to_dict(
+                _service().update(
+                    pickup,
+                    _changes(read_json(request)),
+                    user=request.user,
+                    roles=get_user_roles(request),
+                )
+            )
+        )
     if request.method == "DELETE":
         _service().delete(pickup)
         return no_content()

@@ -88,7 +88,9 @@ def reward_type_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
     if read:
         return success(reward_type_to_dict(reward_type))
     if request.method in ("PUT", "PATCH"):
-        return success(reward_type_to_dict(_type_service().update(reward_type, _type_changes(read_json(request)))))
+        return success(
+            reward_type_to_dict(_type_service().update(reward_type, _type_changes(read_json(request))))
+        )
     # No DELETE — a type with grants is PROTECTed and kept for the audit trail.
     return error("Method not allowed.", code="method_not_allowed", status=405)
 

@@ -36,10 +36,14 @@ class IAssignmentService(ABC):
     def submissions_of(self, assignment: Assignment, *, user, roles: set[str]) -> QuerySet[Submission]: ...
 
     @abstractmethod
-    def submit(self, assignment: Assignment, *, student, text: str, attachment_keys: list) -> Submission: ...
+    def submit(
+        self, assignment: Assignment, *, student, text: str, attachment_keys: list, actor=None
+    ) -> Submission: ...
 
     @abstractmethod
-    def upload_url(self, *, filename: str, content_type: str, size_bytes: int) -> dict[str, Any]: ...
+    def upload_url(
+        self, *, filename: str, content_type: str, size_bytes: int, requested_by=None
+    ) -> dict[str, Any]: ...
 
 
 class ISubmissionService(ABC):

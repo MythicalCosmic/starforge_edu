@@ -35,9 +35,14 @@ from core.container import container
 from core.exceptions import NotFoundException, ValidationException
 from core.http import bool_field, parse_bool, read_json
 from core.listing import apply_filters, paginate
-from core.permissions import get_user_roles
+from core.permissions import Role, get_user_roles
 from core.responses import created, error, no_content, paginated, success
-from core.scoping import assert_branch_id_in_scope, assert_in_branch_scope
+from core.scoping import (
+    assert_branch_id_in_scope,
+    assert_in_branch_scope,
+    assert_in_role_membership_scope,
+    scope_to_branches,
+)
 
 # --- service accessors -----------------------------------------------------
 
@@ -276,7 +281,7 @@ def time_slots_collection_view(request: HttpRequest) -> HttpResponse:
         check_perm(request, "schedule:read")
         qs = apply_filters(
             request,
-            _slot_service().list_slots(),
+            scope_to_branches(request, _slot_service().list_slots()),
             filter_fields=("branch",),
             ordering_fields=("order", "start_time"),
         )
@@ -442,7 +447,14 @@ def _assert_rule_branch_scope(request: HttpRequest, changes: dict[str, Any]) -> 
         obj = model.objects.filter(pk=changes[field]).first()
         if obj is None:
             raise _reject(field, f"{field} does not exist.")
-        assert_branch_id_in_scope(request, obj.branch_id)
+        if field == "cohort":
+            assert_in_role_membership_scope(
+                request,
+                obj,
+                roles={Role.HEAD_OF_DEPT, Role.REGISTRAR, Role.IT},
+            )
+        else:
+            assert_branch_id_in_scope(request, obj.branch_id)
         branches.add(obj.branch_id)
     if len(branches) > 1:
         raise _reject("cohort", "cohort, teacher and room must belong to the same branch.")
@@ -476,11 +488,7 @@ def rules_collection_view(request: HttpRequest) -> HttpResponse:
 def rule_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
     read = request.method in ("GET", "HEAD")
     check_perm(request, "schedule:read" if read else "schedule:write")
-    rule = (
-        _rule_service().get_scoped(pk=pk, user=request.user, roles=get_user_roles(request))
-        if read
-        else _rule_service().get(pk=pk)
-    )
+    rule = _rule_service().get_scoped(pk=pk, user=request.user, roles=get_user_roles(request))
     if rule is None:
         raise NotFoundException(code="not_found")
     if read:
@@ -505,7 +513,7 @@ def rule_bulk_reschedule_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method != "POST":
         return _method_not_allowed()
     check_perm(request, "schedule:write")
-    rule = _rule_service().get(pk=pk)
+    rule = _rule_service().get_scoped(pk=pk, user=request.user, roles=get_user_roles(request))
     if rule is None:
         raise NotFoundException(code="not_found")
     # Object-level branch scope, same as rule_detail_view's mutating verbs: bulk-reschedule
@@ -583,10 +591,7 @@ def lesson_cancel_view(request: HttpRequest, pk: int) -> HttpResponse:
     lesson = _lesson_service().get_scoped(pk=pk, user=request.user, roles=get_user_roles(request))
     if lesson is None:
         raise NotFoundException(code="not_found")
-    # A branch-scoped writer (HEAD_OF_DEPT / REGISTRAR) may only cancel a lesson in their own
-    # branch: scoped_lessons returns EVERY lesson for STAFF_ROLES, so without this a bare-pk
-    # fetch is a cross-branch write + a cancellation-notification blast to another branch's
-    # cohort. Mirrors rule_detail_view / rule_bulk_reschedule_view. cohort is select_related.
+    # Defense in depth after the scoped lookup: never let an action cross its branch.
     assert_branch_id_in_scope(request, lesson.cohort.branch_id)
     data = read_json(request)
     raw = data.get("reason", "")

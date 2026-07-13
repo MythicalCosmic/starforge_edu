@@ -21,6 +21,7 @@ from celery_tasks import (  # noqa: F401
     cleanup_tasks,
     content_tasks,
     finance_tasks,
+    health_tasks,
     notification_tasks,
     payment_tasks,
     print_tasks,

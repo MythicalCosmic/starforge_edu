@@ -83,15 +83,9 @@ def create_staff_account(
 @transaction.atomic
 def deactivate_staff_account(staff: StaffProfile) -> None:
     """Disable login and revoke grants/sessions without destroying audit history."""
-    now = timezone.now()
-    staff.is_active = False
-    staff.save(update_fields=["is_active", "updated_at"])
-    staff.user.is_active = False
-    staff.user.save(update_fields=["is_active"])
-    RoleMembership.objects.filter(user=staff.user, revoked_at__isnull=True).update(revoked_at=now)
-    from core.session_auth import revoke_all_for_user
+    from apps.users.services import revoke_role_account_access
 
-    revoke_all_for_user(staff.user_id)
+    revoke_role_account_access(staff)
 
 
 def _teacher_profile_model():

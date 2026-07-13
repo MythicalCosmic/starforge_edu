@@ -43,11 +43,25 @@ KIND_ABSENCE_DEDUCTION = "absence_deduction"
 # A money-OUT kind (acts at disburse) paying a named STAFF recipient (cash reward,
 # F17-1). Built by apps.rewards; the recipient's User id is pinned in the payload.
 KIND_REWARD = "reward"
+KIND_EXPENSE = "expense_record"
 
 # F13-1: a teacher salary payout, its amount COMPUTED from the teacher's dynamic PayoutPolicy
 # (apps.teachers) — hourly / %-of-collected-tuition / flat-monthly. Money-OUT to the teacher;
 # the teacher's User id + payee label + the computed breakdown are pinned in the payload.
 KIND_SALARY_PREP = "salary_prep"
+
+# The cashier records the approved movement; they do not get to invert its sign
+# or recategorize it at the last step. ``other``/``event_split`` stay flexible,
+# while known receipt/payout kinds are pinned to their accounting direction.
+_FORCED_OUT_KINDS = {
+    KIND_EXPENSE,
+    "expense",
+    KIND_LOAN,
+    "procurement",
+    KIND_REWARD,
+    KIND_SALARY_PREP,
+}
+_FORCED_IN_KINDS = {"book_cash"}
 
 # Money/percent columns are NUMERIC(_, 2); normalize payload values to that scale.
 _TWO_PLACES = Decimal("0.01")
@@ -707,7 +721,9 @@ def _apply_approval_effect(req: ApprovalRequest, actor) -> None:
     """Dispatch the kind-specific side-effect that fires the instant a request is
     APPROVED. Money-moving kinds (loan/expense/...) act at disburse time instead;
     decision kinds with an effect (discount, payment_delay) act here."""
-    if req.kind == KIND_DISCOUNT:
+    if req.kind == KIND_EXPENSE:
+        _apply_expense_approval_effect(req, actor)
+    elif req.kind == KIND_DISCOUNT:
         _apply_discount_effect(req, actor)
     elif req.kind == KIND_FINE:
         _apply_fine_effect(req, actor)
@@ -715,6 +731,84 @@ def _apply_approval_effect(req: ApprovalRequest, actor) -> None:
         _apply_absence_deduction_effect(req, actor)
     elif req.kind == KIND_PAYMENT_DELAY:
         _apply_payment_delay_effect(req, actor)
+
+
+def _expense_for_request(req: ApprovalRequest):
+    """Lock and validate the expense named by an internal approval request.
+
+    The generic approvals endpoint cannot create ``expense`` requests; this
+    consistency check is still a backstop against hand-authored rows or damaged
+    data crossing branches/amounts before money moves.
+    """
+    from apps.finance.models import Expense
+
+    expense_id = (req.payload or {}).get("expense_id")
+    if not isinstance(expense_id, int) or isinstance(expense_id, bool):
+        raise UnprocessableEntity(
+            _("The approval request is not linked to its expense."),
+            code="expense_approval_link_invalid",
+        )
+    expense = Expense.objects.select_for_update().filter(pk=expense_id).first()
+    if expense is None or expense.approval_request_id != req.pk:
+        raise UnprocessableEntity(
+            _("The approval request is not linked to its expense."),
+            code="expense_approval_link_invalid",
+        )
+    if expense.branch_id != req.branch_id or expense.amount_uzs != req.amount_uzs:
+        raise UnprocessableEntity(
+            _("The expense no longer matches its approved branch and amount."),
+            code="expense_approval_mismatch",
+        )
+    return expense
+
+
+def _apply_expense_approval_effect(req: ApprovalRequest, actor) -> None:
+    from apps.finance.models import Expense
+
+    if actor is None:
+        raise PermissionException(_("An identified approver is required."), code="approver_required")
+    expense = _expense_for_request(req)
+    if expense.status != Expense.Status.PENDING:
+        raise UnprocessableEntity(_("Only a pending expense can be approved."), code="expense_not_pending")
+    # Expense money always uses strict maker-checker, including for a superuser.
+    if expense.created_by_id == getattr(actor, "id", None):
+        raise PermissionException(_("You cannot approve your own expense."), code="self_approval")
+    expense.status = Expense.Status.APPROVED
+    expense.approved_by = actor
+    expense.approved_at = timezone.now()
+    expense.save(update_fields=["status", "approved_by", "approved_at"])
+
+
+def _reject_expense_effect(req: ApprovalRequest, actor, note: str) -> None:
+    from apps.finance.models import Expense
+
+    expense = _expense_for_request(req)
+    if expense.status not in (Expense.Status.PENDING, Expense.Status.APPROVED):
+        raise UnprocessableEntity(_("This expense can no longer be rejected."), code="expense_not_rejectable")
+    expense.status = Expense.Status.REJECTED
+    expense.reject_reason = note[:255]
+    expense.approved_by = actor
+    expense.save(update_fields=["status", "reject_reason", "approved_by"])
+
+
+def _pay_expense_effect(req: ApprovalRequest, actor, entry: LedgerEntry) -> None:
+    from apps.finance.models import Expense
+
+    if actor is None:
+        raise PermissionException(_("An identified payer is required."), code="payer_required")
+    expense = _expense_for_request(req)
+    if expense.status != Expense.Status.APPROVED:
+        raise UnprocessableEntity(_("Only an approved expense can be paid."), code="expense_not_approved")
+    actor_id = getattr(actor, "id", None)
+    if actor_id in {expense.created_by_id, expense.approved_by_id}:
+        raise PermissionException(
+            _("The expense maker or approver cannot also pay it."), code="self_disbursement"
+        )
+    expense.status = Expense.Status.PAID
+    expense.payment_method_id = entry.payment_method_id
+    expense.paid_by = actor
+    expense.paid_at = timezone.now()
+    expense.save(update_fields=["status", "payment_method", "paid_by", "paid_at"])
 
 
 def _reverse_discount_effect(req: ApprovalRequest) -> None:
@@ -782,7 +876,9 @@ def _reverse_approval_effect(req: ApprovalRequest, actor) -> None:
     """Compensate the on-approval side-effect when an already-APPROVED request is
     overturned (rejected). Money-moving kinds need no reversal here — they only act
     at disburse. Runs inside reject()'s transaction so the undo is atomic."""
-    if req.kind == KIND_DISCOUNT:
+    if req.kind == KIND_EXPENSE:
+        _reject_expense_effect(req, actor, req.decision_note)
+    elif req.kind == KIND_DISCOUNT:
         _reverse_discount_effect(req)
     elif req.kind == KIND_FINE:
         _reverse_fine_effect(req)
@@ -802,9 +898,10 @@ def _locked(request_id: int) -> ApprovalRequest:
 def _assert_not_self_approval(req: ApprovalRequest, actor) -> None:
     """Segregation of duties / maker-checker: the person who raised a request may
     never sign it off (anti-fraud DNA — "no untracked favours"). Enforced in the
-    service so every caller is covered, not just the view. Superusers are exempt."""
-    if actor is None or getattr(actor, "is_superuser", False):
-        return
+    service so every caller is covered, not just the view. Elevated privileges do
+    not turn one person into two people for a financial control."""
+    if actor is None:
+        raise PermissionException(_("An identified approver is required."), code="approver_required")
     if req.requested_by_id and req.requested_by_id == getattr(actor, "id", None):
         raise PermissionException(_("You cannot approve your own request."), code="self_approval")
 
@@ -835,8 +932,8 @@ def _assert_not_beneficiary_self_dealing(req: ApprovalRequest, actor) -> None:
     approve nor disburse their own payout. Without this, a colleague keys the request
     naming the beneficiary, and the beneficiary (if they hold approve/disburse rights)
     signs off the payout to themselves — the requester self-approval block alone misses
-    it. Applied on BOTH approve and disburse. Superusers are exempt."""
-    if actor is None or getattr(actor, "is_superuser", False):
+    it. Applied on BOTH approve and disburse, including for superusers."""
+    if actor is None:
         return
     spec = _BENEFICIARY_SELF_DEALING.get(req.kind)
     if spec is None:
@@ -860,6 +957,18 @@ def _assert_not_beneficiary_self_dealing(req: ApprovalRequest, actor) -> None:
         )
     if beneficiary_id == getattr(actor, "id", None):
         raise PermissionException(message, code=code)
+
+
+def _assert_separate_disburser(req: ApprovalRequest, actor) -> None:
+    """The maker and checker may not also be the person releasing money."""
+    if actor is None:
+        raise PermissionException(_("An identified disburser is required."), code="disburser_required")
+    actor_id = getattr(actor, "id", None)
+    if actor_id in {req.requested_by_id, req.decided_by_id}:
+        raise PermissionException(
+            _("The requester or approver cannot also disburse this payment."),
+            code="self_disbursement",
+        )
 
 
 @transaction.atomic
@@ -902,6 +1011,8 @@ def reject(*, request_id: int, actor=None, note: str = "") -> ApprovalRequest:
         # Overturning an approval whose effect already fired (discount / payment_delay)
         # must undo that effect, atomically, or a "rejected" decision still bites.
         _reverse_approval_effect(req, actor)
+    elif req.kind == KIND_EXPENSE:
+        _reject_expense_effect(req, actor, note)
     req.save(update_fields=["status", "decided_by", "decided_at", "decision_note", "payload", "updated_at"])
     _notify(event_type="approval.rejected", recipient_id=req.requested_by_id, req=req)
     return req
@@ -918,6 +1029,8 @@ def cancel(*, request_id: int, actor=None) -> ApprovalRequest:
     req.status = ApprovalRequest.Status.CANCELLED
     req.decided_by = actor
     req.decided_at = timezone.now()
+    if req.kind == KIND_EXPENSE:
+        _reject_expense_effect(req, actor, str(_("Cancelled by requester.")))
     req.save(update_fields=["status", "decided_by", "decided_at", "updated_at"])
     return req
 
@@ -945,11 +1058,18 @@ def disburse(
     _assert_not_beneficiary_self_dealing(req, actor)
     if req.amount_uzs is None:
         raise UnprocessableEntity(_("This request has no amount to disburse."), code="approval_no_amount")
+    _assert_separate_disburser(req, actor)
     method = PaymentMethod.objects.filter(pk=payment_method_id, is_active=True).first()
     if method is None:
         raise UnprocessableEntity(_("Unknown or inactive payment method."), code="payment_method_invalid")
 
     pinned_payee = req.payload.get("party_label")
+    if req.kind in _FORCED_OUT_KINDS:
+        direction = LedgerEntry.Direction.OUT
+        entry_type = "expense" if req.kind == KIND_EXPENSE else req.kind
+    elif req.kind in _FORCED_IN_KINDS:
+        direction = LedgerEntry.Direction.IN
+        entry_type = req.kind
     if pinned_payee:
         # A request that pre-designated its payee (loan borrower / procurement
         # supplier / reward recipient) gets an IMMUTABLE ledger row: the disburser
@@ -957,8 +1077,9 @@ def disburse(
         # away from the approved kind. The payee, money-OUT direction, and entry_type
         # are fixed by the approved request, not the cashier (anti-fraud DNA).
         party_label = pinned_payee
-        direction = LedgerEntry.Direction.OUT
-        entry_type = req.kind
+        if req.kind not in _FORCED_IN_KINDS:
+            direction = LedgerEntry.Direction.OUT
+            entry_type = "expense" if req.kind == KIND_EXPENSE else req.kind
 
     entry = LedgerEntry.objects.create(
         direction=direction,
@@ -975,6 +1096,8 @@ def disburse(
         note=req.title[:255],
         created_by=actor,
     )
+    if req.kind == KIND_EXPENSE:
+        _pay_expense_effect(req, actor, entry)
     req.status = ApprovalRequest.Status.DISBURSED
     req.disbursed_by = actor
     req.disbursed_at = timezone.now()

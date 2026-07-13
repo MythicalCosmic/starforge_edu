@@ -60,10 +60,23 @@ def _get_visible(request: HttpRequest, pk: int) -> Form:
     return form
 
 
+def _get_manageable(request: HttpRequest, pk: int) -> Form:
+    """Resolve the narrower scope for lifecycle and response-management actions.
+
+    A branch-scoped builder may read and answer a published centre-wide form, but
+    that read leg must not let them edit/close it or inspect all respondents.
+    """
+    form = _get_visible(request, pk)
+    is_unscoped, _can_write, branch_ids = _scope(request)
+    if is_unscoped or form.created_by_id == request.user.pk or form.branch_id in branch_ids:
+        return form
+    raise NotFoundException(code="not_found")
+
+
 @csrf_exempt
 @require_auth
 def forms_collection_view(request: HttpRequest) -> HttpResponse:
-    if request.method == "GET":
+    if request.method in ("GET", "HEAD"):
         check_perm(request, f"{_RESOURCE}:read")
         is_unscoped, can_write, branch_ids = _scope(request)
         qs = _service().scoped_list(
@@ -90,11 +103,18 @@ def forms_collection_view(request: HttpRequest) -> HttpResponse:
 def form_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
     read = request.method in ("GET", "HEAD")
     check_perm(request, f"{_RESOURCE}:read" if read else f"{_RESOURCE}:write")
-    form = _get_visible(request, pk)
+    form = _get_visible(request, pk) if read else _get_manageable(request, pk)
     if read:
         return success(form_to_dict(form))
     if request.method in ("PUT", "PATCH"):
-        return success(form_to_dict(_service().update(form, _update_changes(read_json(request)))))
+        return success(
+            form_to_dict(
+                _service().update(
+                    form,
+                    _update_changes(read_json(request), partial=request.method == "PATCH"),
+                )
+            )
+        )
     if request.method == "DELETE":
         _service().delete(form)  # draft-only (422 otherwise)
         return no_content()
@@ -107,7 +127,7 @@ def form_add_field_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method != "POST":
         return error("Method not allowed.", code="method_not_allowed", status=405)
     check_perm(request, f"{_RESOURCE}:write")
-    form = _get_visible(request, pk)
+    form = _get_manageable(request, pk)
     field = _service().add_field(form, _field_dto(read_json(request)))
     from apps.forms.presenters import field_to_dict
 
@@ -120,7 +140,7 @@ def form_publish_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method != "POST":
         return error("Method not allowed.", code="method_not_allowed", status=405)
     check_perm(request, f"{_RESOURCE}:write")
-    return success(form_to_dict(_service().publish(_get_visible(request, pk))))
+    return success(form_to_dict(_service().publish(_get_manageable(request, pk))))
 
 
 @csrf_exempt
@@ -129,7 +149,7 @@ def form_close_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method != "POST":
         return error("Method not allowed.", code="method_not_allowed", status=405)
     check_perm(request, f"{_RESOURCE}:write")
-    return success(form_to_dict(_service().close(_get_visible(request, pk))))
+    return success(form_to_dict(_service().close(_get_manageable(request, pk))))
 
 
 @csrf_exempt
@@ -148,10 +168,10 @@ def form_submit_view(request: HttpRequest, pk: int) -> HttpResponse:
 @csrf_exempt
 @require_auth
 def form_responses_view(request: HttpRequest, pk: int) -> HttpResponse:
-    if request.method != "GET":
+    if request.method not in ("GET", "HEAD"):
         return error("Method not allowed.", code="method_not_allowed", status=405)
     check_perm(request, f"{_RESOURCE}:write")
-    form = _get_visible(request, pk)
+    form = _get_manageable(request, pk)
     items, total, page, size = paginate(request, _service().responses_of(form))
     return paginated([response_to_dict(r) for r in items], total=total, page=page, page_size=size)
 
@@ -159,10 +179,10 @@ def form_responses_view(request: HttpRequest, pk: int) -> HttpResponse:
 @csrf_exempt
 @require_auth
 def form_summary_view(request: HttpRequest, pk: int) -> HttpResponse:
-    if request.method != "GET":
+    if request.method not in ("GET", "HEAD"):
         return error("Method not allowed.", code="method_not_allowed", status=405)
     check_perm(request, f"{_RESOURCE}:write")
-    return success(_service().summary(_get_visible(request, pk)))
+    return success(_service().summary(_get_manageable(request, pk)))
 
 
 @csrf_exempt
@@ -171,7 +191,7 @@ def form_analyze_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method != "POST":
         return error("Method not allowed.", code="method_not_allowed", status=405)
     check_perm(request, f"{_RESOURCE}:write")
-    form = _get_visible(request, pk)
+    form = _get_manageable(request, pk)
     ai_request = _service().analyze(form, requested_by=request.user)
     # 202 Accepted — the narrative is produced async; poll /ai/requests/{id}/.
     return success({"request_id": ai_request.pk, "status": ai_request.status}, status=202)
@@ -201,29 +221,39 @@ def _create(request: HttpRequest) -> HttpResponse:
     return created(form_to_dict(form))
 
 
-def _update_changes(body: dict[str, Any]) -> dict[str, Any]:
+def _update_changes(body: dict[str, Any], *, partial: bool) -> dict[str, Any]:
     changes: dict[str, Any] = {}
-    if "title" in body:
+    if "title" in body or not partial:
+        if "title" not in body:
+            raise ValidationException(
+                "Title is required.", code="validation_error", fields={"title": ["This field is required."]}
+            )
         title = str_field(body, "title", max_length=200).strip()
         if not title:
             raise ValidationException(
                 "Title may not be blank.", code="validation_error", fields={"title": ["May not be blank."]}
             )
         changes["title"] = title
-    if "description" in body:
+    if "description" in body or not partial:
+        if "description" in body and body["description"] is None:
+            raise ValidationException(
+                "description may not be null.",
+                code="validation_error",
+                fields={"description": ["May not be null."]},
+            )
         changes["description"] = str_field(body, "description")
-    if "is_anonymous" in body:
+    if "is_anonymous" in body or not partial:
         changes["is_anonymous"] = bool_field(body, "is_anonymous")
-    if "allow_multiple" in body:
+    if "allow_multiple" in body or not partial:
         changes["allow_multiple"] = bool_field(body, "allow_multiple")
-    if "opens_at" in body:
+    if "opens_at" in body or not partial:
         changes["opens_at"] = _optional_datetime(body, "opens_at")
-    if "closes_at" in body:
+    if "closes_at" in body or not partial:
         changes["closes_at"] = _optional_datetime(body, "closes_at")
-    if "audience_roles" in body:
-        changes["audience_roles"] = _audience_roles(body["audience_roles"])
-    if "audience_user_ids" in body:
-        changes["audience_user_ids"] = _audience_user_ids(body["audience_user_ids"])
+    if "audience_roles" in body or not partial:
+        changes["audience_roles"] = _audience_roles(body.get("audience_roles", []))
+    if "audience_user_ids" in body or not partial:
+        changes["audience_user_ids"] = _audience_user_ids(body.get("audience_user_ids", []))
     return changes
 
 
@@ -271,7 +301,7 @@ def _audience_user_ids(raw: Any) -> list[int]:
 
 
 def _field_dto(body: dict[str, Any]) -> AddFieldDTO:
-    label = str_field(body, "label", max_length=255)
+    label = str_field(body, "label", max_length=255).strip()
     if not label:
         raise ValidationException(
             "Label is required.", code="validation_error", fields={"label": ["This field is required."]}
@@ -288,13 +318,26 @@ def _field_dto(body: dict[str, Any]) -> AddFieldDTO:
         raise ValidationException(
             "Options must be a list.", code="validation_error", fields={"options": ["Must be a list."]}
         )
+    order = int_field(body, "order")
+    if order is not None and order < 0:
+        raise ValidationException(
+            "order must be zero or greater.",
+            code="validation_error",
+            fields={"order": ["Must be zero or greater."]},
+        )
+    if field_type not in FormField.CHOICE_TYPES and options:
+        raise ValidationException(
+            "Only choice fields may define options.",
+            code="validation_error",
+            fields={"options": ["Options are only valid for choice fields."]},
+        )
     return AddFieldDTO(
         label=label,
         field_type=field_type,
         required=bool_field(body, "required"),
-        order=int_field(body, "order"),
+        order=order,
         options=options,
-        help_text=str_field(body, "help_text", max_length=255),
+        help_text=str_field(body, "help_text", max_length=255).strip(),
     )
 
 

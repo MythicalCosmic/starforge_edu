@@ -14,8 +14,9 @@ Concerns, ordered in `config.settings.base.MIDDLEWARE`:
 
 from __future__ import annotations
 
-import hashlib
 import re
+import threading
+import time
 import uuid
 from collections.abc import Callable
 
@@ -69,33 +70,91 @@ class HealthCheckMiddleware:
     def __init__(self, get_response: GetResponse) -> None:
         self.get_response = get_response
 
+    _lock = threading.Lock()
+    _probe_buckets: dict[str, tuple[float, int]] = {}
+    _cached_ready: tuple[float, dict[str, object], int] | None = None
+
     def __call__(self, request: HttpRequest) -> HttpResponse:
         if request.path == "/healthz/live":
             return JsonResponse({"status": "ok"})
         if request.path == "/healthz/ready":
+            if not self._admit_probe(request):
+                response = JsonResponse(
+                    {"success": False, "code": "throttled", "message": "Too many readiness probes."},
+                    status=429,
+                )
+                response["Retry-After"] = "60"
+                return response
             return self._ready()
         return self.get_response(request)
 
+    @classmethod
+    def _admit_probe(cls, request: HttpRequest) -> bool:
+        from core.utils import client_ip
+
+        limit, window = _parse_rate(getattr(settings, "HEALTH_READY_RATELIMIT", "30/min"))
+        ident = client_ip(request) or "unknown"
+        now = time.monotonic()
+        with cls._lock:
+            started, count = cls._probe_buckets.get(ident, (now, 0))
+            if now - started >= window:
+                started, count = now, 0
+            count += 1
+            cls._probe_buckets[ident] = (started, count)
+            if len(cls._probe_buckets) > 4096:
+                cls._probe_buckets.pop(next(iter(cls._probe_buckets)))
+            return count <= limit
+
+    @classmethod
+    def _ready(cls) -> HttpResponse:
+        ttl = float(getattr(settings, "HEALTH_READY_CACHE_SECONDS", 0))
+        now = time.monotonic()
+        with cls._lock:
+            cached = cls._cached_ready
+            if ttl > 0 and cached is not None and cached[0] > now:
+                return JsonResponse(cached[1], status=cached[2])
+
+        body, status = cls._readiness_result()
+        if ttl > 0:
+            with cls._lock:
+                cls._cached_ready = (now + ttl, body, status)
+        return JsonResponse(body, status=status)
+
     @staticmethod
-    def _ready() -> HttpResponse:
+    def _readiness_result() -> tuple[dict[str, object], int]:
         try:
             with connection.cursor() as cursor:
                 cursor.execute("SELECT 1")
         except Exception:
-            return JsonResponse(
-                {"error": {"code": "not_ready", "detail": "Database unavailable."}},
-                status=503,
-            )
+            return {
+                "success": False,
+                "code": "not_ready",
+                "message": "Database unavailable.",
+            }, 503
         try:
             from infrastructure.cache.redis_client import get_redis
 
-            get_redis().ping()
+            redis = get_redis()
+            redis.ping()
         except Exception:
-            return JsonResponse(
-                {"error": {"code": "not_ready", "detail": "Cache unavailable."}},
-                status=503,
-            )
-        return JsonResponse({"status": "ready"})
+            return {
+                "success": False,
+                "code": "not_ready",
+                "message": "Cache unavailable.",
+            }, 503
+        if getattr(settings, "HEALTH_REQUIRE_CELERY_HEARTBEAT", False):
+            from celery_tasks.health_tasks import RUNTIME_HEARTBEAT_KEY
+
+            try:
+                if not redis.get(RUNTIME_HEARTBEAT_KEY):
+                    raise RuntimeError("missing heartbeat")
+            except Exception:
+                return {
+                    "success": False,
+                    "code": "not_ready",
+                    "message": "Background workers unavailable.",
+                }, 503
+        return {"status": "ready"}, 200
 
 
 class InactiveTenantMiddleware:
@@ -139,14 +198,15 @@ class ApiRateLimitMiddleware:
     ``UserRateThrottle``/``AnonRateThrottle`` pair the migrated plain views no
     longer pass through (they bypass DRF dispatch entirely).
 
-    A request carrying a Bearer token is bucketed per TOKEN (hashed — raw session
-    keys never become cache keys) at the ``user`` rate; anything else per client
-    IP at the stricter ``anon`` rate. Sits before tenant resolution so a flood is
-    rejected before it costs a schema lookup. OPTIONS preflights are exempt (CORS
+    Every request is first bucketed by client IP, regardless of the Authorization
+    value. Credential-free traffic also receives the stricter anonymous cap;
+    valid sessions receive a stable user-id cap only after authentication. It
+    sits before tenant resolution so a flood is rejected before it costs a schema
+    lookup. OPTIONS preflights are exempt (CORS
     preflights never reached DRF's view-level throttles either). Endpoint-specific
     limits (login, bulk-import, OTP) still apply on top — the tighter bound wins.
 
-    Rates come from ``settings.API_RATELIMIT_USER`` / ``API_RATELIMIT_ANON``
+    Rates come from ``settings.API_RATELIMIT_PREAUTH`` / ``API_RATELIMIT_ANON``
     (DRF-format strings, read lazily so ``override_settings`` works in tests).
     """
 
@@ -191,27 +251,37 @@ class ApiRateLimitMiddleware:
             from core.ratelimit import check_rate
             from core.utils import client_ip
 
-            auth = request.META.get("HTTP_AUTHORIZATION", "")
-            if auth[:7].lower() == "bearer " and auth[7:].strip():
-                # Hash the opaque session key: per-user bucketing without ever
-                # writing the credential into a cache key.
-                ident = hashlib.sha256(auth[7:].strip().encode()).hexdigest()[:32]
-                rate = getattr(settings, "API_RATELIMIT_USER", "1000/min")
-                scope = "api_user"
-            else:
-                ident = client_ip(request) or "anon"
-                rate = getattr(settings, "API_RATELIMIT_ANON", "60/min")
-                scope = "api_anon"
-            limit, window = _parse_rate(rate)
+            ident = client_ip(request) or "anon"
             try:
-                check_rate(scope=scope, key=ident, limit=limit, window=window)
+                # Always charge the source IP before tenant resolution. Random,
+                # rotating Bearer strings can no longer mint fresh buckets.
+                preauth_limit, preauth_window = _parse_rate(
+                    getattr(settings, "API_RATELIMIT_PREAUTH", "300/min")
+                )
+                check_rate(
+                    scope="api_pre_auth",
+                    key=ident,
+                    limit=preauth_limit,
+                    window=preauth_window,
+                )
+                # Credential-free traffic also receives the tighter anonymous
+                # cap. Valid sessions get a stable user-id bucket after auth.
+                auth = request.META.get("HTTP_AUTHORIZATION", "")
+                if not (auth[:7].lower() == "bearer " and auth[7:].strip()):
+                    anon_limit, anon_window = _parse_rate(getattr(settings, "API_RATELIMIT_ANON", "60/min"))
+                    check_rate(
+                        scope="api_anon",
+                        key=ident,
+                        limit=anon_limit,
+                        window=anon_window,
+                    )
             except ThrottledException as exc:
                 # Middleware-raised exceptions skip process_exception — render the
                 # envelope directly (same shape the views produce).
                 response = JsonResponse(
                     {"success": False, "code": exc.code, "message": str(exc.detail)}, status=429
                 )
-                response["Retry-After"] = str(int(exc.wait or window))
+                response["Retry-After"] = str(int(exc.wait or 60))
                 return response
         return self.get_response(request)
 
@@ -319,9 +389,7 @@ class JsonErrorResponseMiddleware:
 
         if not isinstance(exc, StarforgeError):
             if isinstance(exc, DataError):
-                exc = ValidationException(
-                    "A field value is invalid or too large.", code="invalid_input"
-                )
+                exc = ValidationException("A field value is invalid or too large.", code="invalid_input")
             elif isinstance(exc, IntegrityError):
                 exc = ConflictException(
                     "The request conflicts with an existing record or a data constraint.",
@@ -337,9 +405,7 @@ class JsonErrorResponseMiddleware:
                     field_errors: dict | None = dict(exc.message_dict)
                 except AttributeError:
                     field_errors = {"non_field_errors": list(exc.messages)}
-                exc = ValidationException(
-                    "Invalid input.", code="invalid_input", fields=field_errors
-                )
+                exc = ValidationException("Invalid input.", code="invalid_input", fields=field_errors)
             else:
                 return None
         body: dict[str, object] = {"success": False, "code": exc.code, "message": str(exc.detail)}

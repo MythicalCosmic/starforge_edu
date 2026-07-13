@@ -189,7 +189,9 @@ def _crud_detail(request, pk, service, presenter, *, create_data_fn, changes_fn)
     actor, roles = request.user, _roles(request)
     if request.method == "PUT":
         # Full replace (DRF parity): all required fields must be present, or 400.
-        return success(presenter(service.update(obj, changes=create_data_fn(request), actor=actor, roles=roles)))
+        return success(
+            presenter(service.update(obj, changes=create_data_fn(request), actor=actor, roles=roles))
+        )
     if request.method == "PATCH":
         return success(presenter(service.update(obj, changes=changes_fn(request), actor=actor, roles=roles)))
     if request.method == "DELETE":

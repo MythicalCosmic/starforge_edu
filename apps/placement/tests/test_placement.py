@@ -51,7 +51,9 @@ def _q(**over):
 
 def _build_pending(client, branch_id):
     """Create a test, add a question, submit it -> returns the PENDING test id."""
-    tid = client.post(TESTS, {"title": "English placement", "branch": branch_id}, format="json").json()["data"]["id"]
+    tid = client.post(TESTS, {"title": "English placement", "branch": branch_id}, format="json").json()[
+        "data"
+    ]["id"]
     assert client.post(f"{TESTS}{tid}/questions/", _q(), format="json").status_code == 201
     submitted = client.post(f"{TESTS}{tid}/submit/", {}, format="json")
     assert submitted.status_code == 200, submitted.content
@@ -89,7 +91,9 @@ def test_teacher_cannot_approve(tenant_a, user_in, as_user):
 
 def test_cannot_approve_a_draft(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
-    tid = s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["data"]["id"]
+    tid = (
+        s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["data"]["id"]
+    )
     s["teacher"].post(f"{TESTS}{tid}/questions/", _q(), format="json")
     # never submitted -> still DRAFT -> not approvable
     r = s["hod1"].post(f"{TESTS}{tid}/approve/", {}, format="json")
@@ -99,7 +103,9 @@ def test_cannot_approve_a_draft(tenant_a, user_in, as_user):
 
 def test_cannot_submit_an_empty_test(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
-    tid = s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["data"]["id"]
+    tid = (
+        s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["data"]["id"]
+    )
     r = s["teacher"].post(f"{TESTS}{tid}/submit/", {}, format="json")
     assert r.status_code == 422
     assert r.json()["code"] == "test_has_no_questions"
@@ -144,7 +150,9 @@ def test_reject_needs_a_reason(tenant_a, user_in, as_user):
 )
 def test_single_choice_validation(tenant_a, user_in, as_user, bad, code):
     s = _setup(tenant_a, user_in, as_user)
-    tid = s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["data"]["id"]
+    tid = (
+        s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["data"]["id"]
+    )
     r = s["teacher"].post(f"{TESTS}{tid}/questions/", _q(**bad), format="json")
     assert r.status_code == 400
     assert r.json()["code"] == code
@@ -152,7 +160,9 @@ def test_single_choice_validation(tenant_a, user_in, as_user, bad, code):
 
 def test_true_false_and_writing_validation(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
-    tid = s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["data"]["id"]
+    tid = (
+        s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["data"]["id"]
+    )
     # true/false needs a boolean key
     bad_tf = s["teacher"].post(
         f"{TESTS}{tid}/questions/",
@@ -170,21 +180,33 @@ def test_true_false_and_writing_validation(tenant_a, user_in, as_user):
     assert bad_w.status_code == 400
     assert bad_w.json()["code"] == "writing_has_no_answer"
     # the valid forms succeed
-    assert s["teacher"].post(
-        f"{TESTS}{tid}/questions/",
-        {"prompt": "Sky is blue?", "question_type": "true_false", "correct_answer": True},
-        format="json",
-    ).status_code == 201
-    assert s["teacher"].post(
-        f"{TESTS}{tid}/questions/",
-        {"prompt": "Describe your day.", "question_type": "writing"},
-        format="json",
-    ).status_code == 201
+    assert (
+        s["teacher"]
+        .post(
+            f"{TESTS}{tid}/questions/",
+            {"prompt": "Sky is blue?", "question_type": "true_false", "correct_answer": True},
+            format="json",
+        )
+        .status_code
+        == 201
+    )
+    assert (
+        s["teacher"]
+        .post(
+            f"{TESTS}{tid}/questions/",
+            {"prompt": "Describe your day.", "question_type": "writing"},
+            format="json",
+        )
+        .status_code
+        == 201
+    )
 
 
 def test_remove_question_while_draft(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
-    tid = s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["data"]["id"]
+    tid = (
+        s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["data"]["id"]
+    )
     qid = s["teacher"].post(f"{TESTS}{tid}/questions/", _q(), format="json").json()["data"]["id"]
     assert s["teacher"].post(f"{TESTS}{tid}/questions/{qid}/remove/", {}, format="json").status_code == 204
     # the test now has no questions
@@ -217,7 +239,9 @@ def test_student_has_no_placement_access(tenant_a, user_in, as_user):
 
 def test_draft_test_can_be_deleted(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
-    tid = s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["data"]["id"]
+    tid = (
+        s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["data"]["id"]
+    )
     s["teacher"].post(f"{TESTS}{tid}/questions/", _q(), format="json")
     assert s["teacher"].delete(f"{TESTS}{tid}/").status_code == 204
     assert s["teacher"].get(f"{TESTS}{tid}/").status_code == 404

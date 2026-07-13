@@ -460,6 +460,13 @@ def process_platform_checkout(*, center_id: int, provider: str = "payme") -> Sub
     old = sub.status
     sub.status = Subscription.Status.ACTIVE
     sub.save(update_fields=["current_period_end", "status", "updated_at"])
+    # A confirmed paid renewal permanently exits the trial lifecycle. Without
+    # clearing this public Center flag, the hourly expiry task can deactivate a
+    # paying tenant when its old trial timestamp passes.
+    if sub.center.on_trial or not sub.center.is_active:
+        sub.center.on_trial = False
+        sub.center.is_active = True
+        sub.center.save(update_fields=["on_trial", "is_active", "updated_at"])
     transaction.on_commit(partial(_invalidate_subscription_cache, sub.center.schema_name))
     if old != Subscription.Status.ACTIVE:
         _audit_subscription_change(center=sub.center, old_status=old, new_status=sub.status)

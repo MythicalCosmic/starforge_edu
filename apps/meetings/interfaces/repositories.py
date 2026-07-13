@@ -11,7 +11,9 @@ from core.interfaces import IBaseRepository
 
 
 class IMeetingRepository(IBaseRepository[StaffMeeting]):
-    def scoped(self, *, user, is_unscoped: bool, is_manager: bool, branch_ids: set[int]) -> QuerySet[StaffMeeting]:
+    def scoped(
+        self, *, user, is_unscoped: bool, is_manager: bool, branch_ids: set[int]
+    ) -> QuerySet[StaffMeeting]:
         raise NotImplementedError
 
     def get_scoped(

@@ -23,6 +23,7 @@ def _err_code(resp) -> str | None:
     body = resp.json()
     return body["code"] if "code" in body else body.get("error", {}).get("code")
 
+
 # (role, http_method, url, allowed?) — `allowed=True` expects 200, else 403.
 MATRIX_CASES = [
     # users directory (users:read)

@@ -1,5 +1,5 @@
-"""Student repository port. Scoping is role-based (staff all / parent children /
-student self) — delegated to the preserved apps.students.selectors."""
+"""Student repository port: director tenant-wide, staff membership-scoped,
+parent children, and student self."""
 
 from __future__ import annotations
 

@@ -139,6 +139,12 @@ class OTP(models.Model):
     identifier = models.CharField(max_length=255, db_index=True)  # phone or email
     channel = models.CharField(max_length=8, choices=CHANNEL_CHOICES)
     purpose = models.CharField(max_length=16, choices=PURPOSE_CHOICES, default=PURPOSE_VERIFY)
+    # Password-reset codes are capabilities and must be bound to the exact account
+    # that requested them.  Contacts are intentionally allowed to overlap across the
+    # four role tables, so ``identifier`` + ``purpose`` alone is not an identity.
+    # Blank/null is retained for non-account verification OTPs.
+    target_kind = models.CharField(max_length=16, blank=True)
+    target_id = models.BigIntegerField(null=True, blank=True)
     code_hash = models.CharField(max_length=128)
     attempts = models.PositiveSmallIntegerField(default=0)
     consumed_at = models.DateTimeField(null=True, blank=True)
@@ -147,7 +153,13 @@ class OTP(models.Model):
 
     class Meta:
         ordering = ("-created_at",)
-        indexes = [models.Index(fields=("identifier", "consumed_at"))]
+        indexes = [
+            models.Index(fields=("identifier", "consumed_at")),
+            models.Index(
+                fields=("identifier", "purpose", "target_kind", "target_id", "consumed_at"),
+                name="otp_target_lookup_idx",
+            ),
+        ]
 
 
 class Device(models.Model):

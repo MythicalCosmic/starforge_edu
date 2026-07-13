@@ -244,6 +244,12 @@ class PaymentPlanInstallment(models.Model):
     class Meta:
         ordering = ("due_date",)
         indexes = [models.Index(fields=("plan", "status"))]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(amount_uzs__gt=Decimal("0")),
+                name="installment_amount_positive",
+            )
+        ]
 
     def __str__(self) -> str:  # pragma: no cover
         return f"{self.plan_id}:{self.due_date}:{self.amount_uzs}"
@@ -286,6 +292,16 @@ class Refund(models.Model):
 
     invoice = models.ForeignKey(Invoice, on_delete=models.PROTECT, related_name="refunds")
     payment_id = models.BigIntegerField(null=True, blank=True, db_index=True)
+    provider = models.CharField(max_length=16, blank=True, db_index=True)
+    provider_refund_id = models.CharField(max_length=128, blank=True)
+    provider_confirmed_at = models.DateTimeField(null=True, blank=True)
+    ledger_entry = models.OneToOneField(
+        "approvals.LedgerEntry",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="refund",
+    )
     amount_uzs = models.DecimalField(max_digits=18, decimal_places=2)
     reason = models.CharField(max_length=255, blank=True)
     state = models.CharField(max_length=16, choices=State.choices, default=State.REQUESTED, db_index=True)
@@ -305,6 +321,11 @@ class Refund(models.Model):
             models.CheckConstraint(
                 condition=models.Q(amount_uzs__gt=Decimal("0")),
                 name="refund_amount_positive",
+            ),
+            models.UniqueConstraint(
+                fields=("provider", "provider_refund_id"),
+                condition=~models.Q(provider_refund_id=""),
+                name="refund_provider_reference_unique",
             ),
         ]
 
@@ -326,6 +347,9 @@ class CashierShift(models.Model):
     status = models.CharField(max_length=8, choices=Status.choices, default=Status.OPEN, db_index=True)
     opened_at = models.DateTimeField(auto_now_add=True)
     closed_at = models.DateTimeField(null=True, blank=True)
+    closed_by = models.ForeignKey(
+        "users.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
     opening_cash_uzs = models.DecimalField(max_digits=18, decimal_places=2, default=Decimal("0"))
     closing_cash_uzs = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
     discrepancy_uzs = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
@@ -389,6 +413,14 @@ class Expense(models.Model):
     )
     paid_by = models.ForeignKey(
         "users.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    approval_request = models.OneToOneField(
+        "approvals.ApprovalRequest",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="expense",
+        help_text=_("Immutable maker-checker request and ledger spine for this expense."),
     )
     reject_reason = models.CharField(max_length=255, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)

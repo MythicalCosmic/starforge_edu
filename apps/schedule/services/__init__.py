@@ -220,7 +220,18 @@ def move_occurrence(lesson: Lesson, *, starts_at, ends_at, actor=None) -> Lesson
     lesson.starts_at = starts_at
     lesson.ends_at = ends_at
     lesson.detached_from_rule = True
-    lesson.save(update_fields=["starts_at", "ends_at", "detached_from_rule", "updated_at"])
+    # A moved occurrence must be eligible for one-time absence reconciliation at its
+    # new time. Existing attendance remains authoritative and will not be overwritten.
+    lesson.auto_absence_processed_at = None
+    lesson.save(
+        update_fields=[
+            "starts_at",
+            "ends_at",
+            "detached_from_rule",
+            "auto_absence_processed_at",
+            "updated_at",
+        ]
+    )
     schema = current_schema()
     # moved_at = the lesson's post-save updated_at: a monotonic, unique-per-move,
     # stored value. It's the notification dedupe discriminator so EVERY move notifies —
@@ -287,8 +298,18 @@ def bulk_reschedule(rule: RecurrenceRule, *, shift_minutes: int, actor=None) -> 
             raise ConflictException(_("Schedule conflict."), code="schedule_conflict", fields=conflicts)
         lesson.starts_at = new_start
         lesson.ends_at = new_end
+        # Keep the same invariant as move_occurrence: changing a lesson's time makes
+        # it eligible for absence reconciliation at the new time.
+        lesson.auto_absence_processed_at = None
     for lesson in lessons:
-        lesson.save(update_fields=["starts_at", "ends_at", "updated_at"])
+        lesson.save(
+            update_fields=[
+                "starts_at",
+                "ends_at",
+                "auto_absence_processed_at",
+                "updated_at",
+            ]
+        )
     schema = current_schema()
     actor_id = getattr(actor, "pk", None)
     for lesson in lessons:
@@ -316,8 +337,6 @@ def ical_token_for(user) -> str:
 
 
 def lessons_for_token(token: str):
-    from rest_framework_simplejwt.exceptions import TokenError
-
     from apps.schedule.selectors import scoped_lessons
     from apps.users.models import User
     from core.exceptions import AuthenticationException
@@ -336,13 +355,8 @@ def lessons_for_token(token: str):
     # token_version mismatch ⇒ password-change / logout revoked this feed.
     if data.get("tv") != user.token_version:
         raise AuthenticationException(_("Invalid feed token."), code="authentication_failed")
-    try:
-        cutoff = timezone.now() - dt.timedelta(days=ICAL_WINDOW_DAYS)
-        return scoped_lessons(user=user).filter(starts_at__gte=cutoff).order_by("starts_at")[
-            :ICAL_MAX_LESSONS
-        ]
-    except TokenError:  # pragma: no cover - defensive
-        return Lesson.objects.none()
+    cutoff = timezone.now() - dt.timedelta(days=ICAL_WINDOW_DAYS)
+    return scoped_lessons(user=user).filter(starts_at__gte=cutoff).order_by("starts_at")[:ICAL_MAX_LESSONS]
 
 
 def build_ical(lessons) -> bytes:

@@ -16,6 +16,7 @@ from apps.reports.generators.base import (
     ReportGenerator,
     enforce_report_row_cap,
     is_full_scope,
+    membership_branch_ids,
     teacher_cohort_ids,
 )
 
@@ -40,6 +41,8 @@ class AttendanceGenerator(ReportGenerator):
         ).order_by("lesson__starts_at", "student__student_id")
         if params.get("cohort_id"):
             qs = qs.filter(lesson__cohort_id=params["cohort_id"])
+        if params.get("branch_id"):
+            qs = qs.filter(lesson__cohort__branch_id=params["branch_id"])
         date_from = _parse_date(params.get("date_from"))
         date_to = _parse_date(params.get("date_to"))
         if date_from:
@@ -47,7 +50,9 @@ class AttendanceGenerator(ReportGenerator):
         if date_to:
             qs = qs.filter(lesson__starts_at__date__lte=date_to)
 
-        if not is_full_scope(user=user, roles=roles):
+        if not is_full_scope(user=user, roles=roles) and "teacher" not in roles:
+            qs = qs.filter(lesson__cohort__branch_id__in=membership_branch_ids(user))
+        if "teacher" in roles:
             qs = qs.filter(lesson__cohort_id__in=teacher_cohort_ids(user))
 
         enforce_report_row_cap(qs)

@@ -6,8 +6,8 @@ import pytest
 from django.db import IntegrityError, connection, transaction
 from django.utils import timezone
 
-from apps.tenancy.models import Domain
-from apps.tenancy.services import add_domain, archive_center, set_primary_domain
+from apps.tenancy.models import Domain, PlatformEvent
+from apps.tenancy.services import activate_center, add_domain, archive_center, set_primary_domain
 from core.exceptions import NotFoundException, ValidationException
 
 pytestmark = pytest.mark.django_db
@@ -32,7 +32,26 @@ def test_trial_expiry_flips_is_active(tenant_a):
     assert deactivate_expired_trials() == 1
     tenant_a.refresh_from_db()
     assert tenant_a.is_active is False
+    assert tenant_a.on_trial is False
+    assert PlatformEvent.objects.filter(
+        center=tenant_a, event=PlatformEvent.Event.CENTER_TRIAL_EXPIRED
+    ).exists()
     # Idempotent by filter — a second run flips nothing (D1-LB-7).
+    assert deactivate_expired_trials() == 0
+
+
+def test_manual_activation_of_expired_trial_is_not_undone_by_beat(tenant_a):
+    from celery_tasks.tenancy_tasks import deactivate_expired_trials
+
+    tenant_a.is_active = False
+    tenant_a.on_trial = True
+    tenant_a.trial_ends_at = timezone.now() - timedelta(hours=1)
+    tenant_a.save(update_fields=["is_active", "on_trial", "trial_ends_at"])
+
+    activate_center(tenant_a)
+    tenant_a.refresh_from_db()
+    assert tenant_a.is_active is True
+    assert tenant_a.on_trial is False
     assert deactivate_expired_trials() == 0
 
 

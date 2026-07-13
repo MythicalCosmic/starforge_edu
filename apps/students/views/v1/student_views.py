@@ -2,8 +2,8 @@
 
 Two scoping layers, mirroring the old TenantSafeModelViewSet(object_scope="branch")
 + get_queryset=scoped_students:
-  * ROLE scope (scoped_students): staff see all, a parent sees their children, a
-    student sees only self — applied to the list and as the 404 gate on detail.
+  * ROLE scope (scoped_students): director sees all; other staff follow active
+    branch/department memberships; parent/student remain children/self scoped.
   * BRANCH scope (object_scope): a branch-scoped role can only reach/mutate a
     student in its own branches (403 out_of_scope) and can only create there.
 medical_notes (encrypted PHI) is served ONLY on the detail/update payload and ONLY
@@ -422,6 +422,10 @@ def _changes(body: dict[str, Any]) -> dict[str, Any]:
     changes: dict[str, Any] = {}
     for f in ("first_name", "last_name", "middle_name", "phone", "email"):
         if f in body:
+            if body[f] is None:
+                raise ValidationException(
+                    "Invalid input.", code="validation_error", fields={f: ["May not be null."]}
+                )
             changes[f] = str_field(body, f)
     if "birthdate" in body:
         changes["birthdate"] = _date_or_none(body, "birthdate")
@@ -431,6 +435,10 @@ def _changes(body: dict[str, Any]) -> dict[str, Any]:
         changes["is_active"] = bool_field(body, "is_active")
     for f in ("academic_level", "location", "previous_school", "medical_notes"):
         if f in body:
+            if body[f] is None:
+                raise ValidationException(
+                    "Invalid input.", code="validation_error", fields={f: ["May not be null."]}
+                )
             changes[f] = str_field(body, f)
     if "emergency_contacts" in body:
         changes["emergency_contacts"] = _emergency_contacts(body)

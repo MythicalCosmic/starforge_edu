@@ -27,7 +27,7 @@ from apps.campaigns.presenters import (
 )
 from core.api_auth import check_perm, require_auth
 from core.container import container
-from core.exceptions import NotFoundException, ValidationException
+from core.exceptions import NotFoundException, PermissionException, ValidationException
 from core.http import bool_field, int_field, read_json, str_field
 from core.listing import apply_filters, paginate
 from core.permissions import Role, get_role_memberships, get_user_roles
@@ -68,7 +68,7 @@ def _get_campaign(request: HttpRequest, pk: int):
 @csrf_exempt
 @require_auth
 def campaigns_collection_view(request: HttpRequest) -> HttpResponse:
-    if request.method == "GET":
+    if request.method in ("GET", "HEAD"):
         check_perm(request, f"{_RESOURCE}:read")
         is_unscoped, branch_ids = _scope(request)
         qs = apply_filters(
@@ -102,13 +102,16 @@ def campaign_send_view(request: HttpRequest, pk: int) -> HttpResponse:
         return error("Method not allowed.", code="method_not_allowed", status=405)
     check_perm(request, f"{_RESOURCE}:send")
     campaign = _get_campaign(request, pk)
-    return success(campaign_to_dict(_campaign_service().send(campaign_id=campaign.pk, actor=request.user)))
+    return success(
+        campaign_to_dict(_campaign_service().send(campaign_id=campaign.pk, actor=request.user)),
+        status=202,
+    )
 
 
 @csrf_exempt
 @require_auth
 def campaign_recipients_view(request: HttpRequest, pk: int) -> HttpResponse:
-    if request.method != "GET":
+    if request.method not in ("GET", "HEAD"):
         return error("Method not allowed.", code="method_not_allowed", status=405)
     check_perm(request, f"{_RESOURCE}:read")
     campaign = _get_campaign(request, pk)
@@ -159,7 +162,7 @@ def _create_campaign(request: HttpRequest) -> HttpResponse:
 @csrf_exempt
 @require_auth
 def dnc_collection_view(request: HttpRequest) -> HttpResponse:
-    if request.method == "GET":
+    if request.method in ("GET", "HEAD"):
         check_perm(request, f"{_RESOURCE}:read")
         qs = apply_filters(
             request,
@@ -194,7 +197,13 @@ def dnc_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
     if read:
         return success(do_not_contact_to_dict(entry))
     if request.method == "DELETE":
-        _dnc_service().delete(entry)  # opt back in
+        is_unscoped, _branch_ids = _scope(request)
+        if not is_unscoped:
+            raise PermissionException(
+                "Only a director can remove a do-not-contact entry.",
+                code="forbidden",
+            )
+        _dnc_service().delete(entry, actor=request.user)  # opt back in, immutably audited
         return no_content()
     return error("Method not allowed.", code="method_not_allowed", status=405)
 
@@ -203,7 +212,7 @@ def dnc_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
 @csrf_exempt
 @require_auth
 def templates_collection_view(request: HttpRequest) -> HttpResponse:
-    if request.method == "GET":
+    if request.method in ("GET", "HEAD"):
         check_perm(request, f"{_RESOURCE}:read")
         qs = apply_filters(
             request,
@@ -301,7 +310,7 @@ def _template_changes(body: dict[str, Any]) -> dict[str, Any]:
             raise ValidationException(
                 "Name may not be blank.", code="validation_error", fields={"name": ["May not be blank."]}
             )
-        changes["name"] = name
+        changes["name"] = name.strip()
     if "category" in body:
         changes["category"] = str_field(body, "category", max_length=40)
     if "purpose" in body:

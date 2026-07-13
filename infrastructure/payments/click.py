@@ -97,7 +97,7 @@ class RealClickClient(ClickClient):
             return False
         provided = str(payload.get("sign_string", ""))
         # constant-time compare to avoid leaking the digest byte-by-byte
-        return hmac.compare_digest(expected, provided)
+        return hmac.compare_digest(expected.encode("ascii"), provided.encode("utf-8"))
 
     def build_checkout(self, *, amount_uzs: int, merchant_trans_id: str, config: Any) -> dict[str, Any]:
         service_id = getattr(config, "click_service_id", "")

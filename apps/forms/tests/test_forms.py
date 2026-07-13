@@ -63,15 +63,11 @@ def test_create_and_update_form_audience(tenant_a, as_role):
 
 def test_bad_audience_is_rejected(tenant_a, as_role):
     director, _ = as_role(Role.DIRECTOR)
-    bad_role = director.post(
-        FORMS, {"title": "x", "audience_roles": ["teacher", "wizard"]}, format="json"
-    )
+    bad_role = director.post(FORMS, {"title": "x", "audience_roles": ["teacher", "wizard"]}, format="json")
     assert bad_role.status_code == 400
     assert bad_role.json()["code"] == "validation_error"
 
-    bad_uid = director.post(
-        FORMS, {"title": "x", "audience_user_ids": [1, "nope"]}, format="json"
-    )
+    bad_uid = director.post(FORMS, {"title": "x", "audience_user_ids": [1, "nope"]}, format="json")
     assert bad_uid.status_code == 400
     assert bad_uid.json()["code"] == "validation_error"
 

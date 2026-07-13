@@ -11,7 +11,6 @@ from django.contrib.auth.validators import UnicodeUsernameValidator
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.validators import validate_email
 from django.db import transaction
-from django.db.models import F
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
@@ -230,6 +229,10 @@ def sync_role_user_bridge(account) -> None:
         account.username = username
         if not account.password:
             account.set_unusable_password()
+        if not account.is_active:
+            account.set_unusable_password()
+            user.is_active = False
+            user.save(update_fields=["is_active"])
         return
 
     username = validate_role_username(
@@ -262,6 +265,10 @@ def sync_role_user_bridge(account) -> None:
             "password",
         ]
     )
+    if not account.is_active:
+        # Admin edits use this sync path directly.  Deactivation must revoke the
+        # authorization graph as well as flipping two booleans.
+        revoke_role_account_access(account)
 
 
 @transaction.atomic
@@ -290,6 +297,37 @@ def update_role_identity(account, changes: dict) -> None:
 
 
 @transaction.atomic
+def revoke_role_account_access(account, *, deactivate_profile: bool = True) -> None:
+    """Disable a role account's bridge and every credential/grant backed by it.
+
+    The bridge is retained for immutable audit/history foreign keys, but it must not
+    remain an active authorization principal after a profile is deactivated or deleted.
+    This helper is also called by the profile ``pre_delete`` receivers, covering API,
+    admin, and direct service deletion paths uniformly.
+    """
+    from apps.users.models import RoleMembership, Session
+
+    now = timezone.now()
+    if deactivate_profile and account.pk:
+        account.is_active = False
+        account.set_unusable_password()
+        type(account).objects.filter(pk=account.pk).update(
+            is_active=False,
+            password=account.password,
+        )
+
+    user = User.objects.select_for_update().get(pk=account.user_id)
+    user.is_active = False
+    user.set_unusable_password()
+    user.token_version += 1
+    user.save(update_fields=["is_active", "password", "token_version"])
+    account.user = user
+    RoleMembership.objects.filter(user_id=account.user_id, revoked_at__isnull=True).update(revoked_at=now)
+    Session.objects.filter(user_id=account.user_id, revoked_at__isnull=True).update(revoked_at=now)
+    Device.objects.filter(user_id=account.user_id, revoked_at__isnull=True).update(revoked_at=now)
+
+
+@transaction.atomic
 def set_role_account_password(account, raw_password: str, *, must_change: bool = False) -> None:
     """Set the role-owned password and revoke every session for that account."""
     account.set_password(raw_password)
@@ -312,7 +350,7 @@ def issue_role_credentials(account, *, actor, resource_type: str) -> dict[str, s
 
     if account.user.is_staff or account.user.is_superuser:
         raise PermissionException(
-            "Cannot replace a platform administrator password through a role endpoint.",
+            _("Cannot replace a platform administrator password through a role endpoint."),
             code="forbidden",
         )
     temporary_password = generate_temp_password()
@@ -358,9 +396,12 @@ def ensure_role_membership(account, *, role: str, branch, department=None):
     return membership
 
 
+@transaction.atomic
 def bump_token_version(user_id: int) -> None:
     """Invalidate every live access token for a user (TD-1 `tv` claim)."""
-    User.objects.filter(pk=user_id).update(token_version=F("token_version") + 1)
+    user = User.objects.select_for_update().get(pk=user_id)
+    user.token_version += 1
+    user.save(update_fields=["token_version"])
 
 
 def set_user_password(user: User, raw_password: str) -> None:

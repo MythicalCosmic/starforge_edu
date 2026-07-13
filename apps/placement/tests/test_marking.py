@@ -48,13 +48,15 @@ def _setup(tenant, user_in, as_user):
     hod_u = user_in(tenant, roles=[Role.HEAD_OF_DEPT], branch=branch)
     lead_u = user_in(tenant, roles=[Role.STUDENT], branch=branch)
     with schema_context(tenant.schema_name):
-        lead = StudentProfileFactory.create(
-            user=lead_u, branch=branch, status=StudentProfile.Status.LEAD
-        )
+        lead = StudentProfileFactory.create(user=lead_u, branch=branch, status=StudentProfile.Status.LEAD)
         test = services.create_test(title="EN", created_by=teacher_u, branch=branch)
         q_obj = services.add_question(
-            test=test, prompt="2+2?", question_type="single_choice", options=["3", "4"],
-            correct_answer="4", points=2,
+            test=test,
+            prompt="2+2?",
+            question_type="single_choice",
+            options=["3", "4"],
+            correct_answer="4",
+            points=2,
         )
         q_write = services.add_question(
             test=test, prompt="Write about your day.", question_type="writing", points=8
@@ -193,9 +195,7 @@ def test_marking_does_not_clobber_a_non_prospective_students_level(tenant_a, use
         from apps.placement.services import apply_writing_marks
         from apps.students.models import StudentProfile
 
-        StudentProfile.objects.filter(pk=sid).update(
-            status=StudentProfile.Status.ACTIVE, academic_level="B2"
-        )
+        StudentProfile.objects.filter(pk=sid).update(status=StudentProfile.Status.ACTIVE, academic_level="B2")
         apply_writing_marks(
             attempt_id=s["attempt"].id,
             output_text=json.dumps([{"question_id": s["q_write"].id, "score": 4}]),
@@ -216,7 +216,9 @@ def test_lead_cannot_mark_their_own_writing(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     _seed_marking_ai(tenant_a)
     # the lead holds no placement:write -> cannot mark
-    assert s["lead_c"].post(f"{ATTEMPTS}{s['attempt'].id}/mark-writing/", {}, format="json").status_code == 403
+    assert (
+        s["lead_c"].post(f"{ATTEMPTS}{s['attempt'].id}/mark-writing/", {}, format="json").status_code == 403
+    )
 
 
 def test_cannot_mark_an_unsubmitted_attempt(tenant_a, user_in, as_user):

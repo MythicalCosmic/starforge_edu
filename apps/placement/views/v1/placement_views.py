@@ -154,9 +154,7 @@ def _scoped_attempts(request: HttpRequest) -> QuerySet[PlacementAttempt]:
         return base
     user: Any = request.user
     if has_permission_code(_roles(request), "placement:write"):
-        return base.filter(
-            Q(assigned_by=user) | Q(test__branch_id__in=_branch_ids(request))
-        ).distinct()
+        return base.filter(Q(assigned_by=user) | Q(test__branch_id__in=_branch_ids(request))).distinct()
     profile = student_profile_for(user)
     if profile is not None:
         return base.filter(student=profile)
@@ -167,9 +165,7 @@ def _scoped_proposals(request: HttpRequest) -> QuerySet:
     base = _service().proposals_base()
     if _is_director(request):
         return base
-    return base.filter(
-        Q(proposed_by=request.user) | Q(cohort__branch_id__in=_branch_ids(request))
-    ).distinct()
+    return base.filter(Q(proposed_by=request.user) | Q(cohort__branch_id__in=_branch_ids(request))).distinct()
 
 
 def _get_test(request: HttpRequest, pk: int) -> PlacementTest:
@@ -258,9 +254,7 @@ def _create_test_data(request: HttpRequest) -> dict[str, Any]:
             else:
                 raise ValidationException(_("Choose a branch for this test."), code="branch_required")
         elif branch.id not in my_branches:
-            raise PermissionException(
-                _("You can only create tests in your own branch."), code="cross_branch"
-            )
+            raise PermissionException(_("You can only create tests in your own branch."), code="cross_branch")
     return {
         "title": _str_required(_require(data, "title"), "title", max_length=200),
         "description": str_field(data, "description"),
@@ -434,9 +428,7 @@ def _assert_attempt_scope(request: HttpRequest, test: PlacementTest, student: St
         return
     my_branches = _branch_ids(request)
     if test.branch_id is not None and test.branch_id not in my_branches:
-        raise PermissionException(
-            _("You can only assign a test from your own branch."), code="cross_branch"
-        )
+        raise PermissionException(_("You can only assign a test from your own branch."), code="cross_branch")
     if student.branch_id not in my_branches:
         raise PermissionException(
             _("You can only assign to a student in your own branch."), code="cross_branch"

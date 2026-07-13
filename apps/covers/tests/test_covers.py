@@ -77,9 +77,11 @@ def test_assign_to_an_offboarded_teacher_is_rejected(tenant_a, user_in, as_user)
     reassign a live lesson to someone who can't act on it. The assign path must reject
     an inactive teacher, matching the pool path (which only surfaces active staff)."""
     s = _setup(tenant_a, user_in, as_user)
-    cid = s["a_client"].post(COVER, {"lesson": s["lesson"].id, "reason": "sick"}, format="json").json()[
-        "data"
-    ]["id"]
+    cid = (
+        s["a_client"]
+        .post(COVER, {"lesson": s["lesson"].id, "reason": "sick"}, format="json")
+        .json()["data"]["id"]
+    )
     # Offboard teacher B: disable their login (the TeacherProfile row survives).
     with schema_context(tenant_a.schema_name):
         b_user = s["b_prof"].user

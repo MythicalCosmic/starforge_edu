@@ -34,8 +34,12 @@ def _setup(tenant, user_in, as_user, *, options=None, correct=None, points=2):
         lead = StudentProfileFactory.create(user=lead_u, branch=branch, status=StudentProfile.Status.LEAD)
         test = services.create_test(title="MC placement", created_by=builder_u, branch=branch)
         q = services.add_question(
-            test=test, prompt="Select the even numbers", question_type="multiple_choice",
-            options=options, correct_answer=correct, points=points,
+            test=test,
+            prompt="Select the even numbers",
+            question_type="multiple_choice",
+            options=options,
+            correct_answer=correct,
+            points=points,
         )
         services.submit_for_review(test=test)
         services.approve_test(test=test, approver=approver_u)
@@ -57,7 +61,9 @@ def _assign(s):
 
 def _submit(s, aid, response):
     return s["lead_c"].post(
-        f"{ATTEMPTS}{aid}/submit/", {"answers": [{"question": s["q"].id, "response": response}]}, format="json"
+        f"{ATTEMPTS}{aid}/submit/",
+        {"answers": [{"question": s["q"].id, "response": response}]},
+        format="json",
     )
 
 
@@ -146,8 +152,11 @@ def _add_bad(tenant, user_in, *, options, correct):
         test = services.create_test(title="t", created_by=builder_u, branch=branch)
         try:
             services.add_question(
-                test=test, prompt="q", question_type="multiple_choice",
-                options=options, correct_answer=correct,
+                test=test,
+                prompt="q",
+                question_type="multiple_choice",
+                options=options,
+                correct_answer=correct,
             )
         except (ValidationException, UnprocessableEntity) as exc:
             return exc.code

@@ -148,8 +148,12 @@ def test_overdue_flag_hidden_from_non_finance_role(tenant_a, as_role):
     director, _ = as_role(Role.DIRECTOR)
     teacher_client, _t = as_role(Role.TEACHER)
     with schema_context(tenant_a.schema_name):
-        student = StudentProfileFactory.create()
-        exam = ExamFactory.create(is_published=True)
+        from apps.cohorts.tests.factories import CohortFactory
+
+        teacher_branch = _t.role_memberships.get(role=Role.TEACHER).branch
+        cohort = CohortFactory.create(branch=teacher_branch)
+        student = StudentProfileFactory.create(branch=teacher_branch, current_cohort=cohort)
+        exam = ExamFactory.create(is_published=True, cohort=cohort)
         ExamResultFactory.create(exam=exam, student=student, score=Decimal("30"))
         InvoiceFactory.create(student=student, status=Invoice.Status.OVERDUE)
 

@@ -17,9 +17,9 @@ from django.views.decorators.csrf import csrf_exempt
 
 from apps.meetings.dto.meeting_dto import ScheduleMeetingDTO
 from apps.meetings.interfaces.services import IMeetingService
-from apps.meetings.models import MeetingAttendee
+from apps.meetings.models import MeetingAttendee, StaffMeeting
 from apps.meetings.presenters import meeting_to_dict
-from core.api_auth import check_perm, require_auth
+from core.api_auth import check_perm, deny_read_only_token, require_auth
 from core.container import container
 from core.exceptions import NotFoundException, PermissionException, ValidationException
 from core.http import int_field, read_json, str_field
@@ -62,14 +62,18 @@ def _get_visible(request: HttpRequest, pk: int):
 @csrf_exempt
 @require_auth
 def meetings_collection_view(request: HttpRequest) -> HttpResponse:
-    if request.method == "GET":
+    if request.method in ("GET", "HEAD"):
         is_unscoped, is_manager, branch_ids = _scope(request)
         qs = _service().scoped_list(
             user=request.user, is_unscoped=is_unscoped, is_manager=is_manager, branch_ids=branch_ids
         )
+        _validate_filters(request)
         qs = apply_filters(
-            request, qs, filter_fields=("status", "branch"),
-            ordering_fields=("starts_at",), default_ordering="starts_at",
+            request,
+            qs,
+            filter_fields=("status", "branch"),
+            ordering_fields=("starts_at",),
+            default_ordering="starts_at",
         )
         items, total, page, size = paginate(request, qs)
         return paginated([meeting_to_dict(m) for m in items], total=total, page=page, page_size=size)
@@ -94,6 +98,8 @@ def meeting_cancel_view(request: HttpRequest, pk: int) -> HttpResponse:
         return error("Method not allowed.", code="method_not_allowed", status=405)
     check_perm(request, f"{_RESOURCE}:write")
     meeting = _get_visible(request, pk)
+    is_unscoped, _is_manager, branch_ids = _scope(request)
+    _assert_branch_in_scope(is_unscoped, meeting.branch_id, branch_ids)
     return success(meeting_to_dict(_service().cancel(meeting, actor=request.user)))
 
 
@@ -102,12 +108,15 @@ def meeting_cancel_view(request: HttpRequest, pk: int) -> HttpResponse:
 def meeting_respond_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method != "POST":
         return error("Method not allowed.", code="method_not_allowed", status=405)
+    deny_read_only_token(request)
     meeting = _get_visible(request, pk)  # invitees RSVP without a write perm; row-scoped
     body = read_json(request)
     response = str_field(body, "response")
     if response not in (MeetingAttendee.Response.ACCEPTED, MeetingAttendee.Response.DECLINED):
         raise ValidationException(
-            "Invalid response.", code="validation_error", fields={"response": ["Must be accepted or declined."]}
+            "Invalid response.",
+            code="validation_error",
+            fields={"response": ["Must be accepted or declined."]},
         )
     _service().respond(meeting, user=request.user, response=response)
     return success(meeting_to_dict(_get_visible(request, pk)))
@@ -116,7 +125,7 @@ def meeting_respond_view(request: HttpRequest, pk: int) -> HttpResponse:
 @csrf_exempt
 @require_auth
 def meetings_upcoming_view(request: HttpRequest) -> HttpResponse:
-    if request.method != "GET":
+    if request.method not in ("GET", "HEAD"):
         return error("Method not allowed.", code="method_not_allowed", status=405)
     return success([meeting_to_dict(m) for m in _service().upcoming_for(request.user)])
 
@@ -124,7 +133,7 @@ def meetings_upcoming_view(request: HttpRequest) -> HttpResponse:
 # --- helpers ---------------------------------------------------------------
 def _create(request: HttpRequest) -> HttpResponse:
     body = read_json(request)
-    title = str_field(body, "title", max_length=200)
+    title = str_field(body, "title", max_length=200).strip()
     if not title:
         raise ValidationException(
             "Title is required.", code="validation_error", fields={"title": ["This field is required."]}
@@ -133,17 +142,45 @@ def _create(request: HttpRequest) -> HttpResponse:
     # the old serializer-before-perform_create ordering.
     dto = ScheduleMeetingDTO(
         title=title,
-        agenda=str_field(body, "agenda"),
-        location=str_field(body, "location", max_length=200),
+        agenda=str_field(body, "agenda").strip(),
+        location=str_field(body, "location", max_length=200).strip(),
         starts_at=_datetime(body, "starts_at"),
         ends_at=_datetime(body, "ends_at"),
         branch_id=int_field(body, "branch"),
         attendee_ids=_int_list(body, "attendees"),
     )
-    _service().resolve_branch(dto.branch_id)  # 400 invalid_branch if archived/missing
+    service = _service()
+    branch = service.resolve_branch(dto.branch_id)  # 400 invalid_branch if archived/missing
+    attendees = service.resolve_attendees(dto.attendee_ids)
     is_unscoped, _is_manager, branch_ids = _scope(request)
     _assert_branch_in_scope(is_unscoped, dto.branch_id, branch_ids)  # 403 branch_required / out_of_scope
-    return created(meeting_to_dict(_service().schedule(dto, created_by=request.user)))
+    return created(
+        meeting_to_dict(service.schedule(dto, created_by=request.user, branch=branch, attendees=attendees))
+    )
+
+
+def _validate_filters(request: HttpRequest) -> None:
+    status = request.GET.get("status")
+    if status and status not in StaffMeeting.Status.values:
+        raise ValidationException(
+            "Invalid status filter.",
+            code="validation_error",
+            fields={"status": [f"Must be one of: {', '.join(StaffMeeting.Status.values)}."]},
+        )
+    branch = request.GET.get("branch")
+    if branch:
+        try:
+            branch_id = int(branch)
+        except (TypeError, ValueError):
+            branch_id = None
+        from apps.org.models import Branch
+
+        if branch_id is None or not Branch.objects.filter(pk=branch_id).exists():
+            raise ValidationException(
+                "Invalid branch filter.",
+                code="validation_error",
+                fields={"branch": ["Select a valid branch."]},
+            )
 
 
 def _assert_branch_in_scope(is_unscoped: bool, branch_id: int | None, branch_ids: set[int]) -> None:

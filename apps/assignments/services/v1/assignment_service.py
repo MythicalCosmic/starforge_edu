@@ -21,6 +21,7 @@ from apps.assignments.interfaces.services import IAssignmentService
 from apps.assignments.models import Assignment, Submission
 from core.exceptions import UnprocessableEntity, ValidationException
 from core.permissions import Role
+from core.scoping import role_membership_scope_q
 
 _DEFAULT_MAX_SCORE = Decimal("100")
 _MUTABLE = ("title", "description", "due_at", "attachments", "rubric", "max_score", "max_resubmits")
@@ -80,16 +81,29 @@ class AssignmentService(IAssignmentService):
     def submissions_of(self, assignment: Assignment, *, user, roles: set[str]) -> QuerySet[Submission]:
         return self._submissions.scoped(user=user, roles=roles).filter(assignment=assignment)
 
-    def submit(self, assignment: Assignment, *, student, text: str, attachment_keys: list) -> Submission:
+    def submit(
+        self, assignment: Assignment, *, student, text: str, attachment_keys: list, actor=None
+    ) -> Submission:
         from apps.assignments.services import submit
 
-        return submit(assignment=assignment, student=student, text=text, attachment_keys=attachment_keys)
+        return submit(
+            assignment=assignment,
+            student=student,
+            text=text,
+            attachment_keys=attachment_keys,
+            actor=actor,
+        )
 
-    def upload_url(self, *, filename: str, content_type: str, size_bytes: int) -> dict[str, Any]:
+    def upload_url(
+        self, *, filename: str, content_type: str, size_bytes: int, requested_by=None
+    ) -> dict[str, Any]:
         from apps.assignments.services import validate_and_presign_upload
 
         return validate_and_presign_upload(
-            filename=filename, content_type=content_type, size_bytes=size_bytes
+            filename=filename,
+            content_type=content_type,
+            size_bytes=size_bytes,
+            requested_by=requested_by,
         )
 
     # --- authoring rules (mirror the old AssignmentSerializer) --------------
@@ -100,6 +114,19 @@ class AssignmentService(IAssignmentService):
 
         if getattr(user, "is_superuser", False) or (roles & STAFF_ROLES):
             cohort = Cohort.objects.filter(pk=cohort_id).first()
+        elif Role.HEAD_OF_DEPT in roles:
+            cohort = (
+                Cohort.objects.filter(
+                    role_membership_scope_q(
+                        user=user,
+                        roles={Role.HEAD_OF_DEPT},
+                        branch_field="branch_id",
+                        department_field="department_id",
+                    )
+                )
+                .filter(pk=cohort_id)
+                .first()
+            )
         elif Role.TEACHER in roles:  # only a cohort they teach
             cohort = Cohort.objects.filter(pk=cohort_id, id__in=_cohorts_taught_by(user)).first()
         else:

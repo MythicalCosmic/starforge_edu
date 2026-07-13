@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from django.db.models import QuerySet
+from django.db.models import Q, QuerySet
 
 from apps.schedule.models import Lesson, RecurrenceRule
 from core.permissions import Role
+from core.scoping import role_membership_scope_q
 
-STAFF_ROLES = {Role.DIRECTOR, Role.HEAD_OF_DEPT, Role.REGISTRAR, Role.IT}
+SCOPED_STAFF_ROLES = {Role.HEAD_OF_DEPT, Role.REGISTRAR, Role.IT}
 
 
 def check_conflicts(
@@ -49,9 +50,7 @@ def _base_lessons() -> QuerySet[Lesson]:
 
 
 def _base_rules() -> QuerySet[RecurrenceRule]:
-    return RecurrenceRule.objects.select_related(
-        "term", "cohort", "teacher__user", "room", "lesson_type"
-    )
+    return RecurrenceRule.objects.select_related("term", "cohort", "teacher__user", "room", "lesson_type")
 
 
 def scoped_rules(*, user, roles: set[str] | None = None) -> QuerySet[RecurrenceRule]:
@@ -65,21 +64,31 @@ def scoped_rules(*, user, roles: set[str] | None = None) -> QuerySet[RecurrenceR
         return qs
     if roles is None:
         roles = {m.role for m in user.role_memberships.filter(revoked_at__isnull=True)}
-    if roles & STAFF_ROLES:
+    if Role.DIRECTOR in roles:
         return qs
+
+    visible = Q(pk__in=[])
+    scoped_staff = roles & SCOPED_STAFF_ROLES
+    if scoped_staff:
+        visible |= role_membership_scope_q(
+            user=user,
+            roles=scoped_staff,
+            branch_field="cohort__branch_id",
+            department_field="cohort__department_id",
+        )
     if Role.TEACHER in roles:
-        return qs.filter(teacher__user=user)
+        visible |= Q(teacher__user=user)
     if Role.PARENT in roles:
-        return qs.filter(
+        visible |= Q(
             cohort__memberships__student__guardians__parent__user=user,
             cohort__memberships__end_date__isnull=True,
-        ).distinct()
+        )
     if Role.STUDENT in roles:
-        return qs.filter(
+        visible |= Q(
             cohort__memberships__student__user=user,
             cohort__memberships__end_date__isnull=True,
-        ).distinct()
-    return qs.none()
+        )
+    return qs.filter(visible).distinct()
 
 
 def scoped_lessons(*, user, roles: set[str] | None = None) -> QuerySet[Lesson]:
@@ -88,18 +97,28 @@ def scoped_lessons(*, user, roles: set[str] | None = None) -> QuerySet[Lesson]:
         return qs
     if roles is None:
         roles = {m.role for m in user.role_memberships.filter(revoked_at__isnull=True)}
-    if roles & STAFF_ROLES:
+    if Role.DIRECTOR in roles:
         return qs
+
+    visible = Q(pk__in=[])
+    scoped_staff = roles & SCOPED_STAFF_ROLES
+    if scoped_staff:
+        visible |= role_membership_scope_q(
+            user=user,
+            roles=scoped_staff,
+            branch_field="cohort__branch_id",
+            department_field="cohort__department_id",
+        )
     if Role.TEACHER in roles:  # D2-A-6: own taught lessons only
-        return qs.filter(teacher__user=user)
+        visible |= Q(teacher__user=user)
     if Role.PARENT in roles:  # children's active-cohort lessons
-        return qs.filter(
+        visible |= Q(
             cohort__memberships__student__guardians__parent__user=user,
             cohort__memberships__end_date__isnull=True,
-        ).distinct()
+        )
     if Role.STUDENT in roles:  # own active-cohort lessons (may be multiple cohorts)
-        return qs.filter(
+        visible |= Q(
             cohort__memberships__student__user=user,
             cohort__memberships__end_date__isnull=True,
-        ).distinct()
-    return qs.none()
+        )
+    return qs.filter(visible).distinct()

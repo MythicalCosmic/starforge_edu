@@ -148,4 +148,4 @@ class FormService(IFormService):
     def _branch_by_id(branch_id: int):
         from apps.org.models import Branch
 
-        return Branch.objects.filter(pk=branch_id).first()
+        return Branch.objects.filter(pk=branch_id, archived_at__isnull=True).first()

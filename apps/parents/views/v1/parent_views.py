@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from django.db import transaction
 from django.http import HttpRequest, HttpResponse
 from django.views.decorators.csrf import csrf_exempt
 
@@ -57,6 +58,7 @@ def parents_collection_view(request: HttpRequest) -> HttpResponse:
 
 @csrf_exempt
 @require_auth
+@transaction.atomic
 def parent_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
     read = request.method in ("GET", "HEAD")
     check_perm(request, f"{_RESOURCE}:read" if read else f"{_RESOURCE}:write")
@@ -66,6 +68,7 @@ def parent_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
 
     if read:
         return success(parent_to_dict(parent))
+    _service().assert_manage_scope(parent, user=request.user, roles=get_user_roles(request))
     if request.method in ("PUT", "PATCH"):
         # PUT and PATCH are both partial (apply only the provided fields) — the
         # deliberate, mobile-friendly convention used across the off-DRF migration.
@@ -86,11 +89,14 @@ def parent_students_view(request: HttpRequest, pk: int) -> HttpResponse:
     parent = _service().get(user=request.user, roles=get_user_roles(request), pk=pk)
     if parent is None:
         raise NotFoundException(code="not_found")
-    return success(_students_payload(_service().students(parent)))
+    return success(
+        _students_payload(_service().students(parent, user=request.user, roles=get_user_roles(request)))
+    )
 
 
 @csrf_exempt
 @require_auth
+@transaction.atomic
 def parent_credentials_view(request: HttpRequest, pk: int) -> HttpResponse:
     """Issue a one-time parent password; the raw value is never stored or repeated."""
     if request.method != "POST":
@@ -99,6 +105,7 @@ def parent_credentials_view(request: HttpRequest, pk: int) -> HttpResponse:
     parent = _service().get(user=request.user, roles=get_user_roles(request), pk=pk)
     if parent is None:
         raise NotFoundException(code="not_found")
+    _service().assert_manage_scope(parent, user=request.user, roles=get_user_roles(request))
     from apps.users.services import issue_role_credentials
 
     return success(

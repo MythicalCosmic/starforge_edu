@@ -4,11 +4,13 @@ CSV export, role scoping, cross-tenant isolation, and query budgets."""
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
 import time_machine
+from django.db import close_old_connections
 from django.utils import timezone
 from django_tenants.utils import schema_context
 
@@ -317,6 +319,140 @@ def test_auto_absent_idempotent_double_run(tenant_a, django_capture_on_commit_ca
         assert AttendanceRecord.objects.filter(lesson=lesson, status=Status.ABSENT).count() == 2
 
 
+def test_auto_absent_processed_marker_eliminates_historical_rescans(
+    tenant_a,
+    django_assert_max_num_queries,
+):
+    """Once reconciled, the beat cost is constant instead of two queries per old lesson."""
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        profile = TeacherProfileFactory(branch=branch)
+        lesson_ids = []
+        for days_ago in range(1, 21):
+            lesson = _make_lesson(
+                branch=branch,
+                teacher=profile,
+                starts_at=timezone.now() - timedelta(days=days_ago),
+            )
+            lesson_ids.append(lesson.pk)
+
+        assert auto_mark_absent() == 0
+        assert (
+            Lesson.objects.filter(
+                pk__in=lesson_ids,
+                auto_absence_processed_at__isnull=False,
+            ).count()
+            == 20
+        )
+
+        # BEGIN + the indexed claim SELECT + COMMIT. The count does not grow with
+        # the twenty (or twenty thousand) already-processed historical lessons.
+        with django_assert_max_num_queries(3):
+            assert auto_mark_absent() == 0
+
+
+def test_auto_absent_run_is_bounded_during_a_large_backlog(tenant_a, monkeypatch):
+    from apps.attendance import services
+
+    calls = 0
+
+    def _full_batch(*, cutoff, schema):
+        nonlocal calls
+        calls += 1
+        return 0, services._AUTO_ABSENCE_BATCH_SIZE
+
+    monkeypatch.setattr(services, "_process_auto_absence_batch", _full_batch)
+    with schema_context(tenant_a.schema_name):
+        assert services.auto_mark_absent() == 0
+    assert calls == services._AUTO_ABSENCE_MAX_BATCHES_PER_RUN
+
+
+def test_auto_absent_bulk_inserts_a_large_roster_in_constant_queries(
+    tenant_a,
+    django_assert_max_num_queries,
+):
+    from apps.org.selectors import get_center_settings
+
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        profile = TeacherProfileFactory(branch=branch)
+        lesson = _make_lesson(
+            branch=branch,
+            teacher=profile,
+            starts_at=timezone.now() - timedelta(minutes=40),
+        )
+        _enroll(lesson.cohort, n=30, branch=branch)
+        get_center_settings()  # exclude the separately cached settings lookup
+
+        # BEGIN, lesson claim, roster, existing marks, one bulk INSERT, inserted-row
+        # fetch, marker update, COMMIT. This stays constant as the roster grows.
+        with django_assert_max_num_queries(8):
+            assert auto_mark_absent() == 30
+        assert AttendanceRecord.objects.filter(lesson=lesson, note="auto_absent").count() == 30
+
+
+@pytest.mark.django_db(transaction=True)
+def test_concurrent_auto_absent_workers_claim_a_lesson_once(tenant_a, monkeypatch):
+    from apps.org.selectors import get_center_settings
+
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        profile = TeacherProfileFactory(branch=branch)
+        lesson = _make_lesson(
+            branch=branch,
+            teacher=profile,
+            starts_at=timezone.now() - timedelta(minutes=40),
+        )
+        students = _enroll(lesson.cohort, n=12, branch=branch)
+        lesson_id = lesson.pk
+        cohort_id = lesson.cohort_id
+        term_id = lesson.term_id
+        teacher_id = profile.pk
+        branch_id = branch.pk
+        student_ids = [student.pk for student in students]
+        user_ids = [profile.user_id, *(student.user_id for student in students)]
+        get_center_settings()  # warm the tenant-scoped cache before worker threads
+
+    # Keep this test focused on row claiming; notification fan-out has its own tests.
+    monkeypatch.setattr("apps.attendance.services._emit_absent", lambda *args, **kwargs: None)
+
+    def _run():
+        close_old_connections()
+        try:
+            with schema_context(tenant_a.schema_name):
+                return auto_mark_absent()
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = [future.result(timeout=15) for future in (pool.submit(_run), pool.submit(_run))]
+
+    assert sum(results) == 12
+    with schema_context(tenant_a.schema_name):
+        lesson = Lesson.objects.get(pk=lesson_id)
+        assert lesson.auto_absence_processed_at is not None
+        assert AttendanceRecord.objects.filter(lesson_id=lesson_id).count() == 12
+
+        # transaction=True commits tenant rows and tenant tables are not flushed by
+        # pytest's public-schema teardown. Clean up this graph explicitly.
+        from apps.cohorts.models import Cohort, CohortMembership
+        from apps.org.models import Branch
+        from apps.schedule.models import Term
+        from apps.students.models import StudentProfile
+        from apps.teachers.models import TeacherProfile
+        from apps.users.models import User
+
+        AttendanceRecord.objects.filter(lesson_id=lesson_id).delete()
+        Lesson.objects.filter(pk=lesson_id).delete()
+        CohortMembership.objects.filter(cohort_id=cohort_id).delete()
+        StudentProfile.objects.filter(pk__in=student_ids).delete()
+        Cohort.objects.filter(pk=cohort_id).delete()
+        TeacherProfile.objects.filter(pk=teacher_id).delete()
+        Term.objects.filter(pk=term_id).delete()
+        User.objects.filter(pk__in=user_ids).delete()
+        Branch.objects.filter(pk=branch_id).delete()
+
+
 def test_auto_absent_skips_marked_students(tenant_a, user_in):
     teacher_user = user_in(tenant_a, roles=["teacher"])
     with schema_context(tenant_a.schema_name):
@@ -354,6 +490,26 @@ def test_auto_absent_skips_future_and_cancelled_lessons(tenant_a):
 
         assert auto_mark_absent() == 0
         assert AttendanceRecord.objects.count() == 0
+
+
+def test_manual_attendance_rejects_cancelled_lesson(tenant_a, user_in):
+    teacher_user = user_in(tenant_a, roles=["teacher"])
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        profile = TeacherProfileFactory(user=teacher_user, branch=branch)
+        lesson = _make_lesson(branch=branch, teacher=profile)
+        lesson.status = Lesson.Status.CANCELLED
+        lesson.save(update_fields=["status"])
+        (student,) = _enroll(lesson.cohort, branch=branch)
+
+        with pytest.raises(UnprocessableEntity) as exc:
+            mark_attendance(
+                lesson=lesson,
+                entries=[{"student": student, "status": Status.ABSENT}],
+                actor=teacher_user,
+            )
+        assert exc.value.code == "lesson_not_scheduled"
+        assert not AttendanceRecord.objects.filter(lesson=lesson).exists()
 
 
 # --------------------------------------------------------------------------- #
@@ -531,6 +687,75 @@ def test_records_list_scoping_student_parent_teacher(tenant_a, user_in, as_user)
     teacher_body = as_user(tenant_a, teacher_user).get("/api/v1/attendance/records/").json()
     assert teacher_body["pagination"]["total"] == 2
     assert all(r["lesson"] != foreign_lesson_id for r in teacher_body["data"])
+
+
+def test_hod_attendance_is_department_scoped_for_reads_dashboard_and_mark(tenant_a, user_in, as_user):
+    """A department HoD cannot turn attendance list or action ids into a tenant-wide IDOR."""
+    from apps.org.tests.factories import DepartmentFactory
+    from apps.users.models import RoleMembership
+    from core.permissions import Role
+
+    hod = user_in(tenant_a)
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        other_branch = BranchFactory()
+        own_department = DepartmentFactory(branch=branch)
+        sibling_department = DepartmentFactory(branch=branch)
+        foreign_department = DepartmentFactory(branch=other_branch)
+        RoleMembership.objects.create(
+            user=hod,
+            branch=branch,
+            department=own_department,
+            role=Role.HEAD_OF_DEPT,
+        )
+        hod.refresh_from_db()
+
+        def _record_for(department, record_branch):
+            cohort = CohortFactory(branch=record_branch, department=department)
+            teacher = TeacherProfileFactory(branch=record_branch, department=department)
+            lesson = _make_lesson(branch=record_branch, teacher=teacher, cohort=cohort)
+            student = StudentProfileFactory(
+                branch=record_branch,
+                current_cohort=cohort,
+            )
+            CohortMembershipFactory(cohort=cohort, student=student)
+            record = AttendanceRecordFactory(
+                student=student,
+                lesson=lesson,
+                status=Status.PRESENT,
+            )
+            return cohort, lesson, student, record
+
+        own = _record_for(own_department, branch)
+        sibling = _record_for(sibling_department, branch)
+        foreign = _record_for(foreign_department, other_branch)
+
+    client = as_user(tenant_a, hod)
+    listing = client.get("/api/v1/attendance/records/")
+    assert listing.status_code == 200
+    assert {row["id"] for row in listing.json()["data"]} == {own[3].id}
+    assert client.get(f"/api/v1/attendance/records/{sibling[3].id}/").status_code == 404
+    assert client.get(f"/api/v1/attendance/records/{foreign[3].id}/").status_code == 404
+
+    assert client.get(f"/api/v1/attendance/cohorts/{own[0].id}/dashboard/").status_code == 200
+    denied_dashboard = client.get(f"/api/v1/attendance/cohorts/{sibling[0].id}/dashboard/")
+    assert denied_dashboard.status_code == 403
+    assert denied_dashboard.json()["code"] == "out_of_scope"
+
+    denied_mark = client.post(
+        f"/api/v1/attendance/lessons/{sibling[1].id}/mark/",
+        [{"student": sibling[2].id, "status": Status.ABSENT}],
+        format="json",
+    )
+    assert denied_mark.status_code == 404
+    assert denied_mark.json()["code"] == "not_found"
+
+    allowed_mark = client.post(
+        f"/api/v1/attendance/lessons/{own[1].id}/mark/",
+        [{"student": own[2].id, "status": Status.ABSENT}],
+        format="json",
+    )
+    assert allowed_mark.status_code == 200, allowed_mark.content
 
 
 def test_record_payload_surfaces_group_and_teacher(tenant_a, user_in, as_user):

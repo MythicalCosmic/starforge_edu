@@ -28,10 +28,8 @@ from apps.org.selectors import get_center_settings
 from apps.schedule.models import Lesson
 from core.exceptions import PermissionException, UnprocessableEntity
 from core.permissions import Role
+from core.scoping import role_memberships_allow
 from core.utils import current_schema
-
-# Roles that may mark ANY lesson's attendance regardless of who teaches it.
-MARK_BYPASS_ROLES = {Role.DIRECTOR, Role.HEAD_OF_DEPT}
 
 
 def _roles_of(user) -> set[str]:
@@ -39,9 +37,21 @@ def _roles_of(user) -> set[str]:
 
 
 def _assert_can_mark(lesson: Lesson, actor, roles: set[str]) -> None:
-    """Actor must teach the lesson, unless director/head_of_dept (TD-5 bypass)."""
-    if actor.is_superuser or roles & MARK_BYPASS_ROLES:
+    """Actor must teach the lesson or manage its exact branch/department scope."""
+    if actor.is_superuser or Role.DIRECTOR in roles:
         return
+    if Role.HEAD_OF_DEPT in roles:
+        memberships = actor.role_memberships.filter(
+            revoked_at__isnull=True,
+            role=Role.HEAD_OF_DEPT,
+        ).only("role", "branch_id", "department_id")
+        if role_memberships_allow(
+            memberships,
+            roles={Role.HEAD_OF_DEPT},
+            branch_id=lesson.cohort.branch_id,
+            department_id=lesson.cohort.department_id,
+        ):
+            return
     if lesson.teacher.user_id == actor.id:
         return
     raise PermissionException(
@@ -85,6 +95,7 @@ def mark_present_from_scan(*, student, at=None, marked_by=None) -> AttendanceRec
     )
     if not candidates:
         return None
+
     # The lesson the student is ARRIVING for: prefer one currently IN SESSION, otherwise the
     # one whose start is nearest the scan time — NOT merely the earliest-starting overlapping
     # one, which (with the ±window) may already have ended, so back-to-back lessons don't get
@@ -164,6 +175,11 @@ def mark_attendance(*, lesson: Lesson, entries: list[dict], actor) -> dict:
     """Upsert attendance for `lesson`. `entries` are dicts with `student` (a
     StudentProfile), `status`, optional `arrived_at`/`note`. Returns
     `{created, updated, records}`."""
+    if lesson.status != Lesson.Status.SCHEDULED:
+        raise UnprocessableEntity(
+            _("Attendance can only be marked for a scheduled lesson."),
+            code="lesson_not_scheduled",
+        )
     settings = get_center_settings()
     roles = _roles_of(actor)
     _assert_can_mark(lesson, actor, roles)
@@ -222,10 +238,7 @@ def mark_attendance(*, lesson: Lesson, entries: list[dict], actor) -> dict:
         records.append(record)
         if status_value == AttendanceRecord.Status.ABSENT:
             _emit_absent(record, auto=False, schema=schema)
-        elif (
-            status_value not in _ABSENT_LIKE
-            and prior_status.get(entry["student"].pk) in _ABSENT_LIKE
-        ):
+        elif status_value not in _ABSENT_LIKE and prior_status.get(entry["student"].pk) in _ABSENT_LIKE:
             # Correction: this record was absent/excused and is now present/late. Retire
             # any approved single-use absence-deduction credit tied to it (no-op if none,
             # or if the credit was already applied to an invoice).
@@ -235,41 +248,96 @@ def mark_attendance(*, lesson: Lesson, entries: list[dict], actor) -> dict:
     return {"created": created, "updated": updated, "records": records}
 
 
+_AUTO_ABSENCE_BATCH_SIZE = 100
+_AUTO_ABSENCE_MAX_BATCHES_PER_RUN = 5
+
+
 def auto_mark_absent() -> int:
-    """Beat-task body (TASKS §22): for every `scheduled` lesson that started at
-    least `auto_absent_after_minutes` ago, create `absent` records for active
-    cohort members who have none. Idempotent via `get_or_create`'s created flag —
-    a re-run makes zero new rows and emits zero duplicate signals, and a student
-    already marked (e.g. `present`) is never overwritten. Runs under the active
-    tenant schema."""
+    """Reconcile each due lesson exactly once, in atomically claimed batches.
+
+    The prior sweep re-read every historical SCHEDULED lesson twice every 15 minutes,
+    forever. ``auto_absence_processed_at`` is the durable idempotency marker and
+    ``select_for_update(skip_locked=True)`` ensures concurrent/redelivered tenant tasks
+    never process the same lesson together. Manual attendance still wins through the
+    unique ``(student, lesson)`` record and ``get_or_create`` below.
+    """
     settings = get_center_settings()
     cutoff = timezone.now() - dt.timedelta(minutes=settings.auto_absent_after_minutes)
     schema = current_schema()
     created = 0
-    lessons = Lesson.objects.filter(status=Lesson.Status.SCHEDULED, starts_at__lte=cutoff)
-    for lesson in lessons:
-        # F2-6 (symmetric with mark_attendance): roster as of the lesson date, so a
-        # no-show who was moved out after the lesson still gets their absent record.
-        lesson_date = timezone.localdate(lesson.starts_at)
-        member_ids = (
-            CohortMembership.objects.filter(cohort_id=lesson.cohort_id, start_date__lte=lesson_date)
-            .filter(Q(end_date__isnull=True) | Q(end_date__gte=lesson_date))
-            .values_list("student_id", flat=True)
-        )
-        already = set(AttendanceRecord.objects.filter(lesson=lesson).values_list("student_id", flat=True))
-        for student_id in member_ids:
-            if student_id in already:
-                continue
-            record, was_created = AttendanceRecord.objects.get_or_create(
-                student_id=student_id,
-                lesson=lesson,
-                defaults={
-                    "status": AttendanceRecord.Status.ABSENT,
-                    "auto_marked": True,
-                    "marked_by": None,
-                },
-            )
-            if was_created:
-                created += 1
-                _emit_absent(record, auto=True, schema=schema)
+
+    # Bound each tenant task even during the one-time post-migration backlog. Newest
+    # eligible lessons are claimed first below so current attendance is never trapped
+    # behind years of history; later beat runs drain the remaining marked backlog.
+    for _batch_number in range(_AUTO_ABSENCE_MAX_BATCHES_PER_RUN):
+        batch_created, processed = _process_auto_absence_batch(cutoff=cutoff, schema=schema)
+        created += batch_created
+        if processed < _AUTO_ABSENCE_BATCH_SIZE:
+            return created
     return created
+
+
+def _process_auto_absence_batch(*, cutoff, schema: str) -> tuple[int, int]:
+    created = 0
+    with transaction.atomic():
+        lessons = list(
+            Lesson.objects.select_for_update(skip_locked=True)
+            .filter(
+                status=Lesson.Status.SCHEDULED,
+                starts_at__lte=cutoff,
+                auto_absence_processed_at__isnull=True,
+            )
+            .only("id", "cohort_id", "starts_at", "auto_absence_processed_at")
+            .order_by("-starts_at", "id")[:_AUTO_ABSENCE_BATCH_SIZE]
+        )
+        processed_at = timezone.now()
+        for lesson in lessons:
+            # F2-6 (symmetric with mark_attendance): roster as of the lesson date, so a
+            # no-show moved out after the lesson still receives the historical absence.
+            lesson_date = timezone.localdate(lesson.starts_at)
+            member_ids = set(
+                CohortMembership.objects.filter(
+                    cohort_id=lesson.cohort_id,
+                    start_date__lte=lesson_date,
+                )
+                .filter(Q(end_date__isnull=True) | Q(end_date__gte=lesson_date))
+                .values_list("student_id", flat=True)
+            )
+            already = set(
+                AttendanceRecord.objects.filter(lesson_id=lesson.pk).values_list("student_id", flat=True)
+            )
+            missing_ids = member_ids - already
+            if missing_ids:
+                # One INSERT for the whole roster instead of one get_or_create per
+                # student. ignore_conflicts preserves a concurrent teacher/card mark;
+                # the tagged follow-up query returns only rows this sweep inserted.
+                AttendanceRecord.objects.bulk_create(
+                    [
+                        AttendanceRecord(
+                            student_id=student_id,
+                            lesson_id=lesson.pk,
+                            status=AttendanceRecord.Status.ABSENT,
+                            auto_marked=True,
+                            marked_by=None,
+                            note="auto_absent",
+                        )
+                        for student_id in missing_ids
+                    ],
+                    ignore_conflicts=True,
+                )
+                inserted = list(
+                    AttendanceRecord.objects.filter(
+                        lesson_id=lesson.pk,
+                        student_id__in=missing_ids,
+                        status=AttendanceRecord.Status.ABSENT,
+                        auto_marked=True,
+                        note="auto_absent",
+                    )
+                )
+                created += len(inserted)
+                for record in inserted:
+                    _emit_absent(record, auto=True, schema=schema)
+            lesson.auto_absence_processed_at = processed_at
+        if lessons:
+            Lesson.objects.bulk_update(lessons, ["auto_absence_processed_at"])
+    return created, len(lessons)

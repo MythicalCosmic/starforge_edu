@@ -38,9 +38,7 @@ def _viewer_id(request: HttpRequest) -> int:
 
 def _unread_map(request: HttpRequest, threads: list) -> dict[int, int]:
     """One bounded query for {thread_id: unread_count} across the given threads."""
-    return _service().unread_counts(
-        thread_ids=[t.id for t in threads], viewer_id=_viewer_id(request)
-    )
+    return _service().unread_counts(thread_ids=[t.id for t in threads], viewer_id=_viewer_id(request))
 
 
 def _get_thread(request: HttpRequest, pk: int):

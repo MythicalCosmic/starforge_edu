@@ -22,10 +22,9 @@ from typing import Any
 
 from core.permissions import Role
 
-# Roles that see the whole tenant for the cohort-scoped reports (enrollment /
-# attendance / grades). A teacher is scoped to cohorts they own (see
-# teacher_cohort_ids). Accountants are NOT here — finance scoping is per-report.
-STAFF_ROLES = {Role.DIRECTOR, Role.HEAD_OF_DEPT}
+# Only directors see a whole tenant. HoDs/accountants are branch-scoped and a
+# teacher is narrowed further to cohorts they own (see teacher_cohort_ids).
+STAFF_ROLES = {Role.DIRECTOR}
 
 # Locale set every report template ships (TD-14).
 TEMPLATE_LOCALES = ("uz", "ru", "en")
@@ -52,6 +51,7 @@ def enforce_report_row_cap(qs) -> None:
             code="report_too_large",
             fields={"rows": [f"{total} rows match (max {MAX_REPORT_ROWS})."]},
         )
+
 
 # Characters that make Excel/LibreOffice treat a cell as a formula. Report cells
 # carry tenant-user-controlled strings (student/cohort/library names), so any of
@@ -85,6 +85,13 @@ def teacher_cohort_ids(user) -> set[int]:
         Q(primary_teacher__user=user) | Q(co_teachers__teacher__user=user) | Q(lessons__teacher__user=user)
     )
     return set(qs.values_list("id", flat=True).distinct())
+
+
+def membership_branch_ids(user) -> set[int]:
+    """Active branch scope for a non-director report requester."""
+    if user is None:
+        return set()
+    return set(user.role_memberships.filter(revoked_at__isnull=True).values_list("branch_id", flat=True))
 
 
 def is_full_scope(*, user, roles: set[str]) -> bool:

@@ -1,6 +1,4 @@
-"""Campaign beat tasks (F10-1 dynamic send date). Fan-out per tenant; the body lives
-in apps.campaigns.services.dispatch_due_campaigns. Emit-only dispatcher — the SMS I/O
-happens inside send_campaign, never in a request handler."""
+"""Campaign dispatch and delivery tasks (F10-1 dynamic send date)."""
 
 from __future__ import annotations
 
@@ -35,3 +33,28 @@ def dispatch_scheduled_campaigns_for_schema() -> int:
     from apps.campaigns.services import dispatch_due_campaigns
 
     return dispatch_due_campaigns()
+
+
+@app.task(
+    bind=True,
+    max_retries=3,
+    retry_backoff=True,
+    acks_late=True,
+    reject_on_worker_lost=True,
+)
+def deliver_campaign(self, campaign_id: int, claim_token: str) -> str | None:
+    """Run provider I/O in a worker under a durable campaign lease."""
+    from apps.campaigns.services import (
+        process_campaign_delivery,
+        record_campaign_delivery_error,
+    )
+
+    try:
+        return process_campaign_delivery(campaign_id=campaign_id, claim_token=claim_token)
+    except Exception as exc:
+        record_campaign_delivery_error(
+            campaign_id=campaign_id,
+            claim_token=claim_token,
+            error=exc,
+        )
+        raise self.retry(exc=exc) from exc

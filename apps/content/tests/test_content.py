@@ -768,6 +768,57 @@ def test_library_put_is_full_replace_missing_required_400(tenant_a, user_in, as_
     assert patched.json()["data"]["name"] == "Original"
 
 
+def test_director_can_reactivate_inactive_library(tenant_a, user_in, as_user):
+    """Deactivation is reversible for managers while inactive rows stay hidden
+    from ordinary readers."""
+    director = user_in(tenant_a, roles=["director"])
+    student = user_in(tenant_a, roles=["student"])
+    with schema_context(tenant_a.schema_name):
+        lib: Any = ContentLibraryFactory(visibility="tenant", is_active=False)
+        lib_id = lib.id
+
+    manager_response = as_user(tenant_a, director).patch(
+        f"/api/v1/content/libraries/{lib_id}/", {"is_active": True}, format="json"
+    )
+    assert manager_response.status_code == 200, manager_response.content
+    assert manager_response.json()["data"]["is_active"] is True
+
+    with schema_context(tenant_a.schema_name):
+        lib.is_active = False
+        lib.save(update_fields=["is_active"])
+    assert as_user(tenant_a, student).get(f"/api/v1/content/libraries/{lib_id}/").status_code == 404
+
+
+def test_cascade_delete_queues_s3_cleanup_after_commit(
+    tenant_a, monkeypatch, django_capture_on_commit_callbacks
+):
+    from celery_tasks.content_tasks import delete_content_objects
+
+    queued: list[tuple[list[str], dict[str, str]]] = []
+    monkeypatch.setattr(
+        delete_content_objects,
+        "delay",
+        lambda keys, **kwargs: queued.append((keys, kwargs)),
+    )
+
+    with schema_context(tenant_a.schema_name):
+        folder: Any = FolderFactory()
+        file: Any = LessonFileFactory(
+            folder=folder,
+            s3_key=f"{tenant_a.schema_name}/content/1/document.pdf",
+            thumbnail_key=f"{tenant_a.schema_name}/content/1/thumb.jpg",
+        )
+        with django_capture_on_commit_callbacks(execute=True):
+            folder.delete()
+
+    assert queued == [
+        (
+            [file.s3_key, file.thumbnail_key],
+            {"_schema_name": tenant_a.schema_name},
+        )
+    ]
+
+
 def test_serializer_hides_thumbnail_key_and_signs_url(tenant_a, user_in, as_user, monkeypatch):
     """The raw schema-prefixed thumbnail_key is never serialized; clients get a
     TTL-limited signed thumbnail_url instead (mirrors download_url)."""

@@ -11,6 +11,7 @@ late-payment-reminder + statement task bodies.
 
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 
 import pytest
@@ -245,9 +246,7 @@ def test_stacked_discounts_are_capped_at_the_charge(tenant_a):
         fs = FeeScheduleFactory(amount_uzs=Decimal("500000.00"))
         inv = services.issue_invoice(student_id=student.pk, fee_schedule_id=fs.pk)
         assert inv.total_uzs == Decimal("0.00")
-        line_sum = sum(
-            (line.amount_uzs for line in InvoiceLine.objects.filter(invoice=inv)), Decimal("0")
-        )
+        line_sum = sum((line.amount_uzs for line in InvoiceLine.objects.filter(invoice=inv)), Decimal("0"))
         assert line_sum == inv.total_uzs  # invariant holds: no negative persisted balance
 
 
@@ -301,7 +300,7 @@ def test_partial_payment_on_past_due_invoice_reaches_overdue_via_beat(tenant_a):
 def test_auto_issue_on_enrollment_creates_one_invoice(tenant_a):
     with schema_context(tenant_a.schema_name):
         cohort = CohortFactory()
-        student = StudentProfileFactory(current_cohort=cohort)
+        student = StudentProfileFactory(current_cohort=cohort, branch=cohort.branch)
         FeeScheduleFactory(cohort=cohort, amount_uzs=Decimal("800000.00"))
 
         inv = services.auto_issue_on_enrollment(student_id=student.pk, cohort_id=cohort.pk)
@@ -449,7 +448,9 @@ def test_cashier_shift_close_computes_discrepancy(tenant_a, user_in):
         shift = services.open_cashier_shift(
             cashier=cashier, branch=branch, opening_cash_uzs=Decimal("50000.00")
         )
-        closed = services.close_cashier_shift(shift=shift, closing_cash_uzs=Decimal("70000.00"))
+        closed = services.close_cashier_shift(
+            shift=shift, closing_cash_uzs=Decimal("70000.00"), actor=cashier
+        )
         # no payments merged -> discrepancy = 70000 - (50000 + 0) = 20000
         assert closed.discrepancy_uzs == Decimal("20000.00")
         assert closed.status == CashierShift.Status.CLOSED
@@ -485,6 +486,20 @@ def test_payment_plan_must_sum_to_total(tenant_a):
         assert exc.value.code == "plan_sum_mismatch"
 
 
+def test_payment_plan_rejects_negative_offset_installment(tenant_a):
+    with schema_context(tenant_a.schema_name):
+        inv = InvoiceFactory(total_uzs=Decimal("100000.00"))
+        with pytest.raises(ValidationException) as exc:
+            services.create_payment_plan(
+                invoice=inv,
+                installments=[
+                    {"due_date": date(2026, 7, 5), "amount_uzs": "110000.00"},
+                    {"due_date": date(2026, 8, 5), "amount_uzs": "-10000.00"},
+                ],
+            )
+        assert exc.value.code == "invalid_installment_amount"
+
+
 def test_payment_plan_happy(tenant_a):
     from datetime import date
 
@@ -516,15 +531,58 @@ def test_refund_illegal_transition_raises(tenant_a):
 
 
 def test_register_refund_completion_idempotent(tenant_a):
+    from apps.approvals.models import LedgerEntry
+
     with schema_context(tenant_a.schema_name):
         inv = InvoiceFactory(total_uzs=Decimal("100000.00"))
         services.allocate_payment(payment_id=21, amount_uzs=Decimal("100000.00"))
         refund = services.request_refund(invoice=inv, amount_uzs=Decimal("100000.00"))
-        done = services.register_refund_completion(refund.pk, payment_id=21)
+        done = services.register_refund_completion(
+            refund.pk, payment_id=21, provider="payme", provider_refund_id="payme-21"
+        )
         assert done.state == Refund.State.COMPLETED
         assert done.payment_id == 21
-        again = services.register_refund_completion(refund.pk, payment_id=21)
+        assert done.provider == "payme"
+        assert done.provider_confirmed_at is not None
+        assert done.ledger_entry_id is not None
+        ledger_entry_id = done.ledger_entry_id
+        again = services.register_refund_completion(
+            refund.pk, payment_id=21, provider="payme", provider_refund_id="payme-21"
+        )
         assert again.state == Refund.State.COMPLETED
+        assert again.ledger_entry_id == ledger_entry_id
+        assert LedgerEntry.objects.filter(source_kind="refund", source_id=refund.pk).count() == 1
+
+
+def test_register_refund_completion_requires_matching_provider_confirmation(tenant_a):
+    with schema_context(tenant_a.schema_name):
+        inv = InvoiceFactory(total_uzs=Decimal("100000.00"))
+        services.allocate_payment(payment_id=210, amount_uzs=Decimal("100000.00"))
+        refund = services.request_refund(
+            invoice=inv,
+            amount_uzs=Decimal("100000.00"),
+            payment_id=210,
+            provider="click",
+        )
+        with pytest.raises(ValidationException) as missing:
+            services.register_refund_completion(
+                refund.pk,
+                payment_id=210,
+                provider="click",
+                provider_refund_id="",
+            )
+        assert missing.value.code == "provider_confirmation_required"
+        with pytest.raises(ValidationException) as mismatch:
+            services.register_refund_completion(
+                refund.pk,
+                payment_id=210,
+                provider="payme",
+                provider_refund_id="payme-210",
+            )
+        assert mismatch.value.code == "refund_provider_mismatch"
+        refund.refresh_from_db()
+        assert refund.state == Refund.State.REQUESTED
+        assert refund.ledger_entry_id is None
 
 
 def test_refund_exceeds_paid_rejected(tenant_a):
@@ -578,7 +636,12 @@ def test_refund_reversal_is_scoped_to_the_named_invoice(tenant_a):
 
         # Refund A's full 100000 via the payment; only A must reopen.
         refund = services.request_refund(invoice=inv_a, amount_uzs=Decimal("100000.00"), payment_id=pay.pk)
-        services.register_refund_completion(refund.pk, payment_id=pay.pk)
+        services.register_refund_completion(
+            refund.pk,
+            payment_id=pay.pk,
+            provider="payme",
+            provider_refund_id=f"payme-{pay.pk}-a",
+        )
 
         inv_a.refresh_from_db()
         inv_b.refresh_from_db()
@@ -620,7 +683,12 @@ def test_refund_ceiling_is_payment_intersect_invoice_not_payment_wide(tenant_a):
         assert exc.value.code == "refund_exceeds_payment"
         # A refund up to P's contribution TO A (100000) is allowed and fully reverses.
         refund = services.request_refund(invoice=inv_a, amount_uzs=Decimal("100000.00"), payment_id=p.pk)
-        services.register_refund_completion(refund.pk, payment_id=p.pk)
+        services.register_refund_completion(
+            refund.pk,
+            payment_id=p.pk,
+            provider="payme",
+            provider_refund_id=f"payme-{p.pk}-a",
+        )
         assert not PaymentAllocation.objects.filter(payment_id=p.pk, invoice=inv_a).exists()
 
 
@@ -636,7 +704,9 @@ def test_register_refund_completion_reverses_allocation_and_status(tenant_a):
         assert selectors.outstanding_balance(student.pk) == Decimal("0.00")
 
         refund = services.request_refund(invoice=inv, amount_uzs=Decimal("100000.00"), payment_id=50)
-        services.register_refund_completion(refund.pk, payment_id=50)
+        services.register_refund_completion(
+            refund.pk, payment_id=50, provider="payme", provider_refund_id="payme-50"
+        )
 
         inv.refresh_from_db()
         assert inv.status == Invoice.Status.ISSUED
@@ -653,7 +723,9 @@ def test_partial_refund_reverses_only_refunded_amount(tenant_a):
         services.allocate_payment(payment_id=51, invoice_ids=[inv.pk], amount_uzs=Decimal("100000.00"))
 
         refund = services.request_refund(invoice=inv, amount_uzs=Decimal("30000.00"), payment_id=51)
-        services.register_refund_completion(refund.pk, payment_id=51)
+        services.register_refund_completion(
+            refund.pk, payment_id=51, provider="payme", provider_refund_id="payme-51"
+        )
 
         inv.refresh_from_db()
         assert inv.status == Invoice.Status.PARTIALLY_PAID
@@ -673,7 +745,9 @@ def test_second_refund_after_completion_rejected(tenant_a):
         services.allocate_payment(payment_id=52, invoice_ids=[inv.pk], amount_uzs=Decimal("100000.00"))
 
         refund = services.request_refund(invoice=inv, amount_uzs=Decimal("100000.00"), payment_id=52)
-        services.register_refund_completion(refund.pk, payment_id=52)
+        services.register_refund_completion(
+            refund.pk, payment_id=52, provider="payme", provider_refund_id="payme-52"
+        )
 
         with pytest.raises(ValidationException) as exc:
             services.request_refund(invoice=inv, amount_uzs=Decimal("100000.00"), payment_id=52)

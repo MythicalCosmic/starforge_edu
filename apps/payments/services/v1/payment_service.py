@@ -61,8 +61,15 @@ class PaymentService(IPaymentService):
     def allocate(self, *, payment_id: int, allocations: list[dict[str, Any]]) -> Payment:
         return domain.allocate_manual(payment_id=payment_id, allocations=allocations)
 
-    def refund(self, *, payment_id: int, amount_uzs: Decimal | None, reason: str) -> Payment:
-        return domain.refund_payment(payment_id=payment_id, amount_uzs=amount_uzs, reason=reason)
+    def refund(
+        self, *, payment_id: int, amount_uzs: Decimal | None, reason: str, requested_by
+    ) -> tuple[Payment, Any]:
+        return domain.refund_payment(
+            payment_id=payment_id,
+            amount_uzs=amount_uzs,
+            reason=reason,
+            requested_by=requested_by,
+        )
 
-    def reconciliation(self, *, on: date) -> dict[str, Any]:
-        return selectors.reconciliation(on=on)
+    def reconciliation(self, *, on: date, branch_ids: set[int] | None = None) -> dict[str, Any]:
+        return selectors.reconciliation(on=on, branch_ids=branch_ids)

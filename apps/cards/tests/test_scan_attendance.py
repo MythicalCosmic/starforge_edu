@@ -129,16 +129,26 @@ def test_scan_marks_the_lesson_being_arrived_for_not_an_earlier_one(tenant_a):
         teacher = TeacherProfileFactory(branch=branch)
         now = timezone.now()
         earlier = Lesson.objects.create(  # ended ~20 min ago, still inside the window
-            term=term, cohort=cohort, teacher=teacher, title="A",
-            starts_at=now - timedelta(minutes=50), ends_at=now - timedelta(minutes=20),
+            term=term,
+            cohort=cohort,
+            teacher=teacher,
+            title="A",
+            starts_at=now - timedelta(minutes=50),
+            ends_at=now - timedelta(minutes=20),
         )
         arriving = Lesson.objects.create(  # starts in ~10 min — the one being arrived for
-            term=term, cohort=cohort, teacher=teacher, title="B",
-            starts_at=now + timedelta(minutes=10), ends_at=now + timedelta(minutes=40),
+            term=term,
+            cohort=cohort,
+            teacher=teacher,
+            title="B",
+            starts_at=now + timedelta(minutes=10),
+            ends_at=now + timedelta(minutes=40),
         )
         card = Card.objects.create(
-            student=student, card_type=CardType.objects.create(name="ID"),
-            code=f"CARD-{student.id}", is_active=True,
+            student=student,
+            card_type=CardType.objects.create(name="ID"),
+            code=f"CARD-{student.id}",
+            is_active=True,
         )
 
     result = _scan(tenant_a, card.code)

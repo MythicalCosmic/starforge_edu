@@ -136,9 +136,10 @@ def test_an_unparseable_phone_is_a_clean_400(tenant_a, user_in, as_user):
     assert r.json()["code"] == "invalid_phone"
 
 
-def test_manage_the_list_through_the_api(tenant_a, user_in, as_user):
+def test_manage_the_list_through_the_api(tenant_a, user_in, as_user, as_role):
     branch = _branch(tenant_a)
-    client = as_user(tenant_a, user_in(tenant_a, roles=[Role.REGISTRAR], branch=branch))
+    registrar = user_in(tenant_a, roles=[Role.REGISTRAR], branch=branch)
+    client = as_user(tenant_a, registrar)
 
     created = client.post(DNC, {"phone": "+998901112233", "reason": "complaint"}, format="json")
     assert created.status_code == 201, created.content
@@ -148,11 +149,29 @@ def test_manage_the_list_through_the_api(tenant_a, user_in, as_user):
     listed = client.get(DNC).json()
     assert any(e["id"] == entry_id for e in listed["data"])
 
-    assert client.delete(f"{DNC}{entry_id}/").status_code == 204  # opt back in
+    # Removing a center-wide consent record is director-only; a branch registrar can
+    # add an opt-out immediately but cannot silently opt a family back in.
+    assert client.delete(f"{DNC}{entry_id}/").status_code == 403
+    director, director_user = as_role(Role.DIRECTOR)
+    assert director.delete(f"{DNC}{entry_id}/").status_code == 204
     with schema_context(tenant_a.schema_name):
+        from apps.audit.models import AuditLog
         from apps.campaigns.models import DoNotContact
 
         assert not DoNotContact.objects.filter(pk=entry_id).exists()
+        created_log = AuditLog.objects.get(
+            action="create",
+            resource_type="campaign_do_not_contact",
+            resource_id=str(entry_id),
+        )
+        deleted_log = AuditLog.objects.get(
+            action="delete",
+            resource_type="campaign_do_not_contact",
+            resource_id=str(entry_id),
+        )
+        assert created_log.actor_id == registrar.pk
+        assert deleted_log.actor_id == director_user.pk
+        assert deleted_log.before["phone"] == "+998901112233"
 
 
 def test_duplicate_phone_is_a_clean_conflict(tenant_a, user_in, as_user):

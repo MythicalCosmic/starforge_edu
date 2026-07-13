@@ -109,9 +109,7 @@ def test_archived_write_precedes_body_validation(director, tenant_a):
     malformed field — the archived guard runs before body parsing (code parity)."""
     with schema_context(tenant_a.schema_name):
         cohort = CohortFactory.create(is_archived=True)
-    resp = director.patch(
-        f"/api/v1/cohorts/{cohort.id}/", {"start_date": "not-a-date"}, format="json"
-    )
+    resp = director.patch(f"/api/v1/cohorts/{cohort.id}/", {"start_date": "not-a-date"}, format="json")
     assert resp.status_code == 400
     assert resp.json()["code"] == "cohort_archived"
 

@@ -8,13 +8,13 @@ from decimal import Decimal
 from django.db.models import QuerySet, Sum
 
 from apps.finance.models import CashierShift, Invoice
-from core.permissions import Role
+from core.permissions import Role, has_permission_code
 
 _ZERO = Decimal("0")
 
-# Director / accountant / cashier see the whole tenant's finance. Parents are
-# row-scoped to their guardian-linked children (finance:read_own).
-STAFF_ROLES = {Role.DIRECTOR, Role.ACCOUNTANT, Role.CASHIER}
+# Directors see the whole tenant. Other roles holding ``finance:read`` are
+# branch-scoped through active memberships; parents/students retain their
+# natural own-record scopes below.
 
 # Statuses that still owe money — outstanding-balance + reminders.
 OPEN_STATUSES = (Invoice.Status.ISSUED, Invoice.Status.PARTIALLY_PAID, Invoice.Status.OVERDUE)
@@ -34,8 +34,14 @@ def scoped_invoices(*, user, roles: set[str] | None = None) -> QuerySet[Invoice]
         return qs
     if roles is None:
         roles = {m.role for m in user.role_memberships.filter(revoked_at__isnull=True)}
-    if roles & STAFF_ROLES:
+    if Role.DIRECTOR in roles:
         return qs
+    if has_permission_code(roles, "finance:read"):
+        allowed_branches = user.role_memberships.filter(
+            revoked_at__isnull=True,
+            branch_id__isnull=False,
+        ).values_list("branch_id", flat=True)
+        return qs.filter(student__branch_id__in=allowed_branches)
     if Role.PARENT in roles:
         return qs.filter(student__guardians__parent__user=user).distinct()
     if Role.STUDENT in roles:
@@ -93,24 +99,20 @@ def statement_context(*, student) -> dict:
 
 
 def cashier_shift_report(*, shift: CashierShift) -> dict:
-    """Per-provider payment totals for a shift + the discrepancy. Tolerates Lane B
-    not yet merged (no Payment model) -> zero payments (D3-A-5 acceptance)."""
+    """Per-provider payment totals for a shift plus its discrepancy."""
     totals: dict[str, str] = {}
     payments_total = _ZERO
-    try:
-        from apps.payments.models import Payment
+    from apps.payments.models import Payment
 
-        rows = (
-            Payment.objects.filter(cashier_shift_id=shift.pk, status="completed")
-            .values("provider")
-            .annotate(total=Sum("amount_uzs"))
-        )
-        for row in rows:
-            amount = Decimal(row["total"] or _ZERO).quantize(Decimal("0.01"))
-            totals[row["provider"]] = str(amount)
-            payments_total += amount
-    except Exception:  # Lane B not merged
-        pass
+    rows = (
+        Payment.objects.filter(cashier_shift_id=shift.pk, status="completed")
+        .values("provider")
+        .annotate(total=Sum("amount_uzs"))
+    )
+    for row in rows:
+        amount = Decimal(row["total"] or _ZERO).quantize(Decimal("0.01"))
+        totals[row["provider"]] = str(amount)
+        payments_total += amount
 
     return {
         "shift_id": shift.pk,

@@ -1,14 +1,13 @@
-"""Channels middleware: resolve tenant from hostname + authenticate via JWT.
+"""Channels middleware: resolve tenant from hostname and authenticate a session.
 
-TD-1 for websockets: the token must be an *access* token, its ``schema`` claim
-must match the host-resolved tenant, and its ``tv`` claim must equal the
-user's current ``token_version`` (and the user must be active). Any failure
-yields ``AnonymousUser`` — consumers (e.g. ``PingConsumer``) close 4401.
+The opaque key is looked up only inside the host-resolved tenant schema. Revoked,
+expired, inactive, or cross-tenant sessions resolve to ``AnonymousUser`` and consumers
+close with 4401.
 
 Schema handling: the user lookup runs via ``database_sync_to_async`` on
 asgiref's thread-sensitive executor thread, whose thread-local DB connection
 is independent of the event loop's. The schema switch therefore happens
-*inside* ``_user_from_token`` via ``schema_context`` — setting the tenant on
+*inside* ``_user_from_session_key`` via ``schema_context`` — setting the tenant on
 the event-loop thread would never reach the thread that runs the query.
 
 NOTE for Day-4 consumers: ``scope["tenant"]`` is plain scope state, it does
@@ -36,7 +35,7 @@ def _resolve_tenant_by_hostname(hostname: str):
 
 
 @database_sync_to_async
-def _user_from_token(raw_token: str, tenant):
+def _user_from_session_key(raw_token: str, tenant):
     """Resolve a session-key Bearer token to its user, scoped to the host-resolved
     tenant's schema.
 
@@ -53,7 +52,7 @@ def _user_from_token(raw_token: str, tenant):
         return session.user if session is not None else AnonymousUser()
 
 
-class TenantAwareJWTAuthMiddleware(BaseMiddleware):
+class TenantAwareAuthMiddleware(BaseMiddleware):
     """Resolves tenant by hostname; reads the session-key Bearer token from query
     string `token=` or the Sec-WebSocket-Protocol header (`bearer.<token>`).
     """
@@ -62,13 +61,16 @@ class TenantAwareJWTAuthMiddleware(BaseMiddleware):
         host = ""
         for header_name, value in scope.get("headers", []):
             if header_name == b"host":
-                host = value.decode().split(":")[0]
+                try:
+                    host = value.decode("ascii").split(":", 1)[0]
+                except UnicodeDecodeError:
+                    host = ""
                 break
 
         tenant = await _resolve_tenant_by_hostname(host) if host else None
 
         token = self._extract_token(scope)
-        scope["user"] = await _user_from_token(token, tenant) if token else AnonymousUser()
+        scope["user"] = await _user_from_session_key(token, tenant) if token else AnonymousUser()
         scope["tenant"] = tenant
         # Stash the raw session-key so the consumer can RE-validate it on each heartbeat
         # (R1-05): connect-time auth alone would let a force-logged-out / revoked session
@@ -86,7 +88,11 @@ class TenantAwareJWTAuthMiddleware(BaseMiddleware):
                 return proto.removeprefix("bearer.")
         for header_name, value in scope.get("headers", []):
             if header_name == b"sec-websocket-protocol":
-                for part in value.decode().split(","):
+                try:
+                    raw_protocols = value.decode("ascii")
+                except UnicodeDecodeError:
+                    return None
+                for part in raw_protocols.split(","):
                     part = part.strip()
                     if part.startswith("bearer."):
                         return part.removeprefix("bearer.")
@@ -98,10 +104,10 @@ class TenantAwareJWTAuthMiddleware(BaseMiddleware):
 
         if not getattr(settings, "WEBSOCKET_ALLOW_QUERY_TOKEN", True):
             return None
-        query = parse_qs(scope.get("query_string", b"").decode())
+        try:
+            raw_query = scope.get("query_string", b"").decode("ascii")
+        except UnicodeDecodeError:
+            return None
+        query = parse_qs(raw_query)
         token_list = query.get("token") or []
         return token_list[0] if token_list else None
-
-
-def public_schema_name() -> str:
-    return get_public_schema_name()

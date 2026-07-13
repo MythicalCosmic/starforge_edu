@@ -102,9 +102,7 @@ def _openapi_path(route: str) -> tuple[str, list[dict]]:
         schema: dict[str, Any] = {"type": typ}
         if fmt:
             schema["format"] = fmt
-        params.append(
-            {"name": name, "in": "path", "required": True, "schema": schema}
-        )
+        params.append({"name": name, "in": "path", "required": True, "schema": schema})
     path = "/" + _PARAM_RE.sub(lambda m: "{" + m.group("name") + "}", route)
     return path, params
 
@@ -176,8 +174,12 @@ def _is_public(path: str) -> bool:
 
 
 def _operation(*, method: str, name: str, path: str, perm: str | None, public: bool) -> dict:
+    # URL names are only unique inside an app namespace (for example both
+    # schedule and rulebook expose ``rule-list``).  Include the mount tag so the
+    # document satisfies OpenAPI's global operationId uniqueness requirement.
+    operation_name = name or path.strip("/").replace("/", "_").replace("{", "").replace("}", "")
     op: dict[str, Any] = {
-        "operationId": f"{method.lower()}_{name or _tag_for(path)}".replace("-", "_"),
+        "operationId": f"{method.lower()}_{_tag_for(path)}_{operation_name}".replace("-", "_"),
         "summary": _summary(name, method, path),
         "tags": [_tag_for(path)],
         "responses": _responses(method),
@@ -201,8 +203,12 @@ def _operation(*, method: str, name: str, path: str, perm: str | None, public: b
         op["parameters"] = [
             {"name": "page", "in": "query", "schema": {"type": "integer", "minimum": 1}},
             {"name": "page_size", "in": "query", "schema": {"type": "integer", "minimum": 1}},
-            {"name": "ordering", "in": "query", "schema": {"type": "string"},
-             "description": "Field to sort by; prefix with `-` for descending."},
+            {
+                "name": "ordering",
+                "in": "query",
+                "schema": {"type": "string"},
+                "description": "Field to sort by; prefix with `-` for descending.",
+            },
             {"name": "search", "in": "query", "schema": {"type": "string"}},
         ]
     return op
@@ -251,7 +257,8 @@ def _components() -> dict:
                     "data": {"description": "Endpoint-specific payload (object or array)."},
                     "pagination": {"$ref": "#/components/schemas/Pagination"},
                     "warnings": {
-                        "type": "array", "items": {"type": "string"},
+                        "type": "array",
+                        "items": {"type": "string"},
                         "description": "Present only when a soft dependency is degraded (fault isolation).",
                     },
                 },
@@ -272,8 +279,11 @@ def _components() -> dict:
                 "type": "object",
                 "properties": {
                     "success": {"type": "boolean", "example": False},
-                    "code": {"type": "string", "description": "Stable, machine-branchable error code.",
-                             "example": "validation_error"},
+                    "code": {
+                        "type": "string",
+                        "description": "Stable, machine-branchable error code.",
+                        "example": "validation_error",
+                    },
                     "message": {"type": "string", "description": "Human-readable (localized) detail."},
                     "errors": {"type": "object", "description": "Optional per-field validation errors."},
                 },

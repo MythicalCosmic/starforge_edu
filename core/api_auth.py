@@ -28,10 +28,10 @@ ViewFunc = Callable[..., HttpResponseBase]
 
 
 def require_auth(view_func: ViewFunc) -> ViewFunc:
-    """Authenticate the JWT and attach ``request.user``/``request.auth``.
+    """Authenticate the opaque session and attach ``request.user``/``request.auth``.
 
     Raises ``AuthenticationException`` (-> JSON 401) when no/invalid credentials are
-    presented; tenant-mismatch and stale-token are raised by the authenticator with
+    presented; tenant-mismatch and revoked-session errors are raised by the authenticator with
     their own codes. The domain error is rendered as JSON by core.middleware."""
 
     @wraps(view_func)
@@ -44,6 +44,22 @@ def require_auth(view_func: ViewFunc) -> ViewFunc:
                 "Authentication credentials were not provided.", code="authentication_failed"
             )
         request.user, request.auth = result  # type: ignore[attr-defined]
+        # Plain Django views bypass DRF's post-authentication UserRateThrottle.
+        # Charge a stable user-id bucket only after the bearer session is valid.
+        if request.path.startswith("/api/"):
+            from django.conf import settings
+
+            from core.middleware import _parse_rate
+            from core.ratelimit import check_rate
+            from core.utils import current_schema
+
+            limit, window = _parse_rate(getattr(settings, "API_RATELIMIT_USER", "1000/min"))
+            check_rate(
+                scope="api_user",
+                key=f"{current_schema()}:{request.user.pk}",
+                limit=limit,
+                window=window,
+            )
         return view_func(request, *args, **kwargs)
 
     return wrapper
@@ -78,9 +94,7 @@ def check_perm(request: HttpRequest, *codes: str) -> None:
     roles = get_user_roles(req)
     overrides = _request_overrides(req)
     if not any(has_permission_code(roles, code, overrides) for code in codes):
-        raise PermissionException(
-            "You do not have permission to perform this action.", code="forbidden"
-        )
+        raise PermissionException("You do not have permission to perform this action.", code="forbidden")
 
 
 def deny_read_only_token(request: HttpRequest) -> None:

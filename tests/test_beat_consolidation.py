@@ -43,23 +43,12 @@ CANONICAL_BEAT_TASKS: dict[str, str] = {
     "late-payment-reminders": "celery_tasks.finance_tasks.late_payment_reminders",
     "cleanup-old-audit-logs": "celery_tasks.audit_tasks.cleanup_old_audit_logs",
     "run-nightly-metering": "celery_tasks.billing_tasks.run_nightly_metering",
-    # Day 4 — Lane F additions
-    "flush-expired-jwt-blacklist": "celery_tasks.cleanup_tasks.flush_expired_jwt_blacklist",
-    # Day 4 — Lane B reports (registered once Lane B lands; aggregator already
-    # imports celery_tasks.report_tasks, so registration follows the build).
+    # Runtime / Day 4+
+    "runtime-heartbeat": "celery_tasks.health_tasks.record_runtime_heartbeat",
     "run-due-report-schedules": "celery_tasks.report_tasks.run_due_report_schedules",
-    "nightly-platform-aggregation": "celery_tasks.report_tasks.nightly_platform_aggregation",
-}
-
-# Tasks whose CELERY_BEAT_SCHEDULE entry is delivered by Lane F's
-# integration_needed block (config/settings/base.py is off-limits to Lane F).
-# They are registered as tasks but only appear in the *schedule* after the
-# orchestrator applies the consolidated table — so invariant 2b treats them as
-# pending until then (the test tightens automatically once applied).
-PENDING_BEAT_INTEGRATION = {
-    "celery_tasks.cleanup_tasks.flush_expired_jwt_blacklist",
-    "celery_tasks.report_tasks.run_due_report_schedules",
-    "celery_tasks.report_tasks.nightly_platform_aggregation",
+    "dispatch-scheduled-campaigns": "celery_tasks.campaign_tasks.dispatch_scheduled_campaigns",
+    "prune-webhook-events": "celery_tasks.payment_tasks.prune_webhook_events",
+    "reconcile-fiscal-receipts": "celery_tasks.payment_tasks.reconcile_fiscal_receipts",
 }
 
 
@@ -78,19 +67,9 @@ def test_every_beat_entry_references_a_registered_task():
 
 
 def test_canonical_periodic_tasks_are_registered():
-    """Invariant 2a: every consolidated task is importable/registered (or, for a
-    lane that merges before F, is flagged as a pending integration)."""
+    """Invariant 2a: every consolidated task is importable and registered."""
     missing = [t for t in set(CANONICAL_BEAT_TASKS.values()) if t not in app.tasks]
-    pending = {
-        "celery_tasks.report_tasks.run_due_report_schedules",
-        "celery_tasks.report_tasks.nightly_platform_aggregation",
-    }
-    hard_missing = [t for t in missing if t not in pending]
-    assert not hard_missing, f"consolidated tasks not registered: {hard_missing}"
-    if any(t in missing for t in pending):
-        pytest.xfail(
-            "Lane B report tasks (run_due_report_schedules / nightly_platform_aggregation) not merged yet"
-        )
+    assert not missing, f"consolidated tasks not registered: {missing}"
 
 
 def test_registered_canonical_tasks_are_scheduled():
@@ -101,22 +80,11 @@ def test_registered_canonical_tasks_are_scheduled():
     task that is NOT yet scheduled marks the test xfail so it tightens on merge.
     """
     scheduled = {entry["task"] for entry in settings.CELERY_BEAT_SCHEDULE.values()}
-    awaiting_integration: list[str] = []
     for key, task in CANONICAL_BEAT_TASKS.items():
-        if task not in app.tasks:
-            continue  # not-yet-merged lane task — covered by test 2a's xfail
         if task in scheduled:
-            continue
-        if task in PENDING_BEAT_INTEGRATION:
-            awaiting_integration.append(task)
             continue
         raise AssertionError(
             f"registered task {task!r} (beat key {key!r}) is missing from CELERY_BEAT_SCHEDULE"
-        )
-    if awaiting_integration:
-        pytest.xfail(
-            "Lane F consolidated beat block not applied yet (integration_needed): "
-            + ", ".join(sorted(awaiting_integration))
         )
 
 

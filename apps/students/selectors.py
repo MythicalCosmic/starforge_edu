@@ -5,18 +5,24 @@ from __future__ import annotations
 from datetime import timedelta
 
 from dateutil.relativedelta import relativedelta
-from django.db.models import Count, Q, QuerySet
+from django.db.models import Count, ExpressionWrapper, F, IntegerField, Q, QuerySet
+from django.db.models.functions import ExtractDay, ExtractMonth
 from django.utils import timezone
 
 from apps.students.models import EnrollmentEvent, StudentProfile
 from core.permissions import Role
+from core.scoping import role_membership_scope_q
 
 # What counts as "leaving" the center (for joined/left analytics).
 _LEFT_STATUSES = (StudentProfile.Status.WITHDRAWN, StudentProfile.Status.GRADUATED)
 _COMPARISON_UNITS = ("hour", "day", "week", "month", "year")
 
-# Roles that see every student in the tenant.
-STAFF_ROLES = {Role.DIRECTOR, Role.HEAD_OF_DEPT, Role.TEACHER, Role.REGISTRAR, Role.IT}
+# Only the center director is tenant-wide. Every other staff role is attached to
+# one or more RoleMembership branches and must stay inside those branches.  In
+# particular, a head of department is a branch/department manager, not a second
+# tenant-wide director.
+TENANT_WIDE_ROLES = {Role.DIRECTOR}
+BRANCH_STAFF_ROLES = {Role.HEAD_OF_DEPT, Role.TEACHER, Role.REGISTRAR, Role.IT}
 
 
 def _base_qs() -> QuerySet[StudentProfile]:
@@ -29,13 +35,23 @@ def scoped_students(*, user, roles: set[str] | None = None) -> QuerySet[StudentP
         return qs
     if roles is None:
         roles = {m.role for m in user.role_memberships.filter(revoked_at__isnull=True)}
-    if roles & STAFF_ROLES:
+    if roles & TENANT_WIDE_ROLES:
         return qs
+
+    visible = Q(pk__in=[])
+    scoped_staff = roles & BRANCH_STAFF_ROLES
+    if scoped_staff:
+        visible |= role_membership_scope_q(
+            user=user,
+            roles=scoped_staff,
+            branch_field="branch_id",
+            department_field="current_cohort__department_id",
+        )
     if Role.PARENT in roles:  # read_own_children
-        return qs.filter(guardians__parent__user=user).distinct()
+        visible |= Q(guardians__parent__user=user)
     if Role.STUDENT in roles:  # read_self
-        return qs.filter(user=user)
-    return qs.none()  # fail closed
+        visible |= Q(user=user)
+    return qs.filter(visible).distinct()
 
 
 def students_with_upcoming_birthdays(
@@ -47,10 +63,20 @@ def students_with_upcoming_birthdays(
     month_days = {
         (today + timedelta(days=offset)).timetuple()[1:3] for offset in range(min(max(days, 0), 366) + 1)
     }
-    window = Q()
-    for month, day in month_days:
-        window |= Q(birthdate__month=month, birthdate__day=day)
-    qs = (base if base is not None else _base_qs()).filter(birthdate__isnull=False).filter(window)
+    # One compact ``IN`` expression instead of up to 366 OR branches (730
+    # EXTRACT calls and ~50KB SQL for a year-wide request).
+    month_day_values = [month * 100 + day for month, day in month_days]
+    qs = (
+        (base if base is not None else _base_qs())
+        .filter(birthdate__isnull=False)
+        .annotate(
+            _birth_month_day=ExpressionWrapper(
+                ExtractMonth(F("birthdate")) * 100 + ExtractDay(F("birthdate")),
+                output_field=IntegerField(),
+            )
+        )
+        .filter(_birth_month_day__in=month_day_values)
+    )
     if branch:
         qs = qs.filter(branch_id=branch)
     if cohort:
@@ -223,10 +249,15 @@ def student_stats(qs: QuerySet[StudentProfile]) -> dict:
     total = qs.count()
     with_cohort = qs.filter(current_cohort__isnull=False).count()
     blocked = qs.filter(blocked_at__isnull=False).count()
-    by_status = {row["status"]: row["n"] for row in qs.values("status").annotate(n=Count("id"))}
+    # Clear StudentProfile's default ``-created_at`` ordering before grouped
+    # aggregates. On a role-union queryset that legitimately needs DISTINCT
+    # (parent guardianship joins), PostgreSQL otherwise adds created_at to the
+    # SELECT/GROUP BY and splits one status into one-row buckets.
+    grouped = qs.order_by()
+    by_status = {row["status"]: row["n"] for row in grouped.values("status").annotate(n=Count("id"))}
     by_branch = {
         row["branch__name"]: row["n"]
-        for row in qs.values("branch__name").annotate(n=Count("id")).order_by("-n")
+        for row in grouped.values("branch__name").annotate(n=Count("id")).order_by("-n")
     }
     return {
         "total": total,

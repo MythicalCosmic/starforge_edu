@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
+from functools import lru_cache
 from typing import Any, ClassVar
 
 import requests
@@ -93,9 +94,15 @@ class EskizClient(SMSClient):
 def get_sms_client() -> SMSClient:
     if settings.ESKIZ_USE_MOCK:
         return MockEskizClient()
-    return EskizClient(
-        base_url=settings.ESKIZ_API_URL,
-        email=settings.ESKIZ_EMAIL,
-        password=settings.ESKIZ_PASSWORD,
-        sender=settings.ESKIZ_FROM,
+    return _real_sms_client(
+        settings.ESKIZ_API_URL,
+        settings.ESKIZ_EMAIL,
+        settings.ESKIZ_PASSWORD,
+        settings.ESKIZ_FROM,
     )
+
+
+@lru_cache(maxsize=4)
+def _real_sms_client(base_url: str, email: str, password: str, sender: str) -> EskizClient:
+    """Reuse the provider bearer token within a worker process."""
+    return EskizClient(base_url=base_url, email=email, password=password, sender=sender)

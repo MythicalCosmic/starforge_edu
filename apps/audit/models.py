@@ -1,13 +1,13 @@
 """Audit trail model (TD-9, D3-D-1).
 
 `AuditLog` is the append-only record of every sensitive mutation and security
-event in a tenant schema. Rows are **immutable**: application code only ever
+event in a public or tenant schema. Rows are **immutable**: application code only ever
 INSERTs (see `apps.audit.services.audit_log` + `apps.audit.receivers`) and the
 retention task (`celery_tasks.audit_tasks`) is the only code that DELETEs, by
 age. There is no `updated_at` and no update path — the model deliberately omits
-both. Production hardening additionally `REVOKE`s UPDATE/DELETE from the app DB
-role (runbook line; the grant itself is `[OWNER:O-9]` hosting — see migration
-0002 docstring).
+both. Migration 0004 installs a database trigger that rejects UPDATE/DELETE;
+only the retention task's transaction-local maintenance capability can delete
+expired rows.
 """
 
 from __future__ import annotations

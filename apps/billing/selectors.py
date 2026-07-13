@@ -15,7 +15,7 @@ from django.db.models import QuerySet
 from django.utils import timezone
 from django_tenants.utils import get_public_schema_name, schema_context
 
-from apps.billing.models import AiUsageCharge, Plan, Subscription, UsageSnapshot
+from apps.billing.models import AiUsageCharge, Subscription, UsageSnapshot
 
 SUBSCRIPTION_CACHE_TIMEOUT = 60  # seconds (D3-E-4: avoid a public-schema query per request)
 
@@ -54,14 +54,6 @@ def get_subscription_status(*, schema_name: str, center_id: int) -> str | None:
     with contextlib.suppress(Exception):  # a cache write failure must not break the request
         cache.set(key, status or "", timeout=SUBSCRIPTION_CACHE_TIMEOUT)
     return status
-
-
-def active_plans() -> QuerySet[Plan]:
-    return Plan.objects.filter(is_active=True)
-
-
-def subscription_for_center(*, center_id: int) -> Subscription | None:
-    return Subscription.objects.select_related("plan", "center").filter(center_id=center_id).first()
 
 
 def usage_for_center(*, center_id: int) -> QuerySet[UsageSnapshot]:

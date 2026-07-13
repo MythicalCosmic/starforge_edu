@@ -1,16 +1,14 @@
-"""Role / permission matrix and DRF permission classes.
+"""Role / permission matrix shared by layered and reports API views.
 
 Single source of truth: ROLE_PERMISSION_MATRIX maps role -> set of action codes
 (`'<resource>:<verb>'`).
 
 TD-4 — fail-closed: a view that declares neither `required_perms[action]` nor a
 `resource` from which to derive one is **denied** (never silently allowed).
-TD-5 — per-action: views declare `resource = "<name>"` (CRUD verbs derived via
-`default_perms`) plus `required_perms = {"<custom_action>": "<resource>:<verb>"}`
-for every `@action`.
+TD-5 — the remaining reports viewsets declare a resource or explicit per-action
+permission; layered views call ``core.api_auth.check_perm``.
 TD-13 — the active RoleMemberships are fetched once per request and memoized on
-`request._role_memberships_cache`, so RolePermission + ObjectScopedPermission
-never issue more than one membership query.
+`request._role_memberships_cache`, so repeated checks issue one membership query.
 """
 
 from __future__ import annotations
@@ -290,11 +288,23 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
     },
     # F24-1: every staff member holds penalty:read so they can see their OWN disciplinary
     # record (get_queryset still scopes a non-manager to their own rows only).
-    Role.LIBRARIAN: {"content:*", "students:read", "cohorts:read", "tasks:read", "rewards:read", "penalty:read"},
+    Role.LIBRARIAN: {
+        "content:*",
+        "students:read",
+        "cohorts:read",
+        "tasks:read",
+        "rewards:read",
+        "penalty:read",
+    },
     # F12-1: security scans cards at the door + reads them; reception (REGISTRAR) issues.
     Role.SECURITY: {
-        "attendance:write", "users:read", "tasks:read", "rewards:read", "penalty:read",
-        "card:read", "card:scan",
+        "attendance:write",
+        "users:read",
+        "tasks:read",
+        "rewards:read",
+        "penalty:read",
+        "card:read",
+        "card:scan",
     },
     Role.IT: {
         "users:read",
@@ -380,15 +390,6 @@ DEFAULT_VERB_FOR_ACTION: dict[str, str] = {
     "partial_update": "write",
     "destroy": "write",
 }
-
-
-def default_perms(resource: str) -> dict[str, str]:
-    """Standard CRUD permission map for a resource (TD-5).
-
-    Spread into a viewset's `required_perms` and add custom `@action` codes:
-    `required_perms = {**default_perms("students"), "transition": "students:write"}`.
-    """
-    return {action: f"{resource}:{verb}" for action, verb in DEFAULT_VERB_FOR_ACTION.items()}
 
 
 def _load_tenant_overrides() -> dict[str, dict[str, str]]:
@@ -530,39 +531,15 @@ class RolePermission(BasePermission):
         return has_permission_code(get_user_roles(request), required, _request_overrides(request))
 
 
-class ObjectScopedPermission(BasePermission):
-    """Object-level scoping by branch/department.
-
-    Views set `object_scope = "branch" | "department"`; the object exposes
-    `branch_id` and/or `department_id`. Director and superuser bypass.
-    """
-
-    def has_object_permission(self, request: Request, view: APIView, obj: object) -> bool:
-        user = request.user
-        if user.is_superuser:
-            return True
-        memberships = get_role_memberships(request)
-        if any(m.role == Role.DIRECTOR for m in memberships):
-            return True
-        scope = getattr(view, "object_scope", None)
-        if scope is None:
-            return True
-        if scope == "branch":
-            allowed = {m.branch_id for m in memberships}
-            return getattr(obj, "branch_id", None) in allowed
-        if scope == "department":
-            allowed = {m.department_id for m in memberships if m.department_id}
-            return getattr(obj, "department_id", None) in allowed
-        return False
-
-
 SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
 
 
 def is_read_only_token(request: Request) -> bool:
-    """True when the request is authenticated by a read-only impersonation token
-    (access claim ``read_only=true``). Surfaced by the JWT auth class as
-    ``request.is_read_only_token``; falls back to the raw ``request.auth`` claim."""
+    """Return whether the request uses a read-only impersonation session.
+
+    The session authenticator exposes ``request.is_read_only_token``. The raw auth
+    mapping fallback keeps this helper compatible with focused permission tests.
+    """
     read_only = bool(getattr(request, "is_read_only_token", False))
     if not read_only:
         auth = getattr(request, "auth", None)
@@ -574,14 +551,12 @@ def is_read_only_token(request: Request) -> bool:
 
 
 class DenyWriteForReadOnlyToken(BasePermission):
-    """D4-LE-4: a read-only impersonation token (claim ``read_only=true``) may make
-    only SAFE (GET/HEAD/OPTIONS) requests. Any write → 403 ``read_only_token``.
-    Normal tokens (no claim) are unaffected.
+    """Allow only safe methods under a read-only impersonation session.
 
-    NOTE: this only covers views that include it in ``permission_classes``. The
-    authoritative, opt-out-proof enforcement lives in ``core.viewsets`` (both base
-    classes call ``assert_not_read_only_write`` in ``initial``) so an APIView that
-    overrides ``permission_classes`` can never silently regain write access."""
+    Any write returns 403 ``read_only_token``. Ordinary sessions are unaffected.
+
+    Layered views enforce this centrally in ``SessionAuthentication``; this class
+    remains for the reports DRF viewsets."""
 
     def has_permission(self, request: Request, view: APIView) -> bool:
         if request.method in SAFE_METHODS:

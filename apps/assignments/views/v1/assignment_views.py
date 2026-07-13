@@ -130,6 +130,7 @@ def assignment_submissions_view(request: HttpRequest, pk: int) -> HttpResponse:
             student=student,
             text=str_field(body, "text", max_length=20_000),
             attachment_keys=_attachment_keys(body),
+            actor=request.user,
         )
         return created(submission_to_dict(submission))
     return error("Method not allowed.", code="method_not_allowed", status=405)
@@ -158,6 +159,7 @@ def assignment_upload_url_view(request: HttpRequest) -> HttpResponse:
         filename=filename,
         content_type=str_field(body, "content_type", default="application/octet-stream", max_length=127),
         size_bytes=size_bytes,
+        requested_by=request.user,
     )
     return success(result)
 

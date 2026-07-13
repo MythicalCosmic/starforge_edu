@@ -116,7 +116,9 @@ def test_assign_and_list_co_teacher(director, tenant_a):
 
     roster = director.get(f"/api/v1/cohorts/{cohort.id}/teachers/")
     assert roster.status_code == 200
-    assert roster.json()["data"] == [{"id": resp.json()["data"]["id"], "teacher": teacher.id, "role": "assistant"}]
+    assert roster.json()["data"] == [
+        {"id": resp.json()["data"]["id"], "teacher": teacher.id, "role": "assistant"}
+    ]
 
     # And it surfaces on the cohort detail's co_teachers block.
     detail = director.get(f"/api/v1/cohorts/{cohort.id}/")
@@ -200,9 +202,7 @@ def test_co_teacher_default_role_is_co_teacher(director, tenant_a):
         branch = BranchFactory.create()
         cohort = CohortFactory.create(branch=branch)
         teacher = TeacherProfileFactory.create(branch=branch)
-    resp = director.post(
-        f"/api/v1/cohorts/{cohort.id}/teachers/", {"teacher": teacher.id}, format="json"
-    )
+    resp = director.post(f"/api/v1/cohorts/{cohort.id}/teachers/", {"teacher": teacher.id}, format="json")
     assert resp.status_code == 201
     assert resp.json()["data"]["role"] == "co_teacher"
 
@@ -224,14 +224,10 @@ def test_new_actions_are_branch_scoped(tenant_a, user_in, as_user):
     remove = client.post(
         f"/api/v1/cohorts/{cohort.id}/remove-student/", {"student": student.id}, format="json"
     )
-    assign = client.post(
-        f"/api/v1/cohorts/{cohort.id}/teachers/", {"teacher": teacher.id}, format="json"
-    )
+    assign = client.post(f"/api/v1/cohorts/{cohort.id}/teachers/", {"teacher": teacher.id}, format="json")
     assert remove.status_code == 403
     assert assign.status_code == 403
     with schema_context(tenant_a.schema_name):
         # nothing mutated across the branch boundary
-        assert CohortMembership.objects.filter(
-            student=student, end_date__isnull=True
-        ).exists()
+        assert CohortMembership.objects.filter(student=student, end_date__isnull=True).exists()
         assert not CohortTeacher.objects.filter(cohort=cohort).exists()

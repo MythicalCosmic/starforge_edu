@@ -29,8 +29,11 @@ def transfers_collection_view(request: HttpRequest) -> HttpResponse:
         return error("Method not allowed.", code="method_not_allowed", status=405)
     check_perm(request, f"{_RESOURCE}:read")
     qs = apply_filters(
-        request, _service().list(), filter_fields=_FILTERS,
-        ordering_fields=_ORDERING, default_ordering="-created_at",
+        request,
+        _service().list(),
+        filter_fields=_FILTERS,
+        ordering_fields=_ORDERING,
+        default_ordering="-created_at",
     )
     items, total, page, size = paginate(request, qs)
     return paginated([transfer_to_dict(t) for t in items], total=total, page=page, page_size=size)

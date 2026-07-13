@@ -61,9 +61,7 @@ def test_boolean_filter_rejects_unparseable_values(tenant_a, value):
         )
 
 
-@pytest.mark.parametrize(
-    ("value", "expected"), [("on", True), ("y", True), ("off", False), ("n", False)]
-)
+@pytest.mark.parametrize(("value", "expected"), [("on", True), ("y", True), ("off", False), ("n", False)])
 def test_boolean_filter_accepts_drf_forms(tenant_a, value, expected):
     from apps.org.models import Branch
 
@@ -95,9 +93,7 @@ def test_paginate_is_stable_across_pages_on_a_non_unique_sort(tenant_a):
 
         seen: list[int] = []
         for page_no in range(1, 6):  # 5 pages of 2 = 10 rows
-            items, total, _, _ = paginate(
-                _RF.get("/", {"page": str(page_no), "page_size": "2"}), mine
-            )
+            items, total, _, _ = paginate(_RF.get("/", {"page": str(page_no), "page_size": "2"}), mine)
             assert total == 10
             seen.extend(b.pk for b in items)
 

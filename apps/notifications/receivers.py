@@ -113,9 +113,7 @@ def _dispatch_many(*, user_ids, event_type: str, context: dict, dedupe_prefix: s
     if len(unique) <= _FANOUT_INLINE_MAX:
         for uid in unique:
             dedupe_key = f"{dedupe_prefix}:{uid}" if dedupe_prefix else None
-            services.dispatch(
-                event_type=event_type, recipient_id=uid, context=context, dedupe_key=dedupe_key
-            )
+            services.dispatch(event_type=event_type, recipient_id=uid, context=context, dedupe_key=dedupe_key)
         return
     # Large fan-out -> chunked Celery (mirrors announce_cohort); same dedupe contract.
     from celery_tasks.notification_tasks import dispatch_many_chunk

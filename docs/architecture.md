@@ -8,22 +8,23 @@
 - **`TENANT_APPS`:** users, auth, org (Branch+Department), the 16 domain apps, plus contrib (so Django admin works inside a tenant).
 - **Migrations:** `migrate_schemas --shared` for public; `migrate_schemas` runs per tenant when a new Center is created (auto, via `auto_create_schema=True`).
 - **Celery:** `tenant-schemas-celery` activates the right schema for every task. Pass `_schema_name="acme"` when delaying from a context that already knows the tenant (otherwise the request middleware already set the connection).
-- **Channels:** `TenantAwareJWTAuthMiddleware` resolves tenant from hostname, then authenticates the user. **Never** access tenant data from a consumer before this middleware has run.
+- **Channels:** `TenantAwareAuthMiddleware` resolves the tenant from the hostname, then authenticates the opaque session key. Production rejects query-string tokens; clients use `Sec-WebSocket-Protocol`. **Never** access tenant data before this middleware has run.
 - **Management commands:** wrap with `schema_context("acme"):` or use `tenant_command`.
 
 ## Auth
-- **Tokens:** JWT (simplejwt). Access 15min, refresh 14d, rotation on, blacklist on. Both tokens carry TD-1 claims: `schema` (issuing tenant — enforced on access AND refresh paths, 401 `tenant_mismatch` otherwise) and `tv` (token version — bumped on password change, role change, logout-everywhere).
-- **Login flow:** `POST /api/v1/auth/login/ {username, password}` → `{access, refresh}` (owner decision 2026-06-11; supersedes OTP-as-login).
+- **Credentials:** an opaque random `users.Session.key` is the Bearer credential. Sessions expire after `SESSION_TTL_DAYS`, are tenant-bound by the schema containing the row, and are revoked server-side. Roles are loaded live, so grants and revocations do not wait for token expiry.
+- **Role login:** `POST /api/v1/auth/role-login/ {username, password}` authenticates the StudentProfile, TeacherProfile, ParentProfile, or StaffProfile table and returns `{access, role, must_change_password}`. Each profile owns its identity and password.
+- **Platform login:** `POST /api/v1/auth/login/` authenticates only a real staff/superuser Django User. Role compatibility principals have unusable passwords and are rejected.
 - **Password reset:** `POST /api/v1/auth/password/reset/request/ {identifier}` (always 202, anti-enumeration) → SMS/email OTP → `POST /api/v1/auth/password/reset/confirm/ {identifier, code, new_password}` (ends all sessions).
-- **Password change:** `POST /api/v1/auth/password/change/` — ends all other sessions, returns a fresh pair.
-- **Admin:** `/admin/` sessions; staff log in with username (stock backend) or phone/email (`PhoneOrEmailBackend`).
-- **Logout:** `POST /api/v1/auth/logout/ {refresh}` blacklists one refresh; `POST /api/v1/auth/logout-all/` revokes everything.
+- **Password change:** ends all existing sessions and returns one fresh opaque session.
+- **Admin:** `/admin/` uses Django sessions for platform operators. Role accounts are edited in role-specific admin sections and never selected from the User table.
+- **Logout:** `POST /api/v1/auth/logout/` revokes the caller's sessions; there is no client-held refresh token.
 
 ## Permissions
 - **Matrix:** `core/permissions.py: ROLE_PERMISSION_MATRIX` — single source of truth.
-- **Action-level (TD-5):** viewsets declare `resource = "<name>"` (verbs derived per action: list/retrieve → `:read`, create/update/destroy → `:write`) plus `required_perms: dict` for custom actions/overrides. Views with neither mapping are **fail-closed** (denied). The flat `required_perm` attribute is gone.
+- **Action-level:** layered views authenticate with `@require_auth` and call `check_perm(request, "resource:verb")`. DRF reports views retain `RolePermission`. Missing permission grants fail closed.
 - **Row-level:** `read_self` / `read_own_children` verbs are enforced by queryset scoping in `selectors.py` (the gate grants `:read`; the selector narrows rows to self / linked children).
-- **Object-level:** `ObjectScopedPermission` reads `view.object_scope = "branch" | "department"` and checks `RoleMembership(user, branch[, department])`.
+- **Object-level:** selectors/repositories apply exact `RoleMembership(user, branch[, department])` scope before lookup; out-of-scope IDs resolve as 404 where existence must not leak.
 - **Director / superuser:** bypass.
 
 ## Events / cross-app coupling
@@ -48,24 +49,24 @@
 
   | Beat key | Task | Schedule | Scope |
   |---|---|---|---|
-  | `purge-expired-otps` | `celery_tasks.cleanup_tasks.purge_expired_otps` | daily 03:00 | per-tenant iterate |
-  | `flush-expired-jwt-blacklist` | `celery_tasks.cleanup_tasks.flush_expired_jwt_blacklist` | weekly Sun 04:30 | per-tenant iterate |
+  | `runtime-heartbeat` | `celery_tasks.health_tasks.record_runtime_heartbeat` | every 30 sec | runtime |
+  | `purge-expired-otps` | `celery_tasks.cleanup_tasks.purge_expired_otps` | daily | tenant fan-out |
   | `mark-absent-after-lesson` | `celery_tasks.attendance_tasks.mark_absent_after_lesson` | every 15 min | per-tenant |
   | `send-lesson-reminders` | `celery_tasks.schedule_tasks.send_lesson_reminders` | every 5 min | per-tenant |
   | `archive-completed-terms` | `celery_tasks.schedule_tasks.archive_completed_terms` | weekly | per-tenant |
-  | `send-due-soon-reminders` | `celery_tasks.assignment_tasks.send_due_soon_reminders` | daily 17:00 | per-tenant |
-  | `late-payment-reminders` | `celery_tasks.finance_tasks.late_payment_reminders` | daily 09:00 | per-tenant |
-  | `cleanup-old-audit-logs` | `celery_tasks.audit_tasks.cleanup_old_audit_logs` | weekly Sun 04:00 | per-tenant |
-  | `run-nightly-metering` | `celery_tasks.billing_tasks.run_nightly_metering` | daily 01:00 | public |
-  | `deactivate-expired-trials` | `celery_tasks.tenancy_tasks.deactivate_expired_trials` | daily 00:30 | public |
-  | `run-due-report-schedules` | `celery_tasks.report_tasks.run_due_report_schedules` | hourly | per-tenant |
-  | `nightly-platform-aggregation` | `celery_tasks.report_tasks.nightly_platform_aggregation` | daily 02:00 | public |
-
-  (The DAY-4 plan's conceptual names `meter_usage_and_flip_states` / `expire_trials` / `assignment_due_soon` map to the **actually built** task names `run_nightly_metering` / `deactivate_expired_trials` / `send_due_soon_reminders` — the code is the source of truth.)
+  | `send-due-soon-reminders` | `celery_tasks.assignment_tasks.send_due_soon_reminders` | hourly | tenant fan-out |
+  | `late-payment-reminders` | `celery_tasks.finance_tasks.late_payment_reminders` | daily | tenant fan-out |
+  | `cleanup-old-audit-logs` | `celery_tasks.audit_tasks.cleanup_old_audit_logs` | weekly | public + tenant fan-out |
+  | `run-nightly-metering` | `celery_tasks.billing_tasks.run_nightly_metering` | daily | public |
+  | `deactivate-expired-trials` | `celery_tasks.tenancy_tasks.deactivate_expired_trials` | hourly | public |
+  | `run-due-report-schedules` | `celery_tasks.report_tasks.run_due_report_schedules` | hourly at :00 | tenant fan-out |
+  | `dispatch-scheduled-campaigns` | `celery_tasks.campaign_tasks.dispatch_scheduled_campaigns` | every 5 min | tenant fan-out |
+  | `prune-webhook-events` | `celery_tasks.payment_tasks.prune_webhook_events` | daily | tenant fan-out |
+  | `reconcile-fiscal-receipts` | `celery_tasks.payment_tasks.reconcile_fiscal_receipts` | every 5 min | tenant fan-out / critical queue |
 - **Registration:** every task module is imported by `celery_tasks/tasks.py` (the autodiscovery aggregator `app.autodiscover_tasks(["celery_tasks"])` imports). A beat entry pointing at an unregistered task is a hard test failure (the Day-1 blocker class).
-- **DLQ (TASKS §22):** `celery_tasks/observability.py` connects a `task_failure` handler (fires only after retries are exhausted) that LPUSHes `{task, args, kwargs, exc, schema, ts}` to the Redis list `starforge:dlq`. The push is best-effort (a Redis hiccup never compounds the task failure).
+- **DLQ:** `celery_tasks/observability.py` records bounded, scrubbed failure metadata (`task`, task id, argument types, kwarg names, exception class/detail, schema, timestamp) in `starforge:dlq`; raw task payloads are never stored.
   - **Inspect:** `redis-cli LLEN starforge:dlq` then `redis-cli LRANGE starforge:dlq 0 -1`.
-  - **Drain / replay:** pop with `redis-cli RPOP starforge:dlq`, read the `task` + `args`/`kwargs` + `schema`, then re-enqueue via `manage.py shell`: `from celery_tasks.<module> import <task>; <task>.delay(*args, _schema_name=schema, **kwargs)`. Purge a poison entry by RPOP-ing it without replay.
+  - **Drain:** inspect or pop an entry, then replay from the originating system of record after reviewing the failure; the DLQ intentionally does not retain raw arguments.
 - **Duration metrics:** `task_prerun`/`task_postrun` handlers log `task=… state=… duration_ms=…` on the `starforge.celery` logger (tenant-tagged via `TenantSchemaFilter`).
 - **Wiring:** `config/celery.py` calls `connect_celery_observability(app)` once after building the app (idempotent via `dispatch_uid`).
 
@@ -76,8 +77,7 @@
 - **Notification templates:** `notifications.render_template` picks the variant by the recipient's `User.preferred_language`, falling back center-default → en → uz and logging a warning on a missing variant. Every event type carries uz+en+ru in-app rows (seeded in `notifications/0003`).
 - **Profile:** `PATCH /api/v1/users/me/ {preferred_language}` is the self-service setter.
 
-## Out of scope (post-v1)
-- Branch print agent (separate Go/Python repo).
-- Live integration with Click / Payme / Uzum (stubs only in v1).
+## Separate deliverables
+- Branch print agent (separate Go/Python repository).
 - Frontends (React + Flutter).
-- Production deploy beyond the compose stack.
+- Real provider credentials and off-site backup credentials are deployment secrets, not committed source.

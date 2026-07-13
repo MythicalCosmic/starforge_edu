@@ -82,9 +82,7 @@ class CenterSettingsService(ICenterSettingsService):
         if "student_id_pattern" in changes or "center_code" in changes:
             from apps.org.services import validate_student_id_pattern
 
-            validate_student_id_pattern(
-                instance.student_id_pattern, center_code=instance.center_code or ""
-            )
+            validate_student_id_pattern(instance.student_id_pattern, center_code=instance.center_code or "")
         instance.save()
         # Reload so decimals come back quantized to their column scale (numeric(5,2)
         # → "90.00", not the unquantized "90" a fresh Decimal renders) — keeps the
@@ -144,7 +142,7 @@ class CenterSettingsService(ICenterSettingsService):
         from apps.placement.models import PlacementQuestion
 
         valid = set(PlacementQuestion.QuestionType.values)
-        unknown = [t for t in raw if t not in valid]
+        unknown = [t for t in raw if not isinstance(t, str) or t not in valid]
         if unknown:
             raise _verr(
                 "placement_allowed_question_types",

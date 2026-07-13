@@ -50,9 +50,7 @@ def test_web_authoring_blocked_when_flag_on(tenant_a, user_in, as_user):
 def test_mobile_authoring_allowed_when_flag_on(tenant_a, user_in, as_user):
     _set_mobile_only(tenant_a, True)
     client, branch = _teacher(tenant_a, user_in, as_user)
-    r = client.post(
-        TESTS, {"title": "T", "branch": branch.id}, format="json", HTTP_X_CLIENT="mobile"
-    )
+    r = client.post(TESTS, {"title": "T", "branch": branch.id}, format="json", HTTP_X_CLIENT="mobile")
     assert r.status_code == 201, r.content
 
 

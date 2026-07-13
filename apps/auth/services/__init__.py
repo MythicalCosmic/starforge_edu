@@ -117,6 +117,16 @@ def find_role_account(username: str):
     return None, None
 
 
+def _has_privileged_bridge(account) -> bool:
+    """Whether a role profile is attached to a Django-admin principal.
+
+    Platform administrators authenticate only through Django's admin/User surface.  A
+    role endpoint must never mint or reset credentials for their compatibility link,
+    otherwise the resulting role session inherits ``is_superuser`` authorization.
+    """
+    return bool(account.user.is_staff or account.user.is_superuser)
+
+
 def role_login(
     *, username: str, password: str, ip: str = "", user_agent: str = "", device_id: str = ""
 ) -> dict:
@@ -135,17 +145,21 @@ def role_login(
         raise AuthenticationException(_("Invalid username or password."), code="invalid_credentials")
     # Role accounts own their credentials. The linked User is only the hidden authorization
     # principal needed by the existing permission and session graph.
-    if not account.check_password(password) or not account.is_active:
-        reason = "wrong_password" if account.is_active else "inactive_account"
+    password_matches = account.check_password(password)
+    if (
+        not password_matches
+        or not account.is_active
+        or not account.user.is_active
+        or _has_privileged_bridge(account)
+    ):
+        reason = "wrong_password" if password_matches else "invalid_credentials"
         _fire_login_failed(username, ip, user_agent, reason=reason)
         raise AuthenticationException(_("Invalid username or password."), code="invalid_credentials")
 
     now = timezone.now()
     type(account).objects.filter(pk=account.pk).update(last_login_at=now)
-    if not account.user.is_active:
-        account.user.is_active = True
     account.user.last_seen_at = now
-    account.user.save(update_fields=["is_active", "last_seen_at"])
+    account.user.save(update_fields=["last_seen_at"])
     login_succeeded.send(
         sender=User,
         username=username,
@@ -225,14 +239,22 @@ def _normalize(identifier: str) -> str:
     return normalize_phone(identifier)
 
 
-def _enforce_cooldown(identifier: str) -> None:
+def _enforce_cooldown(
+    identifier: str,
+    *,
+    purpose: str = "",
+    target_kind: str = "",
+    target_id: int | None = None,
+) -> None:
     cooldown = _otp_cooldown_seconds()
-    latest = (
-        OTP.objects.filter(identifier=identifier)
-        .order_by("-created_at")
-        .values_list("created_at", flat=True)
-        .first()
-    )
+    rows = OTP.objects.filter(identifier=identifier)
+    if purpose:
+        rows = rows.filter(
+            purpose=purpose,
+            target_kind=target_kind,
+            target_id=target_id,
+        )
+    latest = rows.order_by("-created_at").values_list("created_at", flat=True).first()
     if latest is None:
         return
     elapsed = (timezone.now() - latest).total_seconds()
@@ -258,6 +280,8 @@ def send_otp(
     *,
     identifier: str,
     purpose: str,
+    target_kind: str = "",
+    target_id: int | None = None,
     ip: str = "",
     user_agent: str = "",
 ) -> OTP:
@@ -269,7 +293,12 @@ def send_otp(
     identifier = _normalize(identifier)
     channel = _channel_for(identifier)
 
-    _enforce_cooldown(identifier)
+    _enforce_cooldown(
+        identifier,
+        purpose=purpose,
+        target_kind=target_kind,
+        target_id=target_id,
+    )
     _enforce_ip_cap(ip, identifier)
 
     code = generate_otp(settings.OTP_LENGTH)
@@ -277,6 +306,8 @@ def send_otp(
         identifier=identifier,
         channel=channel,
         purpose=purpose,
+        target_kind=target_kind,
+        target_id=target_id,
         code_hash=make_password(code),
         expires_at=timezone.now() + timedelta(seconds=settings.OTP_TTL_SECONDS),
     )
@@ -313,6 +344,8 @@ def verify_otp(
     identifier: str,
     code: str,
     purpose: str,
+    target_kind: str = "",
+    target_id: int | None = None,
     ip: str = "",
     user_agent: str = "",
 ) -> None:
@@ -331,6 +364,8 @@ def verify_otp(
             .filter(
                 identifier=identifier,
                 purpose=purpose,
+                target_kind=target_kind,
+                target_id=target_id,
                 consumed_at__isnull=True,
                 expires_at__gt=timezone.now(),
             )
@@ -397,10 +432,19 @@ def request_password_reset(
         window=settings.OTP_GLOBAL_RATE_WINDOW_SECONDS,
     )
     _enforce_ip_cap(ip, identifier)
-    if _find_by_identifier(identifier, account_type=account_type) is None:
+    account = _resettable_account(identifier, account_type=account_type)
+    if account is None:
         return
+    target_kind, target_id = _reset_principal(account)
     try:
-        send_otp(identifier=identifier, purpose=OTP.PURPOSE_RESET, ip=ip, user_agent=user_agent)
+        send_otp(
+            identifier=identifier,
+            purpose=OTP.PURPOSE_RESET,
+            target_kind=target_kind,
+            target_id=target_id,
+            ip=ip,
+            user_agent=user_agent,
+        )
     except ThrottledException:
         # Anti-enumeration: an unknown identifier returns silently (202), so a
         # KNOWN identifier on its per-identifier OTP cooldown must NOT surface a
@@ -423,13 +467,27 @@ def reset_password(
     """Complete a password reset: verify the OTP, set the password, end all
     sessions. The user logs in fresh with the new password afterwards."""
     identifier = _normalize(identifier)
-    user = _find_by_identifier(identifier, account_type=account_type)
+    user = _resettable_account(identifier, account_type=account_type)
     # Validate the new password BEFORE consuming the OTP, so a weak-password attempt
     # doesn't burn the (correct) code. Validate EVEN when the account is unknown
     # (user=None) so the weak_password response can't distinguish a registered
     # identifier from an unregistered one (anti-enumeration on the confirm path).
     _validate_new_password(new_password, user)
-    verify_otp(identifier=identifier, code=code, purpose=OTP.PURPOSE_RESET, ip=ip, user_agent=user_agent)
+    if user is None:
+        # Never match an old/unbound reset OTP.  This also keeps an invalid or
+        # administrator-linked target indistinguishable from an unknown account.
+        target_kind, target_id = "invalid", None
+    else:
+        target_kind, target_id = _reset_principal(user)
+    verify_otp(
+        identifier=identifier,
+        code=code,
+        purpose=OTP.PURPOSE_RESET,
+        target_kind=target_kind,
+        target_id=target_id,
+        ip=ip,
+        user_agent=user_agent,
+    )
     if user is None:  # unreachable in practice: no OTP is issued for unknowns
         raise ValidationException(_("Invalid code."))
     if isinstance(user, User):
@@ -459,6 +517,24 @@ def _find_by_identifier(identifier: str, *, account_type: str = ""):
         return account
     users = list(User.objects.filter(**lookup)[:2])
     return users[0] if len(users) == 1 else None
+
+
+def _resettable_account(identifier: str, *, account_type: str = ""):
+    account = _find_by_identifier(identifier, account_type=account_type)
+    if account is None or not account.is_active:
+        return None
+    if not isinstance(account, User) and (not account.user.is_active or _has_privileged_bridge(account)):
+        return None
+    return account
+
+
+def _reset_principal(account) -> tuple[str, int]:
+    if isinstance(account, User):
+        return "user", account.pk
+    for kind, model in _role_account_models().items():
+        if isinstance(account, model):
+            return kind, account.pk
+    raise TypeError("Unsupported password-reset account type.")
 
 
 def _fire_failed(identifier: str, ip: str, user_agent: str, *, reason: str) -> None:

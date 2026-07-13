@@ -27,9 +27,9 @@ class PlacementAttemptRepository(BaseRepository[PlacementAttempt], IPlacementAtt
     model = PlacementAttempt
 
     def base_query(self) -> QuerySet[PlacementAttempt]:
-        return PlacementAttempt.objects.select_related(
-            "test", "student", "student__user"
-        ).prefetch_related("answers", "test__questions")
+        return PlacementAttempt.objects.select_related("test", "student", "student__user").prefetch_related(
+            "answers", "test__questions"
+        )
 
 
 class GroupProposalRepository(BaseRepository[GroupProposal], IGroupProposalRepository):

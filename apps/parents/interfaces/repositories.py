@@ -1,8 +1,7 @@
 """Parent-domain repository ports.
 
-Scoping here is ROLE-based (staff see all; a parent sees only their own rows),
-NOT branch-based — so these ports expose ``scoped``/``get_scoped`` instead of the
-branch helpers used by the org-scoped apps.
+Staff scoping follows active branch/department memberships; a parent sees only
+their own rows. Out-of-scope detail lookups return ``None`` to avoid id leaks.
 """
 
 from __future__ import annotations
@@ -15,7 +14,7 @@ from core.interfaces import IBaseRepository
 
 class IParentRepository(IBaseRepository[ParentProfile]):
     def scoped(self, *, user, roles) -> QuerySet[ParentProfile]:
-        """Parents the caller may read: staff all, a parent only their own row."""
+        """Parents visible through membership scope or self ownership."""
         raise NotImplementedError
 
     def get_scoped(self, *, user, roles, pk: int) -> ParentProfile | None:
@@ -26,8 +25,12 @@ class IParentRepository(IBaseRepository[ParentProfile]):
         """The signed-in user's own parent profile (self-service), or None."""
         raise NotImplementedError
 
-    def students_for(self, parent: ParentProfile) -> QuerySet:
+    def students_for(self, parent: ParentProfile, *, user=None, roles=None) -> QuerySet:
         """The parent's linked students (the sanctioned parents→students link)."""
+        raise NotImplementedError
+
+    def all_students_in_scope(self, parent: ParentProfile, *, user, roles) -> bool:
+        """Whether every child linked to the parent is in the caller's scope."""
         raise NotImplementedError
 
 

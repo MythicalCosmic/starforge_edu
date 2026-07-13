@@ -9,8 +9,9 @@ from django.db.models import Q, QuerySet
 
 from apps.assignments.models import Assignment, Submission
 from core.permissions import Role
+from core.scoping import role_membership_scope_q
 
-STAFF_ROLES = {Role.DIRECTOR, Role.HEAD_OF_DEPT}
+STAFF_ROLES = {Role.DIRECTOR}
 
 
 def _cohorts_taught_by(user) -> QuerySet:
@@ -35,6 +36,15 @@ def scoped_assignments(*, user, roles: set[str] | None = None) -> QuerySet[Assig
         roles = {m.role for m in user.role_memberships.filter(revoked_at__isnull=True)}
     if roles & STAFF_ROLES:
         return qs
+    if Role.HEAD_OF_DEPT in roles:
+        return qs.filter(
+            role_membership_scope_q(
+                user=user,
+                roles={Role.HEAD_OF_DEPT},
+                branch_field="cohort__branch_id",
+                department_field="cohort__department_id",
+            )
+        )
     if Role.TEACHER in roles:  # own cohorts, incl. drafts
         return qs.filter(cohort_id__in=_cohorts_taught_by(user))
     if Role.STUDENT in roles:  # published only, own cohorts
@@ -54,6 +64,15 @@ def scoped_submissions(*, user, roles: set[str] | None = None) -> QuerySet[Submi
         roles = {m.role for m in user.role_memberships.filter(revoked_at__isnull=True)}
     if roles & STAFF_ROLES:
         return qs
+    if Role.HEAD_OF_DEPT in roles:
+        return qs.filter(
+            role_membership_scope_q(
+                user=user,
+                roles={Role.HEAD_OF_DEPT},
+                branch_field="assignment__cohort__branch_id",
+                department_field="assignment__cohort__department_id",
+            )
+        )
     if Role.TEACHER in roles:  # submissions for cohorts they teach
         return qs.filter(assignment__cohort_id__in=_cohorts_taught_by(user))
     if Role.STUDENT in roles:  # own submissions only

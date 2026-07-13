@@ -163,9 +163,7 @@ def _parse_working_hours(request: HttpRequest) -> list[WorkingHourDTO]:
     except (json.JSONDecodeError, ValueError):
         raise ValidationException("Body must be valid JSON.", code="invalid_json") from None
     if not isinstance(data, list):
-        raise ValidationException(
-            "Body must be a list of working-hour rows.", code="validation_error"
-        )
+        raise ValidationException("Body must be a list of working-hour rows.", code="validation_error")
     rows: list[WorkingHourDTO] = []
     for i, row in enumerate(data):
         if not isinstance(row, dict):

@@ -104,7 +104,9 @@ def _create_data(request: HttpRequest) -> dict[str, Any]:
         "primary_domain": _str_required(_require(data, "primary_domain"), "primary_domain", max_length=253),
         "contact_name": str_field(data, "contact_name", max_length=200),
         "contact_phone": str_field(data, "contact_phone", max_length=32),
-        "contact_email": _validate_email_value(str_field(data, "contact_email", max_length=254), "contact_email"),
+        "contact_email": _validate_email_value(
+            str_field(data, "contact_email", max_length=254), "contact_email"
+        ),
     }
 
 

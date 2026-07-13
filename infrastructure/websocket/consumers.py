@@ -18,6 +18,7 @@ stale membership on the shared channel layer.
 from __future__ import annotations
 
 import asyncio
+import json
 
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
@@ -36,6 +37,7 @@ def _session_still_valid(raw_token: str, schema: str | None) -> bool:
     with schema_context(schema or get_public_schema_name()):
         return validate_session_key(raw_token) is not None
 
+
 # Server ping cadence and tolerance. Class attributes so tests can patch the
 # interval down (a 30s real interval would make the heartbeat tests glacial).
 HEARTBEAT_INTERVAL = 30  # seconds between server pings
@@ -49,6 +51,7 @@ MAX_INBOUND_BYTES = 64 * 1024
 CLOSE_UNAUTHORIZED = 4401  # anonymous / cross-tenant / stale tv
 CLOSE_FORBIDDEN = 4403  # authenticated but not permitted (branch scope)
 CLOSE_HEARTBEAT = 4408  # heartbeat timeout (missed pongs)
+CLOSE_INVALID_FRAME = 4400  # binary / malformed JSON control frame
 
 
 def accepted_subprotocol(scope) -> str | None:
@@ -143,9 +146,23 @@ class HeartbeatConsumerMixin(AsyncJsonWebsocketConsumer):
     async def receive(self, text_data=None, bytes_data=None, **kwargs):
         # Drop an oversized inbound frame undecoded (DoS guard) before the JSON
         # parse; otherwise preserve the base behavior.
+        if bytes_data is not None:
+            await self._close_invalid_frame()
+            return
         if text_data is not None and len(text_data) > MAX_INBOUND_BYTES:
             return
-        await super().receive(text_data=text_data, bytes_data=bytes_data, **kwargs)
+        try:
+            await super().receive(text_data=text_data, bytes_data=None, **kwargs)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            await self._close_invalid_frame()
+
+    async def _close_invalid_frame(self) -> None:
+        """Close malformed clients without leaking their tracked Redis groups."""
+        if self._heartbeat_task is not None:
+            self._heartbeat_task.cancel()
+            self._heartbeat_task = None
+        await self._discard_groups()
+        await self.close(code=CLOSE_INVALID_FRAME)
 
     async def receive_json(self, content, **kwargs):
         # A non-dict JSON frame (e.g. "hi", 42, [1]) would make content.get raise

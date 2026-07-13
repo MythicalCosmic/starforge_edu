@@ -14,6 +14,7 @@ from apps.reports.generators.base import (
     ReportGenerator,
     enforce_report_row_cap,
     is_full_scope,
+    membership_branch_ids,
     teacher_cohort_ids,
 )
 
@@ -35,8 +36,12 @@ class GradesGenerator(ReportGenerator):
             qs = qs.filter(term_id=params["term_id"])
         if params.get("subject_id"):
             qs = qs.filter(subject_id=params["subject_id"])
+        if params.get("branch_id"):
+            qs = qs.filter(student__branch_id=params["branch_id"])
 
-        if not full:
+        if not full and "teacher" not in roles:
+            qs = qs.filter(student__branch_id__in=membership_branch_ids(user))
+        if "teacher" in roles:
             cohort_ids = teacher_cohort_ids(user)
             qs = qs.filter(
                 student__cohort_memberships__cohort_id__in=cohort_ids,

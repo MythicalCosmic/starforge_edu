@@ -23,7 +23,11 @@ class FormRepository(BaseRepository[Form], IFormRepository):
             # A builder manages only their own branches' forms (+ anything they made) —
             # never another branch's responses/summaries (the isolation gate: every
             # detail action resolves through this queryset).
-            return qs.filter(Q(created_by=user) | Q(branch_id__in=branch_ids))
+            return qs.filter(
+                Q(created_by=user)
+                | Q(branch_id__in=branch_ids)
+                | Q(branch__isnull=True, status=Form.Status.PUBLISHED)
+            )
         # Responders: PUBLISHED forms in their branch, plus centre-wide (branch null).
         return qs.filter(status=Form.Status.PUBLISHED).filter(
             Q(branch_id__in=branch_ids) | Q(branch__isnull=True)

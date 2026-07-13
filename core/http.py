@@ -53,7 +53,9 @@ def str_field(data: dict[str, Any], name: str, *, default: str = "", max_length:
     return value
 
 
-def int_field(data: dict[str, Any], name: str, *, required: bool = False, default: int | None = None) -> int | None:
+def int_field(
+    data: dict[str, Any], name: str, *, required: bool = False, default: int | None = None
+) -> int | None:
     """An int field (accepts an int or a numeric string). Missing -> default / 400 if required."""
     if name not in data or data[name] is None:
         if required:

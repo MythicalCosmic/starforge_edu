@@ -36,8 +36,12 @@ def departments_collection_view(request: HttpRequest) -> HttpResponse:
         check_perm(request, f"{_RESOURCE}:read")
         qs = scope_to_branches(request, _service().list())
         qs = apply_filters(
-            request, qs, filter_fields=_FILTERS, search_fields=_SEARCH,
-            ordering_fields=_ORDERING, default_ordering="name",
+            request,
+            qs,
+            filter_fields=_FILTERS,
+            search_fields=_SEARCH,
+            ordering_fields=_ORDERING,
+            default_ordering="name",
         )
         items, total, page, size = paginate(request, qs)
         return paginated([department_to_dict(d) for d in items], total=total, page=page, page_size=size)

@@ -100,9 +100,7 @@ def _validate_question(question_type: str, options: Any, correct_answer: Any) ->
                     _("Every correct answer must be one of the options."), code="answer_not_in_options"
                 )
             if len(set(correct_answer)) != len(correct_answer):
-                raise ValidationException(
-                    _("The correct answers must be unique."), code="duplicate_answers"
-                )
+                raise ValidationException(_("The correct answers must be unique."), code="duplicate_answers")
     elif question_type == _QT.SHORT_ANSWER:
         # The key is a non-empty list of acceptable answers (synonyms / spellings);
         # a typed response auto-grades correct if it normalizes to any of them.
@@ -207,9 +205,7 @@ def remove_question(*, question: PlacementQuestion) -> None:
 def submit_for_review(*, test: PlacementTest) -> PlacementTest:
     """DRAFT → PENDING. A test must have at least one question to be reviewable."""
     if test.status != PlacementTest.Status.DRAFT:
-        raise UnprocessableEntity(
-            _("Only a draft test can be submitted for review."), code="test_not_draft"
-        )
+        raise UnprocessableEntity(_("Only a draft test can be submitted for review."), code="test_not_draft")
     if not test.questions.exists():
         raise UnprocessableEntity(
             _("Add at least one question before submitting."), code="test_has_no_questions"
@@ -228,9 +224,7 @@ def approve_test(*, test: PlacementTest, approver) -> PlacementTest:
     can't race a concurrent approval."""
     test = PlacementTest.objects.select_for_update().get(pk=test.pk)
     if test.status != PlacementTest.Status.PENDING:
-        raise UnprocessableEntity(
-            _("Only a test pending review can be approved."), code="test_not_pending"
-        )
+        raise UnprocessableEntity(_("Only a test pending review can be approved."), code="test_not_pending")
     if test.created_by_id is not None and test.created_by_id == approver.id:
         raise PermissionException(
             _("You cannot approve a placement test you built yourself."), code="self_approval"
@@ -249,9 +243,7 @@ def reject_test(*, test: PlacementTest, reviewer, reason: str) -> PlacementTest:
     and re-submitted."""
     test = PlacementTest.objects.select_for_update().get(pk=test.pk)
     if test.status != PlacementTest.Status.PENDING:
-        raise UnprocessableEntity(
-            _("Only a test pending review can be rejected."), code="test_not_pending"
-        )
+        raise UnprocessableEntity(_("Only a test pending review can be rejected."), code="test_not_pending")
     test.status = PlacementTest.Status.DRAFT
     test.submitted_at = None
     test.reject_reason = reason
@@ -344,17 +336,13 @@ def _grade_answer(question: PlacementQuestion, response: Any) -> tuple[bool | No
 def assign_test(*, test: PlacementTest, student, assigned_by=None) -> PlacementAttempt:
     """Give an approved test to a prospective student. One attempt per (test, student)."""
     if test.status != PlacementTest.Status.APPROVED:
-        raise UnprocessableEntity(
-            _("Only an approved test can be assigned."), code="test_not_approved"
-        )
+        raise UnprocessableEntity(_("Only an approved test can be assigned."), code="test_not_approved")
     if student.status not in _PROSPECTIVE_STATUSES:
         raise UnprocessableEntity(
             _("Placement tests are only for prospective students."), code="student_not_prospective"
         )
     if PlacementAttempt.objects.filter(test=test, student=student).exists():
-        raise ConflictException(
-            _("This student already has this placement test."), code="already_assigned"
-        )
+        raise ConflictException(_("This student already has this placement test."), code="already_assigned")
     # F8-2 timer: a timed test gives the lead a fixed window from assignment.
     expires_at = None
     if test.time_limit_minutes:
@@ -502,9 +490,7 @@ def propose_group(*, student, cohort, proposed_by) -> GroupProposal:
         # Savepoint so a racing duplicate hits the partial unique constraint as a
         # clean 409, not a 500 (mirrors assign_test / enroll_student_in_cohort).
         with transaction.atomic():
-            proposal = GroupProposal.objects.create(
-                student=student, cohort=cohort, proposed_by=proposed_by
-            )
+            proposal = GroupProposal.objects.create(student=student, cohort=cohort, proposed_by=proposed_by)
     except IntegrityError:
         raise ConflictException(
             _("This student already has a pending proposal for this group."), code="already_proposed"
@@ -524,9 +510,7 @@ def accept_proposal(*, proposal: GroupProposal, manager) -> GroupProposal:
         GroupProposal.objects.select_for_update().select_related("student", "cohort").get(pk=proposal.pk)
     )
     if proposal.status != GroupProposal.Status.PENDING:
-        raise UnprocessableEntity(
-            _("Only a pending proposal can be accepted."), code="proposal_not_pending"
-        )
+        raise UnprocessableEntity(_("Only a pending proposal can be accepted."), code="proposal_not_pending")
     if proposal.proposed_by_id is not None and proposal.proposed_by_id == manager.id:
         raise PermissionException(
             _("You cannot accept a group proposal you made yourself."), code="self_acceptance"
@@ -543,9 +527,7 @@ def reject_proposal(*, proposal: GroupProposal, manager, reason: str) -> GroupPr
     """A manager rejects a pending proposal with a reason. No enrollment happens."""
     proposal = GroupProposal.objects.select_for_update().get(pk=proposal.pk)
     if proposal.status != GroupProposal.Status.PENDING:
-        raise UnprocessableEntity(
-            _("Only a pending proposal can be rejected."), code="proposal_not_pending"
-        )
+        raise UnprocessableEntity(_("Only a pending proposal can be rejected."), code="proposal_not_pending")
     proposal.status = GroupProposal.Status.REJECTED
     proposal.decided_by = manager
     proposal.decided_at = timezone.now()
@@ -658,9 +640,7 @@ def apply_generated_questions(*, test_id: int, output_text: str) -> int:
             continue  # the model proposed a type this center has disabled — drop it
         options = item.get("options") or []
         correct = (
-            None
-            if question_type in PlacementQuestion.HUMAN_GRADED_TYPES
-            else item.get("correct_answer")
+            None if question_type in PlacementQuestion.HUMAN_GRADED_TYPES else item.get("correct_answer")
         )
         # Coerce a stringified boolean the model may emit for true/false.
         if (
@@ -708,12 +688,8 @@ def request_writing_marking(*, attempt: PlacementAttempt, requested_by=None):
     from core.utils import current_schema
 
     if attempt.status != PlacementAttempt.Status.GRADED:
-        raise UnprocessableEntity(
-            _("Only a submitted attempt can be marked."), code="attempt_not_graded"
-        )
-    writing_qids = set(
-        attempt.test.questions.filter(question_type=_QT.WRITING).values_list("id", flat=True)
-    )
+        raise UnprocessableEntity(_("Only a submitted attempt can be marked."), code="attempt_not_graded")
+    writing_qids = set(attempt.test.questions.filter(question_type=_QT.WRITING).values_list("id", flat=True))
     if not writing_qids or not attempt.answers.filter(question_id__in=writing_qids).exists():
         raise UnprocessableEntity(
             _("This attempt has no writing answers to mark."), code="no_writing_answers"
@@ -756,9 +732,7 @@ def apply_writing_marks(*, attempt_id: int, output_text: str) -> int:
         return 0
     writing_answers = {
         a.question_id: a
-        for a in attempt.answers.select_related("question").filter(
-            question__question_type=_QT.WRITING
-        )
+        for a in attempt.answers.select_related("question").filter(question__question_type=_QT.WRITING)
     }
     if not writing_answers:
         return 0
@@ -801,9 +775,7 @@ def mark_writing_manually(*, attempt: PlacementAttempt, marks: list[dict]) -> Pl
         .get(pk=attempt.pk)
     )
     if attempt.status != PlacementAttempt.Status.GRADED:
-        raise UnprocessableEntity(
-            _("Only a submitted attempt can be marked."), code="attempt_not_graded"
-        )
+        raise UnprocessableEntity(_("Only a submitted attempt can be marked."), code="attempt_not_graded")
     # Any human-marked type (writing + the reading/listening/speaking media skills).
     writing_answers = {
         a.question_id: a

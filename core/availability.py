@@ -27,17 +27,42 @@ from django.core.cache import cache
 # URL mount (/api/v1/<mount>/) -> app label. Most mounts equal the label; the exceptions
 # are listed explicitly. Anything not here is treated as an unmanaged path (always up).
 APP_MOUNTS: dict[str, str] = {
-    "auth": "auth", "users": "users", "org": "org", "students": "students",
-    "parents": "parents", "teachers": "teachers", "cohorts": "cohorts",
-    "schedule": "schedule", "attendance": "attendance", "academics": "academics",
-    "assignments": "assignments", "content": "content", "printing": "printing",
-    "finance": "finance", "payments": "payments", "notifications": "notifications",
-    "ai": "ai", "audit": "audit", "reports": "reports", "approvals": "approvals",
-    "rulebook": "compliance", "access": "access", "forms": "forms", "tasks": "staff_tasks",
-    "messaging": "messaging", "intelligence": "intelligence", "achievements": "achievements",
-    "rewards": "rewards", "cover": "covers", "loans": "loans", "procurement": "procurement",
-    "campaigns": "campaigns", "sales": "sales", "meetings": "meetings",
-    "placement": "placement", "cards": "cards",
+    "auth": "auth",
+    "users": "users",
+    "org": "org",
+    "students": "students",
+    "parents": "parents",
+    "teachers": "teachers",
+    "cohorts": "cohorts",
+    "schedule": "schedule",
+    "attendance": "attendance",
+    "academics": "academics",
+    "assignments": "assignments",
+    "content": "content",
+    "printing": "printing",
+    "finance": "finance",
+    "payments": "payments",
+    "notifications": "notifications",
+    "ai": "ai",
+    "audit": "audit",
+    "reports": "reports",
+    "approvals": "approvals",
+    "rulebook": "compliance",
+    "access": "access",
+    "forms": "forms",
+    "tasks": "staff_tasks",
+    "messaging": "messaging",
+    "intelligence": "intelligence",
+    "achievements": "achievements",
+    "rewards": "rewards",
+    "cover": "covers",
+    "loans": "loans",
+    "procurement": "procurement",
+    "campaigns": "campaigns",
+    "sales": "sales",
+    "meetings": "meetings",
+    "placement": "placement",
+    "cards": "cards",
 }
 
 # The dependency graph. HARD = the app cannot function without it (down -> 503). SOFT = the
@@ -150,7 +175,9 @@ def _resolve(app: str, disabled: set[str], seen: frozenset[str]) -> tuple[str, l
     for hard in deps.get("hard", []):
         h_status, _ = _resolve(hard, disabled, seen)
         if h_status in (STATUS_DISABLED, STATUS_UNAVAILABLE):
-            return STATUS_UNAVAILABLE, [f"The {app} service is unavailable: it requires {hard}, which is down."]
+            return STATUS_UNAVAILABLE, [
+                f"The {app} service is unavailable: it requires {hard}, which is down."
+            ]
     for soft in deps.get("soft", []):
         s_status, _ = _resolve(soft, disabled, seen)
         if s_status in (STATUS_DISABLED, STATUS_UNAVAILABLE):

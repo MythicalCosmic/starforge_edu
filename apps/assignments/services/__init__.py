@@ -16,11 +16,12 @@ from datetime import timedelta
 from decimal import Decimal
 from pathlib import PurePosixPath
 
+from botocore.exceptions import ClientError
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
-from apps.assignments.models import Assignment, Submission, SubmissionGrade
+from apps.assignments.models import Assignment, AssignmentUploadGrant, Submission, SubmissionGrade
 from apps.assignments.signals import (
     ai_feedback_requested,
     assignment_due_soon,
@@ -31,14 +32,16 @@ from apps.cohorts.models import CohortMembership
 from apps.org.selectors import get_center_settings
 from core.exceptions import ConflictException, UnprocessableEntity
 from core.utils import current_schema
-from infrastructure.storage.s3_client import presign_upload
+from infrastructure.storage.s3_client import head_object, presign_post_upload, presign_upload
 
 # ---------------------------------------------------------------------------
 # Attachment upload (presigned PUT)
 # ---------------------------------------------------------------------------
 
 
-def validate_and_presign_upload(*, filename: str, content_type: str, size_bytes: int) -> dict:
+def validate_and_presign_upload(
+    *, filename: str, content_type: str, size_bytes: int, requested_by=None
+) -> dict:
     """Validate against the `allowed_file_types` / `max_upload_mb` knobs (TD-13)
     and return a presigned PUT URL + the tenant-prefixed key."""
     settings = get_center_settings()
@@ -79,8 +82,80 @@ def validate_and_presign_upload(*, filename: str, content_type: str, size_bytes:
             fields={"size_bytes": [f"Exceeds the {settings.max_upload_mb} MB limit."]},
         )
     key = f"{current_schema()}/assignments/{uuid.uuid4().hex}/{filename}"
+    if requested_by is not None:
+        expires_at = timezone.now() + timedelta(minutes=10)
+        grant = AssignmentUploadGrant.objects.create(
+            key=key,
+            requested_by=requested_by,
+            content_type=content_type,
+            expected_size_bytes=size_bytes,
+            expires_at=expires_at,
+        )
+        post = presign_post_upload(key, content_type=content_type, size_bytes=size_bytes)
+        return {
+            "url": post["url"],
+            "fields": post["fields"],
+            "method": "POST",
+            "key": key,
+            "grant_id": grant.pk,
+            "expires_at": expires_at.isoformat(),
+        }
+    # Backwards-compatible internal helper. Public API callers always provide an
+    # owner and receive the enforceable POST policy above.
     url = presign_upload(key, content_type=content_type)
     return {"url": url, "key": key}
+
+
+def _verify_and_consume_upload_grants(*, keys: list[str], actor) -> None:
+    """Require live, single-use grants and verify the objects S3 actually stored."""
+    if not keys:
+        return
+    now = timezone.now()
+    grants = {
+        grant.key: grant
+        for grant in AssignmentUploadGrant.objects.select_for_update().filter(
+            key__in=keys,
+            requested_by=actor,
+            consumed_at__isnull=True,
+            expires_at__gt=now,
+        )
+    }
+    if set(grants) != set(keys):
+        raise UnprocessableEntity(
+            _("An attachment upload grant is missing, expired, already used, or belongs to another user."),
+            code="invalid_attachment_grant",
+            fields={"attachment_keys": ["Request a new upload URL and upload the file again."]},
+        )
+    for key in keys:
+        grant = grants[key]
+        try:
+            metadata = head_object(key)
+        except ClientError as exc:
+            code = str(exc.response.get("Error", {}).get("Code", ""))
+            if code not in {"404", "NoSuchKey", "NotFound"}:
+                raise
+            raise UnprocessableEntity(
+                _("An uploaded attachment could not be verified."),
+                code="attachment_not_uploaded",
+                fields={"attachment_keys": ["The object does not exist in storage."]},
+            ) from exc
+        actual_size = int(metadata.get("ContentLength", -1))
+        actual_type = str(metadata.get("ContentType", "")).split(";", 1)[0].strip().lower()
+        if actual_size != grant.expected_size_bytes:
+            raise UnprocessableEntity(
+                _("An uploaded attachment has the wrong size."),
+                code="attachment_size_mismatch",
+                fields={"attachment_keys": ["The stored object size does not match its upload grant."]},
+            )
+        if actual_type != grant.content_type.lower():
+            raise UnprocessableEntity(
+                _("An uploaded attachment has the wrong content type."),
+                code="attachment_type_mismatch",
+                fields={"attachment_keys": ["The stored content type does not match its upload grant."]},
+            )
+        grant.actual_size_bytes = actual_size
+        grant.consumed_at = now
+        grant.save(update_fields=["actual_size_bytes", "consumed_at"])
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +225,8 @@ def submit(
             code="invalid_attachment_key",
             fields={"attachment_keys": [f"Keys must start with '{prefix}'."]},
         )
+    if actor is not None:
+        _verify_and_consume_upload_grants(keys=keys, actor=actor)
 
     settings = get_center_settings()
     max_resubmits = (

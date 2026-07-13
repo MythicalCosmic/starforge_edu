@@ -77,6 +77,7 @@ class PlatformEvent(models.Model):
         CENTER_SUSPENDED = "center.suspended", _("Center suspended")
         CENTER_ACTIVATED = "center.activated", _("Center activated")
         CENTER_TRIAL_EXTENDED = "center.trial_extended", _("Center trial extended")
+        CENTER_TRIAL_EXPIRED = "center.trial_expired", _("Center trial expired")
         CENTER_CREATED = "center.created", _("Center created")
         SUBSCRIPTION_CHANGED = "subscription.changed", _("Subscription changed")
         IMPERSONATION_MINTED = "impersonation.minted", _("Impersonation token minted")

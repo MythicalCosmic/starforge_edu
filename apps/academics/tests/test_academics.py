@@ -10,6 +10,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from django.test import override_settings
 from django_tenants.utils import schema_context
 
 from apps.academics import selectors, services
@@ -29,7 +30,7 @@ from apps.parents.tests.factories import GuardianFactory, ParentProfileFactory
 from apps.schedule.tests.factories import TermFactory
 from apps.students.tests.factories import StudentProfileFactory
 from apps.teachers.tests.factories import TeacherProfileFactory
-from core.exceptions import UnprocessableEntity
+from core.exceptions import ThrottledException, UnprocessableEntity
 
 pytestmark = pytest.mark.django_db
 
@@ -359,9 +360,7 @@ def test_transcript_post_returns_202_pending(tenant_a, user_in, as_user):
         assert Transcript.objects.filter(pk=body["id"], status="pending").exists()
 
 
-def test_transcript_request_hides_student_existence_from_unauthorized_reader(
-    tenant_a, user_in, as_user
-):
+def test_transcript_request_hides_student_existence_from_unauthorized_reader(tenant_a, user_in, as_user):
     viewer = user_in(tenant_a, roles=["student"])
     with schema_context(tenant_a.schema_name):
         target: Any = StudentProfileFactory()
@@ -382,6 +381,114 @@ def test_transcript_request_hides_student_existence_from_unauthorized_reader(
 
     assert existing.status_code == missing.status_code == 404
     assert existing.json()["code"] == missing.json()["code"] == "not_found"
+
+
+def test_hod_transcript_request_and_listing_are_branch_scoped(tenant_a, user_in, as_user):
+    with schema_context(tenant_a.schema_name):
+        own_branch = BranchFactory()
+        foreign_branch = BranchFactory()
+        own_student = StudentProfileFactory(branch=own_branch)
+        foreign_student = StudentProfileFactory(branch=foreign_branch)
+    hod = user_in(tenant_a, roles=["head_of_dept"], branch=own_branch)
+    client = as_user(tenant_a, hod)
+
+    own = client.post("/api/v1/academics/transcripts/", {"student": own_student.pk}, format="json")
+    foreign = client.post("/api/v1/academics/transcripts/", {"student": foreign_student.pk}, format="json")
+    assert own.status_code == 202
+    assert foreign.status_code == 404
+    listed = client.get("/api/v1/academics/transcripts/").json()
+    assert [row["id"] for row in listed["data"]] == [own.json()["data"]["id"]]
+
+
+def test_department_hod_academics_reads_and_exam_writes_exclude_sibling_department(
+    tenant_a, user_in, as_user
+):
+    from apps.org.tests.factories import DepartmentFactory
+    from apps.users.models import RoleMembership
+    from core.permissions import Role
+
+    hod = user_in(tenant_a)
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        own_department = DepartmentFactory(branch=branch)
+        sibling_department = DepartmentFactory(branch=branch)
+        own_cohort = CohortFactory(branch=branch, department=own_department)
+        sibling_cohort = CohortFactory(branch=branch, department=sibling_department)
+        own_student = StudentProfileFactory(branch=branch, current_cohort=own_cohort)
+        sibling_student = StudentProfileFactory(branch=branch, current_cohort=sibling_cohort)
+        subject = SubjectFactory()
+        term = TermFactory()
+        exam_type = ExamTypeFactory()
+        own_grade = GradeFactory(student=own_student, subject=subject, term=term)
+        sibling_grade = GradeFactory(student=sibling_student, subject=subject, term=term)
+        own_exam = ExamFactory(
+            subject=subject,
+            cohort=own_cohort,
+            term=term,
+            exam_type=exam_type,
+        )
+        sibling_exam = ExamFactory(
+            subject=subject,
+            cohort=sibling_cohort,
+            term=term,
+            exam_type=exam_type,
+        )
+        own_transcript = Transcript.objects.create(student=own_student, requested_by=hod)
+        sibling_transcript = Transcript.objects.create(student=sibling_student, requested_by=hod)
+        RoleMembership.objects.create(
+            user=hod,
+            branch=branch,
+            department=own_department,
+            role=Role.HEAD_OF_DEPT,
+        )
+        hod.refresh_from_db()
+
+    client = as_user(tenant_a, hod)
+    assert {row["id"] for row in client.get("/api/v1/academics/grades/").json()["data"]} == {own_grade.id}
+    assert sibling_grade.id != own_grade.id
+    assert {row["id"] for row in client.get("/api/v1/academics/exams/").json()["data"]} == {own_exam.id}
+    assert client.get(f"/api/v1/academics/exams/{sibling_exam.id}/").status_code == 404
+    assert {row["id"] for row in client.get("/api/v1/academics/transcripts/").json()["data"]} == {
+        own_transcript.id
+    }
+    assert sibling_transcript.id != own_transcript.id
+
+    payload = {
+        "subject": subject.id,
+        "term": term.id,
+        "exam_type": exam_type.id,
+        "title": "Scoped exam",
+        "exam_date": date(2026, 4, 1).isoformat(),
+        "max_score": "100",
+        "weight": "1.0",
+    }
+    denied = client.post(
+        "/api/v1/academics/exams/",
+        {**payload, "cohort": sibling_cohort.id},
+        format="json",
+    )
+    assert denied.status_code == 400
+    allowed = client.post(
+        "/api/v1/academics/exams/",
+        {**payload, "cohort": own_cohort.id},
+        format="json",
+    )
+    assert allowed.status_code == 201, allowed.content
+
+
+@override_settings(TRANSCRIPT_MAX_ACTIVE_PER_USER=1)
+def test_transcript_admission_is_idempotent_and_capped(tenant_a, user_in):
+    with schema_context(tenant_a.schema_name):
+        actor = user_in(tenant_a, roles=["director"])
+        branch = BranchFactory()
+        first_student = StudentProfileFactory(branch=branch)
+        second_student = StudentProfileFactory(branch=branch)
+        first = services.request_transcript(student=first_student, requested_by=actor)
+        duplicate = services.request_transcript(student=first_student, requested_by=actor)
+        assert duplicate.pk == first.pk
+        with pytest.raises(ThrottledException) as exc:
+            services.request_transcript(student=second_student, requested_by=actor)
+        assert exc.value.code == "transcript_user_queue_full"
 
 
 # weasyprint needs GTK native libs (cairo/pango) absent on the Windows dev box;
@@ -535,7 +642,9 @@ def test_json_results_array_is_capped(tenant_a, user_in, as_user, monkeypatch):
     with schema_context(tenant_a.schema_name):
         branch = BranchFactory()
         exam: Any = ExamFactory(
-            subject=SubjectFactory(), cohort=CohortFactory(branch=branch), term=TermFactory(),
+            subject=SubjectFactory(),
+            cohort=CohortFactory(branch=branch),
+            term=TermFactory(),
             max_score=Decimal("100"),
         )
         students = [StudentProfileFactory(branch=branch).id for _ in range(3)]
@@ -768,9 +877,7 @@ def test_teacher_cannot_recompute_grades_for_non_taught_cohort(tenant_a, user_in
     assert foreign.status_code == 403
     assert foreign.json()["code"] == "forbidden"
 
-    ok = client.post(
-        "/api/v1/academics/grades/recompute/", {**body, "cohort": own_id}, format="json"
-    )
+    ok = client.post("/api/v1/academics/grades/recompute/", {**body, "cohort": own_id}, format="json")
     assert ok.status_code == 200
 
 

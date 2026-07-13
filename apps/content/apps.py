@@ -60,3 +60,7 @@ class ContentConfig(AppConfig):
         container.register(IFolderService, FolderService)
         container.register(ILessonFileService, LessonFileService)
         container.register(ILibraryMaterialService, LibraryMaterialService)
+
+        # Register storage lifecycle receivers after the models and task plumbing
+        # are ready.  Importing for side effects is intentional.
+        from apps.content import receivers  # noqa: F401

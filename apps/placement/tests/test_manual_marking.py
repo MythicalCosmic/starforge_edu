@@ -33,8 +33,12 @@ def _setup(tenant, user_in, as_user):
         lead = StudentProfileFactory.create(user=lead_u, branch=branch, status=StudentProfile.Status.LEAD)
         test = services.create_test(title="EN", created_by=teacher_u, branch=branch)
         q_obj = services.add_question(
-            test=test, prompt="2+2?", question_type="single_choice", options=["3", "4"],
-            correct_answer="4", points=2,
+            test=test,
+            prompt="2+2?",
+            question_type="single_choice",
+            options=["3", "4"],
+            correct_answer="4",
+            points=2,
         )
         q_write = services.add_question(
             test=test, prompt="Write about your day.", question_type="writing", points=8

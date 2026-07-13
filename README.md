@@ -3,7 +3,8 @@
 Multi-tenant Django backend for an Uzbek education platform.
 
 ## Stack
-- Django 6.0 + DRF 3.17, simplejwt, drf-spectacular
+- Django 6.0 with layered plain-Django APIs; DRF remains only for reports compatibility
+- Custom whole-API OpenAPI 3.0 schema, Swagger UI, and Redoc
 - django-tenants (schema-per-tenant) with subdomain routing
 - Channels + Redis (realtime); Celery + tenant-schemas-celery (background)
 - Postgres 16, S3-compatible storage (MinIO in dev / AWS S3 in prod)
@@ -15,7 +16,7 @@ Multi-tenant Django backend for an Uzbek education platform.
 ```
 config/        Django project: settings split, urls, asgi/wsgi, celery
 apps/          One Django app per domain (tenancy, org, users, auth, ...)
-core/          Cross-cutting primitives (permissions, viewsets, exceptions)
+core/          Cross-cutting primitives (auth, permissions, HTTP, schema, exceptions)
 infrastructure/ External clients (sms, storage, ai, payments, websocket)
 celery_tasks/  Background job modules
 docker/        Multi-service compose stack
@@ -56,15 +57,21 @@ Then hit:
 - Channels consumers resolve tenant from hostname before any DB access (`infrastructure/websocket/middleware.py`).
 
 ## Auth
-- JWT everywhere via `djangorestframework-simplejwt` (15-min access, 14-day rotating refresh, blacklist via `token_blacklist`). Tokens are tenant-bound (`schema` claim) and version-bound (`tv` claim) on both the access and refresh paths.
-- **Login = username + password**: `POST /api/v1/auth/login/ {username, password}` → `{access, refresh}`. Throttled per-username (5/min) and per-IP (10/min).
+- The API uses opaque, revocable server-side sessions. Send the returned key as `Authorization: Bearer <access>`; the tenant schema containing the session binds it to that center.
+- Student, teacher, parent, and staff identities and passwords live in their own role tables. Use `POST /api/v1/auth/role-login/ {username, password}` → `{success, data:{access, role, must_change_password}}`. Login is throttled per identifier and per IP.
+- `POST /api/v1/auth/login/` is reserved for Django/platform-admin accounts and rejects role-account bridge principals.
 - **Password reset = OTP** via Eskiz SMS or email: `POST /api/v1/auth/password/reset/{request,confirm}/`. Throttled per-identifier (3/min), per-IP, and globally; responses never reveal whether an account exists.
-- Password change: `POST /api/v1/auth/password/change/` — ends every other session, returns a fresh pair.
-- `/admin/` keeps Django sessions; staff may log in with username, phone, or email (`apps.auth.backends.PhoneOrEmailBackend`).
+- Password change revokes all prior sessions and returns one fresh opaque session.
+- `/admin/` uses Django's normal session authentication. Role accounts are managed in separate Student, Teacher, Parent, and Staff admin sections; hidden compatibility principals are not selectable in the User table.
 
 ## Permissions
 - Role-permission matrix lives in `core/permissions.py`.
-- `RolePermission` (action-level) + `ObjectScopedPermission` (branch/department) compose on every `TenantSafeModelViewSet`.
+- Layered views call `check_perm()` for action-level access and query through branch/department-scoped selectors and repositories. Role changes are evaluated live on every request.
+
+## API contract
+- Tenant schema: `/api/schema/`; public/platform schema: the same path on the apex host.
+- Swagger UI: `/api/schema/swagger-ui/`; Redoc: `/api/schema/redoc/`.
+- `uv run python scripts/export_openapi.py --validate` exports `openapi.yaml` and `openapi-public.yaml` and verifies all operation IDs are unique.
 
 ## Tests
 ```bash

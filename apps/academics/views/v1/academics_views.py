@@ -301,16 +301,29 @@ def exam_type_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
 
 
 def _writable_cohort_ids(request: HttpRequest):
-    """Cohorts the caller may write an exam into. None = unscoped (staff/superuser
-    reach the whole tenant); a set = a TEACHER limited to cohorts they teach."""
-    from apps.academics.selectors import STAFF_ROLES, _cohorts_taught_by
+    """Cohorts the caller may write into: director all, HoD scope, teacher taught."""
+    from apps.academics.selectors import _cohorts_taught_by
 
     user = request.user
     if getattr(user, "is_superuser", False):
         return None
     roles = get_user_roles(request)
-    if roles & STAFF_ROLES:
+    if Role.DIRECTOR in roles:
         return None
+    if Role.HEAD_OF_DEPT in roles:
+        from apps.cohorts.models import Cohort
+        from core.scoping import role_membership_scope_q
+
+        return set(
+            Cohort.objects.filter(
+                role_membership_scope_q(
+                    user=user,
+                    roles={Role.HEAD_OF_DEPT},
+                    branch_field="branch_id",
+                    department_field="department_id",
+                )
+            ).values_list("pk", flat=True)
+        )
     if Role.TEACHER in roles:
         return set(_cohorts_taught_by(user))
     return set()
@@ -340,7 +353,9 @@ def _exam_changes(request: HttpRequest) -> dict[str, Any]:
     if "term" in data:
         changes["term"] = _int_value(data["term"], "term")
     if "exam_type" in data:
-        changes["exam_type"] = None if data["exam_type"] is None else _int_value(data["exam_type"], "exam_type")
+        changes["exam_type"] = (
+            None if data["exam_type"] is None else _int_value(data["exam_type"], "exam_type")
+        )
     if "title" in data:
         changes["title"] = _str_value(data["title"], "title", max_length=200)
     if "exam_date" in data:
@@ -557,9 +572,7 @@ def grade_recompute_view(request: HttpRequest) -> HttpResponse:
     # cohort's (or another branch's) grades. None = staff/superuser, unscoped.
     writable = _writable_cohort_ids(request)
     if writable is not None and cohort_id not in writable:
-        raise PermissionException(
-            "You may only recompute grades for cohorts you teach.", code="forbidden"
-        )
+        raise PermissionException("You may only recompute grades for cohorts you teach.", code="forbidden")
     grades = _grade_service().recompute(cohort=cohort, subject=subject, term=term, publish=publish)
     return success({"recomputed": len(grades)})
 
@@ -593,10 +606,13 @@ def transcripts_collection_view(request: HttpRequest) -> HttpResponse:
         student = StudentProfile.objects.filter(pk=_int_value(_require(data, "student"), "student")).first()
         # Uniform not-found for a missing student and an existing student outside
         # the caller's authority. A 400-vs-403 split is a tenant-wide ID oracle.
-        if student is None or (
-            not _is_self_or_child(request, student)
-            and not has_permission_code(get_user_roles(request), "academics:write")
-        ):
+        roles = get_user_roles(request)
+        staff_scoped = False
+        if student is not None and has_permission_code(roles, "academics:write"):
+            from apps.students.selectors import scoped_students
+
+            staff_scoped = scoped_students(user=request.user, roles=roles).filter(pk=student.pk).exists()
+        if student is None or (not _is_self_or_child(request, student) and not staff_scoped):
             raise NotFoundException(code="not_found")
         term = None
         if data.get("term") is not None:

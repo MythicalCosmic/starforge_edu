@@ -136,9 +136,7 @@ def unenroll_student_from_cohort(*, cohort: Cohort, student, reason: str = "") -
         cohort=cohort, student=student, end_date__isnull=True
     ).first()
     if membership is None:
-        raise ValidationException(
-            _("Student is not active in this cohort."), code="not_enrolled"
-        )
+        raise ValidationException(_("Student is not active in this cohort."), code="not_enrolled")
     membership.end_date = timezone.localdate()
     if reason:
         membership.moved_reason = reason

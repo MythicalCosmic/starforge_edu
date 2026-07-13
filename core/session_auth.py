@@ -24,6 +24,13 @@ from django.utils.translation import gettext_lazy as _
 from rest_framework.authentication import BaseAuthentication, get_authorization_header
 
 _LAST_USED_STALE = timedelta(seconds=60)
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+_ROLE_MODEL_LABELS = {
+    "student": "students.StudentProfile",
+    "teacher": "teachers.TeacherProfile",
+    "parent": "parents.ParentProfile",
+    "staff": "org.StaffProfile",
+}
 
 
 def _session_ttl() -> timedelta:
@@ -74,12 +81,40 @@ def validate_session_key(key: str):
         .filter(key=key, revoked_at__isnull=True, expires_at__gt=timezone.now())
         .first()
     )
-    if session is None or not session.user.is_active:
+    if session is None or not session.user.is_active or not _has_live_role_principal(session):
         return None
     now = timezone.now()
     if (now - session.last_used_at) > _LAST_USED_STALE:
         Session.objects.filter(pk=session.pk).update(last_used_at=now)
     return session
+
+
+def _has_live_role_principal(session) -> bool:
+    """Validate the role identity represented by a role-native session.
+
+    The linked ``User`` is only an authorization bridge.  It is insufficient proof that
+    the student/teacher/parent/staff account still exists or remains active, and a bridge
+    with Django-admin privileges must never be accepted on the role session surface.
+    """
+    kind = session.principal_kind
+    principal_id = session.principal_id
+    if not kind and principal_id is None:
+        return True  # platform User login / read-only admin impersonation
+    model_label = _ROLE_MODEL_LABELS.get(kind)
+    if model_label is None or principal_id is None:
+        return False
+
+    from django.apps import apps as django_apps
+
+    model = django_apps.get_model(model_label)
+    account = model.objects.filter(pk=principal_id).only("is_active", "user_id").first()
+    return bool(
+        account is not None
+        and account.is_active
+        and account.user_id == session.user_id
+        and not session.user.is_staff
+        and not session.user.is_superuser
+    )
 
 
 def revoke_session(key: str) -> None:
@@ -93,9 +128,7 @@ def revoke_all_for_user(user_id: int) -> int:
     the number revoked."""
     from apps.users.models import Session
 
-    return Session.objects.filter(user_id=user_id, revoked_at__isnull=True).update(
-        revoked_at=timezone.now()
-    )
+    return Session.objects.filter(user_id=user_id, revoked_at__isnull=True).update(revoked_at=timezone.now())
 
 
 class SessionAuthentication(BaseAuthentication):
@@ -113,9 +146,7 @@ class SessionAuthentication(BaseAuthentication):
         if not header or header[0].lower() != self.keyword:
             return None
         if len(header) != 2:
-            raise AuthenticationException(
-                _("Invalid Authorization header."), code="authentication_failed"
-            )
+            raise AuthenticationException(_("Invalid Authorization header."), code="authentication_failed")
         try:
             key = header[1].decode()
         except UnicodeError:
@@ -128,9 +159,21 @@ class SessionAuthentication(BaseAuthentication):
                 _("Your session is invalid or has expired. Please sign in again."),
                 code="authentication_failed",
             )
+        if session.read_only and request.method not in _SAFE_METHODS:
+            # Enforce read-only impersonation centrally at authentication time.  This
+            # covers DRF and the layered plain-Django views because both call this same
+            # authenticator; individual views no longer need to remember the guard.
+            from core.exceptions import PermissionException
+
+            raise PermissionException(code="read_only_token")
         request.is_read_only_token = session.read_only
         # Role-native identity the caller signed in as (blank for legacy sessions).
         request.principal_kind = session.principal_kind
+        # Model signals fire after authentication but have no request argument;
+        # publish the live principal to the request-local audit context.
+        from apps.audit.context import bind_actor
+
+        bind_actor(session.user)
         request.principal_id = session.principal_id
         return session.user, session
 

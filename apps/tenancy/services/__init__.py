@@ -196,7 +196,13 @@ def activate_center(center: Center, *, actor=None) -> Center:
     back to ``active`` so the tenant API returns 200 again. Records a
     PlatformEvent."""
     center.is_active = True
-    center.save(update_fields=["is_active", "updated_at"])
+    update_fields = ["is_active", "updated_at"]
+    if center.on_trial and (center.trial_ends_at is None or center.trial_ends_at <= timezone.now()):
+        # Manual activation after an expired trial is a deliberate permanent
+        # activation. Clear the expired marker so Beat cannot undo it next hour.
+        center.on_trial = False
+        update_fields.append("on_trial")
+    center.save(update_fields=update_fields)
     _set_subscription_status(center, status="active")
     record_platform_event(
         actor=actor,
@@ -306,11 +312,12 @@ def mint_impersonation_token(*, center: Center, user_id: int, impersonator) -> d
 
 def _audit_impersonation_started(*, target, impersonator) -> None:
     """Write the tenant-schema audit row (already inside schema_context)."""
+    from apps.audit.models import AuditLog
     from apps.audit.services import audit_log
 
     audit_log(
         actor=None,  # the impersonator is a public-schema user, not a tenant FK
-        action="impersonation.started",
+        action=AuditLog.Action.IMPERSONATE,
         resource_type="users.User",
         resource_id=str(target.pk),
         after={

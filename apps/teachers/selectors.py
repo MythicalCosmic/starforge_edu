@@ -39,10 +39,7 @@ def _pending_forms_for(*, teacher: TeacherProfile, user, roles, now) -> list[dic
         .filter(_answered=False)
         .order_by("closes_at", "created_at")[:10]
     )
-    return [
-        {"id": f.id, "title": f.title, "closes_at": f.closes_at}
-        for f in forms
-    ]
+    return [{"id": f.id, "title": f.title, "closes_at": f.closes_at} for f in forms]
 
 
 def teacher_dashboard(*, teacher: TeacherProfile, user, roles) -> dict:
@@ -56,9 +53,7 @@ def teacher_dashboard(*, teacher: TeacherProfile, user, roles) -> dict:
     now = timezone.now()
     today = now.date()
 
-    cohorts = Cohort.objects.filter(
-        Q(primary_teacher=teacher) | Q(co_teachers__teacher=teacher)
-    ).distinct()
+    cohorts = Cohort.objects.filter(Q(primary_teacher=teacher) | Q(co_teachers__teacher=teacher)).distinct()
     cohort_ids = list(cohorts.values_list("id", flat=True))
 
     level_groups: dict[str, int] = {}

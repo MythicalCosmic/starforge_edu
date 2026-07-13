@@ -131,7 +131,9 @@ def test_non_cash_reward_recorded_without_approval(tenant_a, as_role):
 def test_cash_reward_requires_an_amount(tenant_a, as_role):
     hod_client, _h = as_role(Role.HEAD_OF_DEPT)
     _tc, teacher = as_role(Role.TEACHER)
-    rt = hod_client.post(TYPES, {"name": "Bonus", "is_cash": True}, format="json").json()["data"]["id"]  # no default
+    rt = hod_client.post(TYPES, {"name": "Bonus", "is_cash": True}, format="json").json()["data"][
+        "id"
+    ]  # no default
     grant = hod_client.post(GRANTS, {"reward_type": rt, "recipient": teacher.id}, format="json")  # no amount
     assert grant.status_code == 400
     assert grant.json()["code"] == "amount_required"
@@ -250,6 +252,8 @@ def test_non_manager_cannot_retrieve_anothers_grant(tenant_a, as_role):
     _ac, alice = as_role(Role.TEACHER)
     bob_client, _b = as_role(Role.TEACHER)
     rt = director.post(TYPES, {"name": "Cert", "is_cash": False}, format="json").json()["data"]["id"]
-    gid = director.post(GRANTS, {"reward_type": rt, "recipient": alice.id}, format="json").json()["data"]["id"]
+    gid = director.post(GRANTS, {"reward_type": rt, "recipient": alice.id}, format="json").json()["data"][
+        "id"
+    ]
     # bob (a teacher) can't fetch alice's reward by id — it's not in his scope
     assert bob_client.get(f"{GRANTS}{gid}/").status_code == 404

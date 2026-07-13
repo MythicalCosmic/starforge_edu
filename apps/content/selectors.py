@@ -56,7 +56,11 @@ def scoped_libraries(*, user, roles: set[str] | None = None, memberships=None) -
     # select_related the labelled FKs the presenter dereferences (department/cohort
     # names) — no N+1 on the list, and harmless when this qs is used as an `__in=`
     # subquery elsewhere (Django selects only the pk there).
-    qs = ContentLibrary.objects.filter(is_active=True).select_related("department", "cohort")
+    # Managers must retain a path to an inactive library so it can be audited or
+    # reactivated through the API.  Ordinary readers still see active libraries
+    # only; applying the active filter before the manager bypass made deactivation
+    # an irreversible API operation.
+    qs = ContentLibrary.objects.select_related("department", "cohort")
     if user.is_superuser:
         return qs
     if memberships is None:
@@ -65,7 +69,7 @@ def scoped_libraries(*, user, roles: set[str] | None = None, memberships=None) -
         roles = {m.role for m in memberships}
     if roles & STAFF_ROLES:
         return qs
-    return qs.filter(_visibility_filter(user, roles, memberships)).distinct()
+    return qs.filter(is_active=True).filter(_visibility_filter(user, roles, memberships)).distinct()
 
 
 def scoped_files(*, user, roles: set[str] | None = None, memberships=None) -> QuerySet[LessonFile]:

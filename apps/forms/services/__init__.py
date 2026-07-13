@@ -16,9 +16,16 @@ from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
 from apps.forms.models import Form, FormAnswer, FormField, FormResponse
-from core.exceptions import ConflictException, UnprocessableEntity, ValidationException
+from core.exceptions import ConflictException, NotFoundException, UnprocessableEntity, ValidationException
 
 _FT = FormField.FieldType
+
+
+def _locked_form(form: Form) -> Form:
+    locked = Form.objects.select_for_update().filter(pk=form.pk).first()
+    if locked is None:
+        raise NotFoundException(_("Form not found."), code="not_found")
+    return locked
 
 
 @transaction.atomic
@@ -39,9 +46,24 @@ def add_field(
 ) -> FormField:
     """Append a field. Only a DRAFT form can be edited — changing fields under a
     live form would orphan already-submitted answers."""
+    form = _locked_form(form)
     if form.status != Form.Status.DRAFT:
         raise UnprocessableEntity(_("Only a draft form can be edited."), code="form_not_draft")
-    options = options or []
+    label = label.strip()
+    help_text = help_text.strip()
+    if not label:
+        raise ValidationException(
+            _("A field label is required."),
+            code="validation_error",
+            fields={"label": ["This field may not be blank."]},
+        )
+    if order is not None and order < 0:
+        raise ValidationException(
+            _("Field order cannot be negative."),
+            code="validation_error",
+            fields={"order": ["Must be zero or greater."]},
+        )
+    options = list(options or [])
     if field_type in FormField.CHOICE_TYPES:
         if len(options) < 1:
             raise ValidationException(
@@ -49,8 +71,15 @@ def add_field(
             )
         if any(not isinstance(o, str) or not o.strip() for o in options):
             raise ValidationException(_("Options must be non-empty text."), code="invalid_options")
+        options = [o.strip() for o in options]
         if len(set(options)) != len(options):
             raise ValidationException(_("Options must be unique."), code="duplicate_options")
+    elif options:
+        raise ValidationException(
+            _("Only choice fields may define options."),
+            code="invalid_options",
+            fields={"options": ["Options are only valid for choice fields."]},
+        )
     if order is None:
         last = form.fields.order_by("-order").first()
         order = (last.order + 1) if last else 0
@@ -69,6 +98,7 @@ def add_field(
 def update_form(*, form: Form, **changes) -> Form:
     """Edit form metadata. Draft-only — changing anonymity / windows after responses
     exist would misrepresent data already collected."""
+    form = _locked_form(form)
     if form.status != Form.Status.DRAFT:
         raise UnprocessableEntity(_("Only a draft form can be edited."), code="form_not_draft")
     allowed = {
@@ -81,15 +111,19 @@ def update_form(*, form: Form, **changes) -> Form:
         "audience_roles",
         "audience_user_ids",
     }
+    changed_fields: list[str] = []
     for key, value in changes.items():
         if key in allowed:
             setattr(form, key, value)
-    form.save()
+            changed_fields.append(key)
+    if changed_fields:
+        form.save(update_fields=[*dict.fromkeys(changed_fields), "updated_at"])
     return form
 
 
 @transaction.atomic
 def publish_form(*, form: Form) -> Form:
+    form = _locked_form(form)
     if form.status == Form.Status.PUBLISHED:
         return form
     if form.status == Form.Status.CLOSED:
@@ -104,6 +138,7 @@ def publish_form(*, form: Form) -> Form:
 
 @transaction.atomic
 def close_form(*, form: Form) -> Form:
+    form = _locked_form(form)
     if form.status != Form.Status.PUBLISHED:
         raise UnprocessableEntity(_("Only a published form can be closed."), code="form_not_published")
     form.status = Form.Status.CLOSED
@@ -116,7 +151,7 @@ def close_form(*, form: Form) -> Form:
 def delete_form(*, form: Form) -> None:
     """Hard-delete a form. Only a DRAFT may be deleted — a published or closed form
     carries collected responses (CASCADE) and is never erased unilaterally."""
-    form = Form.objects.select_for_update().get(pk=form.pk)
+    form = _locked_form(form)
     if form.status != Form.Status.DRAFT:
         raise UnprocessableEntity(_("Only a draft form can be deleted."), code="form_not_draft")
     form.delete()
@@ -248,28 +283,63 @@ def form_summary(form: Form) -> dict:
     """Aggregate responses per field — choice tallies, rating/number stats, yes/no
     counts — for the manager's analysis view (F3-4 builds charts on top of this)."""
     response_count = form.responses.count()
+    fields = list(form.fields.all())
+    fields_by_id = {field.id: field for field in fields}
+    summaries: dict[int, dict[str, Any]] = {}
+    numeric_state: dict[int, dict[str, Any]] = {}
+
+    for field in fields:
+        summary: dict[str, Any] = {"answered": 0}
+        if field.field_type in FormField.CHOICE_TYPES:
+            summary["counts"] = {option: 0 for option in field.options}
+        elif field.field_type == _FT.BOOLEAN:
+            summary.update({"true": 0, "false": 0})
+        elif field.field_type in (_FT.NUMBER, _FT.RATING):
+            numeric_state[field.id] = {"count": 0, "sum": 0, "min": None, "max": None}
+        summaries[field.id] = summary
+
+    # Stream all answers in one query. The previous implementation issued one
+    # query per field and materialised an unbounded list for every field. These
+    # incremental states keep memory proportional to fields/options instead of
+    # the number of responses.
+    answer_rows = FormAnswer.objects.filter(field_id__in=fields_by_id).values_list("field_id", "value")
+    for field_id, value in answer_rows.iterator(chunk_size=2000):
+        field = fields_by_id[field_id]
+        summary = summaries[field_id]
+        summary["answered"] += 1
+        if field.field_type in FormField.CHOICE_TYPES:
+            counts = summary["counts"]
+            for picked in value if isinstance(value, list) else [value]:
+                if picked in counts:
+                    counts[picked] += 1
+        elif field.field_type in (_FT.NUMBER, _FT.RATING):
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                state = numeric_state[field_id]
+                state["count"] += 1
+                state["sum"] += value
+                state["min"] = value if state["min"] is None else min(state["min"], value)
+                state["max"] = value if state["max"] is None else max(state["max"], value)
+        elif field.field_type == _FT.BOOLEAN:
+            if value is True:
+                summary["true"] += 1
+            elif value is False:
+                summary["false"] += 1
+
     fields_out = []
-    for field in form.fields.all():
-        values = list(field.answers.values_list("value", flat=True))
-        ft = field.field_type
-        summary: dict[str, Any] = {"answered": len(values)}
-        if ft in FormField.CHOICE_TYPES:
-            tally: dict[str, int] = {opt: 0 for opt in field.options}
-            for v in values:
-                for picked in v if isinstance(v, list) else [v]:
-                    if picked in tally:
-                        tally[picked] += 1
-            summary["counts"] = tally
-        elif ft in (_FT.NUMBER, _FT.RATING):
-            nums = [v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
-            if nums:
-                summary["avg"] = round(sum(nums) / len(nums), 2)
-                summary["min"] = min(nums)
-                summary["max"] = max(nums)
-        elif ft == _FT.BOOLEAN:
-            summary["true"] = sum(1 for v in values if v is True)
-            summary["false"] = sum(1 for v in values if v is False)
-        fields_out.append({"field": field.id, "label": field.label, "field_type": ft, "summary": summary})
+    for field in fields:
+        summary = summaries[field.id]
+        numeric = numeric_state.get(field.id)
+        if numeric and numeric["count"]:
+            summary.update(
+                {
+                    "avg": round(numeric["sum"] / numeric["count"], 2),
+                    "min": numeric["min"],
+                    "max": numeric["max"],
+                }
+            )
+        fields_out.append(
+            {"field": field.id, "label": field.label, "field_type": field.field_type, "summary": summary}
+        )
     return {"response_count": response_count, "fields": fields_out}
 
 

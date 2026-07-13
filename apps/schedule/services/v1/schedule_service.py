@@ -7,6 +7,7 @@ from typing import Any
 
 from django.db.models import QuerySet
 from django.utils.text import slugify
+from django.utils.translation import gettext_lazy as _
 
 from apps.cohorts.models import Cohort
 from apps.org.models import Branch, Room
@@ -31,7 +32,7 @@ from core.exceptions import ValidationException
 
 
 def _reject(field: str, message: str) -> ValidationException:
-    return ValidationException("Invalid input.", code="validation_error", fields={field: [message]})
+    return ValidationException(_("Invalid input."), code="validation_error", fields={field: [message]})
 
 
 class TermService(ITermService):
@@ -148,9 +149,7 @@ class RecurrenceRuleService(IRecurrenceRuleService):
     def scoped(self, *, user: Any, roles: set[str] | None) -> QuerySet[RecurrenceRule]:
         return self.repository.scoped(user=user, roles=roles)
 
-    def get_scoped(
-        self, *, pk: int, user: Any, roles: set[str] | None
-    ) -> RecurrenceRule | None:
+    def get_scoped(self, *, pk: int, user: Any, roles: set[str] | None) -> RecurrenceRule | None:
         return self.repository.get_scoped(pk=pk, user=user, roles=roles)
 
     def _resolve_fks(self, data: dict[str, Any]) -> dict[str, Any]:

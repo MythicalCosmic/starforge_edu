@@ -1,0 +1,201 @@
+name: starforge
+
+x-app: &app
+  image: ${APP_IMAGE:?APP_IMAGE must be an immutable Starforge image tag}
+  restart: unless-stopped
+  env_file:
+    - ${STARFORGE_APP_ENV_FILE:-/root/starforge-deploy/app.env}
+  secrets:
+    - source: firebase_credentials
+      target: firebase.json
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  networks:
+    - internal
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=128m
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  pids_limit: 160
+  init: true
+  stop_grace_period: 45s
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:?POSTGRES_IMAGE must use an immutable tag or digest}
+    restart: unless-stopped
+    env_file:
+      - ${STARFORGE_DB_ENV_FILE:-/root/starforge-deploy/postgres.env}
+    volumes:
+      - sf_pg:/var/lib/postgresql/data
+    networks:
+      - internal
+    shm_size: 128m
+    mem_limit: 512m
+    cpus: 0.60
+    pids_limit: 160
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 15s
+
+  redis:
+    image: ${REDIS_IMAGE:?REDIS_IMAGE must use an immutable tag or digest}
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - sf_redis:/data
+    networks:
+      - internal
+    mem_limit: 160m
+    cpus: 0.25
+    pids_limit: 80
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  minio:
+    image: ${MINIO_IMAGE:?MINIO_IMAGE must use an immutable tag or digest}
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    env_file:
+      - ${STARFORGE_MINIO_ENV_FILE:-/root/starforge-deploy/minio.env}
+    volumes:
+      - sf_minio:/data
+    networks:
+      - internal
+    mem_limit: 256m
+    cpus: 0.30
+    pids_limit: 100
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  web:
+    <<: *app
+    command: ["web"]
+    environment:
+      WEB_CONCURRENCY: "2"
+    networks:
+      internal: {}
+      edge:
+        aliases: [starforge-web]
+    mem_limit: 384m
+    cpus: 0.65
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/healthz/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 30s
+
+  daphne:
+    <<: *app
+    command: ["daphne"]
+    networks:
+      internal: {}
+      edge:
+        aliases: [starforge-daphne]
+    mem_limit: 256m
+    cpus: 0.35
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8001/healthz/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  worker-critical:
+    <<: *app
+    command: ["worker"]
+    environment:
+      CELERY_QUEUES: critical
+      CELERY_WORKER_CONCURRENCY: "1"
+    networks:
+      - internal
+      - egress
+    mem_limit: 320m
+    cpus: 0.45
+    healthcheck:
+      test:
+        ["CMD-SHELL", "celery -A config inspect ping --destination \"celery@$$HOSTNAME\" --timeout=5 | grep -q pong"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  worker-default:
+    <<: *app
+    command: ["worker"]
+    environment:
+      CELERY_QUEUES: default,notifications,reports,ai,maintenance
+      CELERY_WORKER_CONCURRENCY: "1"
+    networks:
+      - internal
+      - egress
+    mem_limit: 384m
+    cpus: 0.55
+    healthcheck:
+      test:
+        ["CMD-SHELL", "celery -A config inspect ping --destination \"celery@$$HOSTNAME\" --timeout=5 | grep -q pong"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  beat:
+    <<: *app
+    command: ["beat"]
+    mem_limit: 128m
+    cpus: 0.15
+    pids_limit: 80
+    healthcheck:
+      test: ["CMD-SHELL", "ps -o args= 1 | grep -q '[c]elery.*beat'"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  migrate:
+    <<: *app
+    command: ["migrate"]
+    restart: "no"
+    profiles: [tools]
+    mem_limit: 384m
+    cpus: 0.60
+
+  collectstatic:
+    <<: *app
+    command: ["python", "manage.py", "collectstatic", "--noinput"]
+    restart: "no"
+    profiles: [tools]
+    mem_limit: 256m
+    cpus: 0.40
+
+networks:
+  internal:
+    internal: true
+  edge:
+    external: true
+  egress:
+    driver: bridge
+
+secrets:
+  firebase_credentials:
+    file: ${STARFORGE_FIREBASE_CREDENTIALS_FILE:-/root/starforge-deploy/secrets/firebase.json}
+
+volumes:
+  sf_pg: {}
+  sf_redis: {}
+  sf_minio: {}

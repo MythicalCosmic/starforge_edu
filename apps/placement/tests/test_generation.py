@@ -59,7 +59,13 @@ def _setup(tenant, user_in, as_user):
 
 
 _GOOD_QUESTIONS = [
-    {"prompt": "2+2?", "question_type": "single_choice", "options": ["3", "4"], "correct_answer": "4", "points": 2},
+    {
+        "prompt": "2+2?",
+        "question_type": "single_choice",
+        "options": ["3", "4"],
+        "correct_answer": "4",
+        "points": 2,
+    },
     {"prompt": "Sky is blue?", "question_type": "true_false", "correct_answer": True},
     {"prompt": "Describe your day.", "question_type": "writing"},
     # invalid: a single-choice with only one option -> skipped, not fatal
@@ -159,7 +165,9 @@ def test_generate_endpoint_returns_202(tenant_a, user_in, as_user, monkeypatch):
     s = _setup(tenant_a, user_in, as_user)
     _seed_placement_ai(tenant_a)
     _mock_complete(monkeypatch, json.dumps(_GOOD_QUESTIONS))
-    tid = s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["data"]["id"]
+    tid = (
+        s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["data"]["id"]
+    )
     r = s["teacher"].post(f"{TESTS}{tid}/generate/", {"count": 5, "difficulty": "easy"}, format="json")
     assert r.status_code == 202, r.content
     assert r.json()["data"]["request_id"]
@@ -168,7 +176,9 @@ def test_generate_endpoint_returns_202(tenant_a, user_in, as_user, monkeypatch):
 def test_generate_endpoint_blocked_when_feature_disabled(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     _seed_placement_ai(tenant_a, enabled=False)  # centre has AI generation off
-    tid = s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["data"]["id"]
+    tid = (
+        s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["data"]["id"]
+    )
     r = s["teacher"].post(f"{TESTS}{tid}/generate/", {"count": 5}, format="json")
     assert r.status_code == 403
     assert r.json()["code"] == "feature_disabled"
@@ -177,10 +187,18 @@ def test_generate_endpoint_blocked_when_feature_disabled(tenant_a, user_in, as_u
 def test_generate_endpoint_rejects_a_non_draft_test(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     _seed_placement_ai(tenant_a)
-    tid = s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["data"]["id"]
-    s["teacher"].post(f"{TESTS}{tid}/questions/", {
-        "prompt": "q", "question_type": "true_false", "correct_answer": True,
-    }, format="json")
+    tid = (
+        s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["data"]["id"]
+    )
+    s["teacher"].post(
+        f"{TESTS}{tid}/questions/",
+        {
+            "prompt": "q",
+            "question_type": "true_false",
+            "correct_answer": True,
+        },
+        format="json",
+    )
     s["teacher"].post(f"{TESTS}{tid}/submit/", {}, format="json")  # -> PENDING
     r = s["teacher"].post(f"{TESTS}{tid}/generate/", {"count": 5}, format="json")
     assert r.status_code == 422
@@ -193,11 +211,13 @@ def test_apply_skips_unknown_types_and_bounds_points_without_failing(tenant_a, u
     DB error that discards the whole batch."""
     s = _setup(tenant_a, user_in, as_user)
     test = _draft_test(tenant_a, s["branch"], s["teacher_u"])
-    payload = json.dumps([
-        {"prompt": "ok", "question_type": "true_false", "correct_answer": True, "points": 40000},
-        {"prompt": "longtype", "question_type": "fill_in_the_blank_extra_long", "correct_answer": "x"},
-        {"prompt": "shorttype", "question_type": "matching", "correct_answer": "x"},
-    ])
+    payload = json.dumps(
+        [
+            {"prompt": "ok", "question_type": "true_false", "correct_answer": True, "points": 40000},
+            {"prompt": "longtype", "question_type": "fill_in_the_blank_extra_long", "correct_answer": "x"},
+            {"prompt": "shorttype", "question_type": "matching", "correct_answer": "x"},
+        ]
+    )
     with schema_context(tenant_a.schema_name):
         from apps.placement.models import PlacementQuestion
         from apps.placement.services import apply_generated_questions
@@ -233,6 +253,8 @@ def test_apply_tolerates_a_vanished_test(tenant_a):
 def test_student_cannot_generate(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     _seed_placement_ai(tenant_a)
-    tid = s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["data"]["id"]
+    tid = (
+        s["teacher"].post(TESTS, {"title": "T", "branch": s["branch"].id}, format="json").json()["data"]["id"]
+    )
     student = as_user(tenant_a, user_in(tenant_a, roles=[Role.STUDENT], branch=s["branch"]))
     assert student.post(f"{TESTS}{tid}/generate/", {"count": 5}, format="json").status_code == 403

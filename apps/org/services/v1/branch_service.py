@@ -112,7 +112,5 @@ class BranchService(IBranchService):
                 fields={"slug": ["Already used."]},
             ) from exc
         except DataError as exc:  # e.g. max_students out of range -> clean 400, not a 500
-            raise ValidationException(
-                _("A field value is out of range."), code="validation_error"
-            ) from exc
+            raise ValidationException(_("A field value is out of range."), code="validation_error") from exc
         return branch

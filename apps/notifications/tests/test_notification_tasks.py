@@ -129,16 +129,25 @@ def test_lesson_reschedule_dedupe_key_varies_per_move(tenant_a, monkeypatch):
         # (the lesson's updated_at) is monotonic, so all three keys are distinct — the
         # 3rd move must still notify (old_start alone would collide keys[0]==keys[2]).
         lesson_rescheduled.send(
-            sender=None, lesson_id=42, old_start="2026-01-05T10:00:00+00:00",
-            moved_at="2026-01-01T08:00:00.000001+00:00", schema_name=tenant_a.schema_name,
+            sender=None,
+            lesson_id=42,
+            old_start="2026-01-05T10:00:00+00:00",
+            moved_at="2026-01-01T08:00:00.000001+00:00",
+            schema_name=tenant_a.schema_name,
         )
         lesson_rescheduled.send(
-            sender=None, lesson_id=42, old_start="2026-01-12T10:00:00+00:00",
-            moved_at="2026-01-01T08:00:00.000002+00:00", schema_name=tenant_a.schema_name,
+            sender=None,
+            lesson_id=42,
+            old_start="2026-01-12T10:00:00+00:00",
+            moved_at="2026-01-01T08:00:00.000002+00:00",
+            schema_name=tenant_a.schema_name,
         )
         lesson_rescheduled.send(
-            sender=None, lesson_id=42, old_start="2026-01-05T10:00:00+00:00",  # same old_start as #1
-            moved_at="2026-01-01T08:00:00.000003+00:00", schema_name=tenant_a.schema_name,
+            sender=None,
+            lesson_id=42,
+            old_start="2026-01-05T10:00:00+00:00",  # same old_start as #1
+            moved_at="2026-01-01T08:00:00.000003+00:00",
+            schema_name=tenant_a.schema_name,
         )
 
     assert len(keys) == 3, "all three moves must dispatch"

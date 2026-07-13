@@ -15,7 +15,7 @@ from typing import Any
 from django.db.models import Count, Sum
 
 from apps.finance.models import Invoice
-from apps.reports.generators.base import ReportGenerator
+from apps.reports.generators.base import ReportGenerator, is_full_scope, membership_branch_ids
 
 _ZERO = Decimal("0")
 _OPEN = (Invoice.Status.ISSUED, Invoice.Status.PARTIALLY_PAID, Invoice.Status.OVERDUE)
@@ -41,6 +41,10 @@ class FinanceGenerator(ReportGenerator):
 
     def collect(self, params: dict[str, Any], *, user, roles: set[str]) -> dict[str, Any]:
         qs = Invoice.objects.all()
+        if params.get("branch_id"):
+            qs = qs.filter(student__branch_id=params["branch_id"])
+        if not is_full_scope(user=user, roles=roles):
+            qs = qs.filter(student__branch_id__in=membership_branch_ids(user))
         date_from = _parse_date(params.get("date_from"))
         date_to = _parse_date(params.get("date_to"))
         if date_from:

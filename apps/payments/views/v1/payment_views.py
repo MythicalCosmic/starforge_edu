@@ -10,23 +10,26 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
+from django.db.models import QuerySet
 from django.http import HttpRequest, HttpResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
 from apps.payments.interfaces.services import IPaymentService, IProviderConfigService
-from apps.payments.models import Provider
+from apps.payments.models import Payment, Provider
 from apps.payments.presenters import (
     payment_list_to_dict,
     payment_read_to_dict,
     provider_config_to_dict,
 )
+from apps.payments.selectors import payments_for_branches
 from core.api_auth import check_perm, require_auth
 from core.container import container
-from core.exceptions import NotFoundException, ValidationException
+from core.exceptions import NotFoundException, PermissionException, ValidationException
 from core.http import decimal_field, read_json, str_field
 from core.listing import apply_filters, paginate
 from core.responses import created, error, no_content, paginated, success
+from core.scoping import assert_branch_id_in_scope, branch_ids, is_unscoped
 from core.utils import current_schema, stable_hash
 from infrastructure.storage.s3_client import presign_download
 
@@ -182,7 +185,7 @@ def payments_collection_view(request: HttpRequest) -> HttpResponse:
     check_perm(request, "payments:read")
     qs = apply_filters(
         request,
-        _payment_service().list_payments(),
+        _scope_payments(request, _payment_service().list_payments()),
         filter_fields=("provider", "status", "allocation_status"),
         ordering_fields=("created_at", "paid_at", "amount_uzs"),
         default_ordering="-created_at",
@@ -191,11 +194,45 @@ def payments_collection_view(request: HttpRequest) -> HttpResponse:
     return paginated([payment_list_to_dict(p) for p in items], total=total, page=page, page_size=size)
 
 
-def _get_payment(pk: int):
-    payment = _payment_service().get(pk=pk)
-    if payment is None:
-        raise NotFoundException(code="not_found")
-    return payment
+def _scope_payments(request: HttpRequest, queryset: QuerySet[Payment]) -> QuerySet[Payment]:
+    if is_unscoped(request):
+        return queryset
+    return payments_for_branches(queryset, branch_ids=branch_ids(request))
+
+
+def _get_payment(request: HttpRequest, pk: int) -> Payment:
+    # Detail serialization reads the fiscal receipt and every provider attempt.
+    # Eager-load both here so the optimized selector is actually used by the
+    # endpoint rather than leaving a pair of avoidable lazy queries.
+    payment = (
+        _scope_payments(request, _payment_service().list_payments())
+        .select_related("fiscal_receipt")
+        .prefetch_related("attempts")
+        .filter(pk=pk)
+        .first()
+    )
+    if payment is not None:
+        return payment
+    if _payment_service().get(pk=pk) is not None:
+        raise PermissionException(code="out_of_scope")
+    raise NotFoundException(code="not_found")
+
+
+def _assert_invoice_scope(request: HttpRequest, invoice_ids: list[int]) -> None:
+    """Reject an existing target in another branch before any money mutation.
+
+    Missing invoices remain the domain service's validation concern; only known
+    rows are authorization-checked here so a malformed id keeps its existing API
+    error contract.
+    """
+    if is_unscoped(request):
+        return
+    from apps.finance.models import Invoice
+
+    branches = dict(Invoice.objects.filter(pk__in=set(invoice_ids)).values_list("pk", "student__branch_id"))
+    for invoice_id in invoice_ids:
+        if invoice_id in branches:
+            assert_branch_id_in_scope(request, branches[invoice_id])
 
 
 @csrf_exempt
@@ -204,7 +241,7 @@ def payment_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method not in ("GET", "HEAD"):
         return _method_not_allowed()
     check_perm(request, "payments:read")
-    return success(payment_read_to_dict(_get_payment(pk)))
+    return success(payment_read_to_dict(_get_payment(request, pk)))
 
 
 @csrf_exempt
@@ -215,6 +252,7 @@ def payment_checkout_view(request: HttpRequest) -> HttpResponse:
     check_perm(request, "payments:write")
     data = read_json(request)
     invoice = _int(_require(data, "invoice"), "invoice")
+    _assert_invoice_scope(request, [invoice])
     provider = _choice(_require(data, "provider"), "provider", _CHECKOUT_PROVIDERS)
     # Idempotency-Key header (TASKS §16) or a derived stable key per (invoice, provider, user).
     idem = request.headers.get("Idempotency-Key") or stable_hash(
@@ -234,6 +272,7 @@ def payment_cash_view(request: HttpRequest) -> HttpResponse:
     check_perm(request, "payments:write")
     data = read_json(request)
     invoice = _int(_require(data, "invoice"), "invoice")
+    _assert_invoice_scope(request, [invoice])
     amount_uzs = decimal_field(data, "amount_uzs", max_digits=18, decimal_places=2)
     # Cash idempotency (the correct contract is a client-supplied Idempotency-Key per POS
     # action — see the flagged follow-up). WITHOUT a header we fall back to an idempotency
@@ -277,8 +316,9 @@ def payment_allocate_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method != "POST":
         return _method_not_allowed()
     check_perm(request, "payments:write")
-    payment = _get_payment(pk)
+    payment = _get_payment(request, pk)
     allocations = _parse_allocations(read_json(request))
+    _assert_invoice_scope(request, [int(item["invoice"]) for item in allocations])
     result = _payment_service().allocate(payment_id=payment.pk, allocations=allocations)
     return success(payment_read_to_dict(result))
 
@@ -289,12 +329,23 @@ def payment_refund_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method != "POST":
         return _method_not_allowed()
     check_perm(request, "payments:write")
-    payment = _get_payment(pk)
+    payment = _get_payment(request, pk)
     data = read_json(request)
     amount = decimal_field(data, "amount", max_digits=18, decimal_places=2)
     reason = str_field(data, "reason", max_length=255)
-    result = _payment_service().refund(payment_id=payment.pk, amount_uzs=amount, reason=reason)
-    return success(payment_read_to_dict(result))
+    result, refund = _payment_service().refund(
+        payment_id=payment.pk,
+        amount_uzs=amount,
+        reason=reason,
+        requested_by=request.user,
+    )
+    payload = payment_read_to_dict(result)
+    payload["refund_request"] = {
+        "id": refund.pk,
+        "state": refund.state,
+        "provider": refund.provider,
+    }
+    return success(payload, status=202)
 
 
 @csrf_exempt
@@ -315,7 +366,8 @@ def payment_reconciliation_view(request: HttpRequest) -> HttpResponse:
         from django.utils import timezone
 
         on = timezone.localdate()
-    return success(_payment_service().reconciliation(on=on))
+    allowed_branches = None if is_unscoped(request) else branch_ids(request)
+    return success(_payment_service().reconciliation(on=on, branch_ids=allowed_branches))
 
 
 @csrf_exempt
@@ -324,13 +376,16 @@ def payment_receipt_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method not in ("GET", "HEAD"):
         return _method_not_allowed()
     check_perm(request, "payments:read")
-    payment = _get_payment(pk)
+    payment = _get_payment(request, pk)
     receipt = getattr(payment, "fiscal_receipt", None)
     if receipt is None:
         raise NotFoundException("No fiscal receipt for this payment yet.", code="not_found")
     key = (receipt.payload or {}).get("pdf_key")
     if key:
         return success({"url": presign_download(key, expires_in=600)})
+    if request.method == "HEAD":
+        # HEAD is observational: report readiness without scheduling work.
+        return success({"status": "pending"}, status=202)
     from apps.payments import services as domain
 
     domain.enqueue_receipt_pdf(payment.pk, current_schema())

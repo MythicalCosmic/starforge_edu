@@ -7,6 +7,7 @@ from typing import Any
 
 from django.db.models import QuerySet
 from django.utils.text import slugify
+from django.utils.translation import gettext_lazy as _
 
 from apps.academics import services as domain
 from apps.academics.interfaces.repositories import (
@@ -30,7 +31,7 @@ from core.exceptions import ValidationException
 
 
 def _reject(field: str, message: str) -> ValidationException:
-    return ValidationException("Invalid input.", code="validation_error", fields={field: [message]})
+    return ValidationException(_("Invalid input."), code="validation_error", fields={field: [message]})
 
 
 class ExamTypeService(IExamTypeService):

@@ -109,11 +109,14 @@ def test_detached_lesson_survives_rematerialize(tenant_a):
         ctx = _setup()
         rule = _make_rule(ctx)
         lesson = rule.lessons.order_by("starts_at").first()
+        lesson.auto_absence_processed_at = timezone.now()
+        lesson.save(update_fields=["auto_absence_processed_at"])
         away = ctx["anchor"] + timedelta(days=28)  # past the rule window, still inside the term
         services.move_occurrence(lesson, starts_at=_at(away, 9), ends_at=_at(away, 10))
         services.materialize_rule(rule)
         lesson.refresh_from_db()
         assert lesson.detached_from_rule is True
+        assert lesson.auto_absence_processed_at is None
         assert rule.lessons.filter(pk=lesson.pk).exists()
 
 
@@ -492,6 +495,117 @@ def test_parent_rule_api_is_scoped_to_child_cohorts(tenant_a, user_in, as_user):
     assert client.get(f"/api/v1/schedule/rules/{other.id}/").status_code == 404
 
 
+def test_hod_schedule_scope_honors_department_and_branch_memberships(tenant_a, user_in, as_user):
+    from apps.org.tests.factories import DepartmentFactory
+    from apps.users.models import RoleMembership
+    from core.permissions import Role
+
+    department_hod = user_in(tenant_a)
+    branch_hod = user_in(tenant_a)
+    with schema_context(tenant_a.schema_name):
+        own_ctx = _setup()
+        branch = own_ctx["branch"]
+        own_department = DepartmentFactory(branch=branch)
+        sibling_department = DepartmentFactory(branch=branch)
+        own_ctx["cohort"].department = own_department
+        own_ctx["cohort"].save(update_fields=["department"])
+        own_ctx["teacher"].department = own_department
+        own_ctx["teacher"].save(update_fields=["department"])
+
+        sibling_ctx = {
+            "branch": branch,
+            "anchor": own_ctx["anchor"],
+            "term": own_ctx["term"],
+            "cohort": CohortFactory(branch=branch, department=sibling_department),
+            "teacher": TeacherProfileFactory(branch=branch, department=sibling_department),
+            "room": RoomFactory(branch=branch),
+        }
+        foreign_ctx = _setup()
+        foreign_department = DepartmentFactory(branch=foreign_ctx["branch"])
+        foreign_ctx["cohort"].department = foreign_department
+        foreign_ctx["cohort"].save(update_fields=["department"])
+
+        RoleMembership.objects.create(
+            user=department_hod,
+            branch=branch,
+            department=own_department,
+            role=Role.HEAD_OF_DEPT,
+        )
+        RoleMembership.objects.create(
+            user=branch_hod,
+            branch=branch,
+            role=Role.HEAD_OF_DEPT,
+        )
+        department_hod.refresh_from_db()
+        branch_hod.refresh_from_db()
+
+        own_rule = _make_rule(own_ctx)
+        sibling_rule = _make_rule(sibling_ctx)
+        foreign_rule = _make_rule(foreign_ctx)
+        from apps.schedule.models import TimeSlot
+
+        own_slot = TimeSlot.objects.create(
+            branch=branch,
+            name="Own morning",
+            start_time=time(8, 0),
+            end_time=time(9, 0),
+        )
+        foreign_slot = TimeSlot.objects.create(
+            branch=foreign_ctx["branch"],
+            name="Foreign morning",
+            start_time=time(8, 0),
+            end_time=time(9, 0),
+        )
+        own_lesson = own_rule.lessons.order_by("starts_at").first()
+        sibling_lesson = sibling_rule.lessons.order_by("starts_at").first()
+
+        department_rule_ids = set(selectors.scoped_rules(user=department_hod).values_list("id", flat=True))
+        department_lesson_ids = set(
+            selectors.scoped_lessons(user=department_hod).values_list("id", flat=True)
+        )
+        branch_rule_ids = set(selectors.scoped_rules(user=branch_hod).values_list("id", flat=True))
+
+    assert department_rule_ids == {own_rule.id}
+    assert own_lesson.id in department_lesson_ids
+    assert sibling_lesson.id not in department_lesson_ids
+    assert {own_rule.id, sibling_rule.id} <= branch_rule_ids
+    assert foreign_rule.id not in branch_rule_ids
+
+    client = as_user(tenant_a, department_hod)
+    assert {row["id"] for row in client.get("/api/v1/schedule/rules/").json()["data"]} == {own_rule.id}
+    assert {row["id"] for row in client.get("/api/v1/schedule/timeslots/").json()["data"]} == {own_slot.id}
+    assert foreign_slot.id != own_slot.id
+    assert client.get(f"/api/v1/schedule/rules/{sibling_rule.id}/").status_code == 404
+    assert (
+        client.post(
+            f"/api/v1/schedule/rules/{sibling_rule.id}/bulk-reschedule/",
+            {"shift_minutes": 5},
+            format="json",
+        ).status_code
+        == 404
+    )
+    assert client.get(f"/api/v1/schedule/lessons/{sibling_lesson.id}/").status_code == 404
+
+    cross_department_create = client.post(
+        "/api/v1/schedule/rules/",
+        {
+            "term": sibling_ctx["term"].id,
+            "cohort": sibling_ctx["cohort"].id,
+            "teacher": sibling_ctx["teacher"].id,
+            "room": sibling_ctx["room"].id,
+            "title": "Out of scope",
+            "rrule": "FREQ=WEEKLY;BYDAY=FR",
+            "start_date": sibling_ctx["anchor"].isoformat(),
+            "end_date": (sibling_ctx["anchor"] + timedelta(days=7)).isoformat(),
+            "start_time": "09:00",
+            "end_time": "10:00",
+        },
+        format="json",
+    )
+    assert cross_department_create.status_code == 403
+    assert cross_department_create.json()["code"] == "out_of_scope"
+
+
 # --- one-off op guards ---
 
 
@@ -614,9 +728,7 @@ def test_rules_create_cross_branch_blocked(tenant_a, user_in, as_user):
 
 
 def test_lesson_cancel_move_cross_branch_blocked(tenant_a, user_in, as_user):
-    """SCHED-1: scoped_lessons returns EVERY lesson for STAFF_ROLES, but a branch-scoped
-    HEAD_OF_DEPT/REGISTRAR must not cancel/move ANOTHER branch's lesson (cross-branch write +
-    a cancellation/reschedule notification blast). Their own branch's lesson still works."""
+    """A branch-scoped manager cannot discover, cancel, or move another branch's lesson."""
     from core.permissions import Role
 
     with schema_context(tenant_a.schema_name):
@@ -627,13 +739,13 @@ def test_lesson_cancel_move_cross_branch_blocked(tenant_a, user_in, as_user):
 
     writer = as_user(tenant_a, user_in(tenant_a, roles=[Role.HEAD_OF_DEPT], branch=ctx_a["branch"]))
 
-    # cross-branch cancel + move are refused (the branch check runs before the body is parsed)
+    # Out-of-scope object ids collapse to 404, so the action is not an existence oracle.
     c = writer.post(f"/api/v1/schedule/lessons/{lesson_b_id}/cancel/", {"reason": "x"}, format="json")
-    assert c.status_code == 403, c.content
-    assert c.json()["code"] == "out_of_scope"
+    assert c.status_code == 404, c.content
+    assert c.json()["code"] == "not_found"
     m = writer.post(f"/api/v1/schedule/lessons/{lesson_b_id}/move/", {}, format="json")
-    assert m.status_code == 403, m.content
-    assert m.json()["code"] == "out_of_scope"
+    assert m.status_code == 404, m.content
+    assert m.json()["code"] == "not_found"
 
     # ...but the writer's OWN branch lesson still cancels (200)
     ok = writer.post(f"/api/v1/schedule/lessons/{lesson_a_id}/cancel/", {"reason": "snow"}, format="json")

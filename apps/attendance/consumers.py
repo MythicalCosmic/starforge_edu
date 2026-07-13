@@ -5,8 +5,8 @@ cohort. The feed is cohort-WIDE (every student's live marks), so it is a STAFF
 feed. Authorization is checked **on connect** (not per-message):
 
   1. The user must hold ``attendance:read`` (``has_permission_code``).
-  2. AND be a director (``*:*``) OR hold a DASHBOARD role (head-of-dept / teacher)
-     in the cohort's branch. A STUDENT/PARENT also holds ``attendance:read`` but
+  2. AND be a director (``*:*``), an HoD whose branch/department membership covers
+     the cohort, or one of the cohort's actual teachers. A STUDENT/PARENT also holds ``attendance:read`` but
      only ROW-scoped to self / their children (``apps.attendance.selectors``), so
      they must NOT receive the whole cohort's live marks; a teacher from another
      branch must not watch this cohort either.
@@ -28,9 +28,11 @@ Handler ``attendance_update`` relays the producer payload to the socket as
 from __future__ import annotations
 
 from channels.db import database_sync_to_async
+from django.db.models import Q
 from django_tenants.utils import schema_context
 
 from core.permissions import Role, has_permission_code
+from core.scoping import role_memberships_allow
 from infrastructure.websocket.consumers import (
     CLOSE_FORBIDDEN,
     CLOSE_UNAUTHORIZED,
@@ -38,37 +40,49 @@ from infrastructure.websocket.consumers import (
     accepted_subprotocol,
 )
 
-# Roles that may watch the cohort-WIDE live dashboard (director is handled separately as
-# "sees every cohort"). STUDENT/PARENT are excluded: their attendance:read is row-scoped to
-# self / their children in the HTTP selectors, so they must not get every peer's live marks.
-_DASHBOARD_ROLES = frozenset({Role.HEAD_OF_DEPT, Role.TEACHER})
-
 
 @database_sync_to_async
 def _can_watch_cohort(*, schema: str, user_id: int, cohort_id: int) -> bool:
-    """attendance:read AND (director OR a DASHBOARD-role membership in the cohort's branch)."""
+    """Apply the HTTP dashboard's branch/department/teaching scope on connect."""
     from apps.cohorts.models import Cohort
     from apps.users.models import RoleMembership
 
     with schema_context(schema):
         memberships = list(
-            RoleMembership.objects.filter(user_id=user_id, revoked_at__isnull=True).values_list(
-                "role", "branch_id"
+            RoleMembership.objects.filter(user_id=user_id, revoked_at__isnull=True).only(
+                "role", "branch_id", "department_id"
             )
         )
-        roles = {role for role, _branch_id in memberships}
+        roles = {membership.role for membership in memberships}
         if not has_permission_code(roles, "attendance:read"):
+            return False
+        cohort = Cohort.objects.filter(pk=cohort_id).only("branch_id", "department_id").first()
+        if cohort is None:
             return False
         if Role.DIRECTOR in roles:
             return True
-        cohort_branch_id = Cohort.objects.filter(pk=cohort_id).values_list("branch_id", flat=True).first()
-        if cohort_branch_id is None:
+        if role_memberships_allow(
+            memberships,
+            roles={Role.HEAD_OF_DEPT},
+            branch_id=cohort.branch_id,
+            department_id=cohort.department_id,
+        ):
+            return True
+        if not role_memberships_allow(
+            memberships,
+            roles={Role.TEACHER},
+            branch_id=cohort.branch_id,
+            department_id=cohort.department_id,
+        ):
             return False
-        # A row-scoped student/parent must NOT receive the whole cohort's feed: require a
-        # dashboard-role (HOD/teacher) membership in the cohort's own branch.
-        return any(
-            role in _DASHBOARD_ROLES and branch_id == cohort_branch_id
-            for role, branch_id in memberships
+        return (
+            Cohort.objects.filter(pk=cohort_id)
+            .filter(
+                Q(primary_teacher__user_id=user_id)
+                | Q(co_teachers__teacher__user_id=user_id)
+                | Q(lessons__teacher__user_id=user_id)
+            )
+            .exists()
         )
 
 

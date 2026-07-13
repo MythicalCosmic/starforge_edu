@@ -41,9 +41,7 @@ def test_bool_field_accepts_explicit_boolean_forms(raw, expected):
 
 @pytest.mark.parametrize("bad", [None, "banana"])
 def test_card_type_is_active_rejects_null_and_garbage(director, bad):
-    response = director.post(
-        "/api/v1/cards/types/", {"name": "Strict bool", "is_active": bad}, format="json"
-    )
+    response = director.post("/api/v1/cards/types/", {"name": "Strict bool", "is_active": bad}, format="json")
     assert response.status_code == 400
     assert "is_active" in response.json()["errors"]
 
@@ -71,9 +69,7 @@ def test_academics_subject_patch_rejects_boolean_typo(director, tenant_a):
         ),
     ],
 )
-def test_app_local_boolean_patch_rejects_typo(
-    director, tenant_a, url, model_path, create_kwargs
-):
+def test_app_local_boolean_patch_rejects_typo(director, tenant_a, url, model_path, create_kwargs):
     from django.apps import apps
 
     model = apps.get_model(model_path)
@@ -114,9 +110,7 @@ def test_over_length_string_is_4xx_not_500(director, tenant_a):
         branch = BranchFactory()
         student = StudentProfileFactory.create(branch=branch)
     # academic_level is CharField(64); >64 chars would DataError-500 without the map.
-    resp = director.patch(
-        f"/api/v1/students/{student.id}/", {"academic_level": "x" * 200}, format="json"
-    )
+    resp = director.patch(f"/api/v1/students/{student.id}/", {"academic_level": "x" * 200}, format="json")
     assert resp.status_code in (400, 422), resp.content
     assert resp.status_code != 500
 
@@ -170,9 +164,7 @@ def test_student_create_rejects_garbage_email(director, tenant_a):
 
     with schema_context(tenant_a.schema_name):
         branch = BranchFactory()
-    resp = director.post(
-        "/api/v1/students/", {"branch": branch.id, "email": "not-an-email"}, format="json"
-    )
+    resp = director.post("/api/v1/students/", {"branch": branch.id, "email": "not-an-email"}, format="json")
     assert resp.status_code == 400
     assert "email" in resp.json()["errors"]
 
@@ -212,9 +204,7 @@ def test_patch_cannot_move_cohort_to_out_of_scope_branch(tenant_a, user_in, as_u
     # A registrar scoped to branch_a holds cohorts:write but must not reassign the row
     # into branch_b (outside their memberships).
     client = as_user(tenant_a, user_in(tenant_a, roles=["registrar"], branch=branch_a))
-    resp = client.patch(
-        f"/api/v1/cohorts/{cohort.id}/", {"branch": branch_b.id}, format="json"
-    )
+    resp = client.patch(f"/api/v1/cohorts/{cohort.id}/", {"branch": branch_b.id}, format="json")
     assert resp.status_code == 403
     assert resp.json()["code"] == "out_of_scope"
 
@@ -229,8 +219,6 @@ def test_csv_import_into_out_of_scope_branch_is_403(tenant_a, user_in, as_user):
         theirs = BranchFactory()
     client = as_user(tenant_a, user_in(tenant_a, roles=[Role.REGISTRAR], branch=mine))
     upload = SimpleUploadedFile("s.csv", b"phone\n+998905559999\n", content_type="text/csv")
-    resp = client.post(
-        "/api/v1/students/import/", {"file": upload, "branch": theirs.id}, format="multipart"
-    )
+    resp = client.post("/api/v1/students/import/", {"file": upload, "branch": theirs.id}, format="multipart")
     assert resp.status_code == 403
     assert resp.json()["code"] == "out_of_scope"

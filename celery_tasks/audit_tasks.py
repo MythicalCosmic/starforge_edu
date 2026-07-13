@@ -37,13 +37,13 @@ def _active_schemas() -> list[str]:
 
     from apps.tenancy.models import Center
 
-    # Exclude the public Center: AuditLog is TENANT_APPS-only and absent in the
-    # public schema, so cleaning it there raises ProgrammingError.
-    return list(
-        Center.objects.filter(is_active=True)
+    # Platform mutations are audited in public too; sweep it before tenants.
+    return [
+        get_public_schema_name(),
+        *Center.objects.filter(is_active=True)
         .exclude(schema_name=get_public_schema_name())
-        .values_list("schema_name", flat=True)
-    )
+        .values_list("schema_name", flat=True),
+    ]
 
 
 @app.task
@@ -60,6 +60,7 @@ def cleanup_old_audit_logs_for_schema() -> int:
     """Per-tenant retention sweep. Returns rows deleted in this schema."""
     from datetime import timedelta
 
+    from django.db import connection, transaction
     from django.utils import timezone
 
     from apps.audit.models import AuditLog
@@ -68,14 +69,16 @@ def cleanup_old_audit_logs_for_schema() -> int:
     long_cutoff = now - timedelta(days=RETENTION_LONG_DAYS)
     short_cutoff = now - timedelta(days=RETENTION_SHORT_DAYS)
 
-    # Long-retention rows older than 7y.
-    long_deleted, _ = AuditLog.objects.filter(
-        resource_type__in=RETENTION_LONG_TYPES, created_at__lt=long_cutoff
-    ).delete()
-    # Everything else older than 1y.
-    short_deleted, _ = (
-        AuditLog.objects.filter(created_at__lt=short_cutoff)
-        .exclude(resource_type__in=RETENTION_LONG_TYPES)
-        .delete()
-    )
+    # The database trigger rejects arbitrary UPDATE/DELETE. Only this explicit,
+    # transaction-local maintenance capability may perform statutory retention.
+    with transaction.atomic(), connection.cursor() as cursor:
+        cursor.execute("SET LOCAL starforge.audit_maintenance = 'on'")
+        long_deleted, _ = AuditLog.objects.filter(
+            resource_type__in=RETENTION_LONG_TYPES, created_at__lt=long_cutoff
+        ).delete()
+        short_deleted, _ = (
+            AuditLog.objects.filter(created_at__lt=short_cutoff)
+            .exclude(resource_type__in=RETENTION_LONG_TYPES)
+            .delete()
+        )
     return int(long_deleted) + int(short_deleted)
