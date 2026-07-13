@@ -145,6 +145,14 @@ class RecurrenceRuleService(IRecurrenceRuleService):
     def get(self, *, pk: int) -> RecurrenceRule | None:
         return self.repository.get(pk=pk)
 
+    def scoped(self, *, user: Any, roles: set[str] | None) -> QuerySet[RecurrenceRule]:
+        return self.repository.scoped(user=user, roles=roles)
+
+    def get_scoped(
+        self, *, pk: int, user: Any, roles: set[str] | None
+    ) -> RecurrenceRule | None:
+        return self.repository.get_scoped(pk=pk, user=user, roles=roles)
+
     def _resolve_fks(self, data: dict[str, Any]) -> dict[str, Any]:
         """Replace any present FK-id value with the ORM object, raising a clean 400
         (never a 500 IntegrityError) when an id references a missing row."""

@@ -6,7 +6,7 @@ from collections.abc import Iterable
 
 from django.db.models import QuerySet
 
-from apps.schedule.models import Lesson
+from apps.schedule.models import Lesson, RecurrenceRule
 from core.permissions import Role
 
 STAFF_ROLES = {Role.DIRECTOR, Role.HEAD_OF_DEPT, Role.REGISTRAR, Role.IT}
@@ -46,6 +46,40 @@ def check_conflicts(
 
 def _base_lessons() -> QuerySet[Lesson]:
     return Lesson.objects.select_related("cohort", "teacher__user", "room", "term", "rule", "lesson_type")
+
+
+def _base_rules() -> QuerySet[RecurrenceRule]:
+    return RecurrenceRule.objects.select_related(
+        "term", "cohort", "teacher__user", "room", "lesson_type"
+    )
+
+
+def scoped_rules(*, user, roles: set[str] | None = None) -> QuerySet[RecurrenceRule]:
+    """Rules visible through the schedule read surface.
+
+    This deliberately mirrors :func:`scoped_lessons`: recurrence metadata must
+    not provide a tenant-wide bypass around the cohort-scoped lesson feed.
+    """
+    qs = _base_rules()
+    if user.is_superuser:
+        return qs
+    if roles is None:
+        roles = {m.role for m in user.role_memberships.filter(revoked_at__isnull=True)}
+    if roles & STAFF_ROLES:
+        return qs
+    if Role.TEACHER in roles:
+        return qs.filter(teacher__user=user)
+    if Role.PARENT in roles:
+        return qs.filter(
+            cohort__memberships__student__guardians__parent__user=user,
+            cohort__memberships__end_date__isnull=True,
+        ).distinct()
+    if Role.STUDENT in roles:
+        return qs.filter(
+            cohort__memberships__student__user=user,
+            cohort__memberships__end_date__isnull=True,
+        ).distinct()
+    return qs.none()
 
 
 def scoped_lessons(*, user, roles: set[str] | None = None) -> QuerySet[Lesson]:

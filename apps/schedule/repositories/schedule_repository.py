@@ -118,6 +118,14 @@ class RecurrenceRuleRepository(BaseRepository[RecurrenceRule], IRecurrenceRuleRe
             .first()
         )
 
+    def scoped(self, *, user: Any, roles: set[str] | None) -> QuerySet[RecurrenceRule]:
+        return selectors.scoped_rules(user=user, roles=roles)
+
+    def get_scoped(
+        self, *, pk: int, user: Any, roles: set[str] | None
+    ) -> RecurrenceRule | None:
+        return selectors.scoped_rules(user=user, roles=roles).filter(pk=pk).first()
+
 
 class LessonRepository(BaseRepository[Lesson], ILessonRepository):
     model = Lesson

@@ -455,7 +455,7 @@ def rules_collection_view(request: HttpRequest) -> HttpResponse:
         check_perm(request, "schedule:read")
         qs = apply_filters(
             request,
-            _rule_service().list_rules(),
+            _rule_service().scoped(user=request.user, roles=get_user_roles(request)),
             filter_fields=("term", "cohort", "teacher", "is_active"),
             ordering_fields=("created_at",),
             default_ordering="-created_at",
@@ -476,7 +476,11 @@ def rules_collection_view(request: HttpRequest) -> HttpResponse:
 def rule_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
     read = request.method in ("GET", "HEAD")
     check_perm(request, "schedule:read" if read else "schedule:write")
-    rule = _rule_service().get(pk=pk)
+    rule = (
+        _rule_service().get_scoped(pk=pk, user=request.user, roles=get_user_roles(request))
+        if read
+        else _rule_service().get(pk=pk)
+    )
     if rule is None:
         raise NotFoundException(code="not_found")
     if read:

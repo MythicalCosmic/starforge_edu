@@ -447,6 +447,51 @@ def test_parent_sees_childs_active_cohort_lessons(tenant_a, user_in):
         assert not_mine.id not in visible
 
 
+def test_student_rule_api_is_scoped_to_active_cohorts(tenant_a, user_in, as_user):
+    from apps.cohorts.services import enroll_student_in_cohort
+    from apps.students.tests.factories import StudentProfileFactory
+
+    student_user = user_in(tenant_a, roles=["student"])
+    with schema_context(tenant_a.schema_name):
+        mine_ctx = _setup()
+        other_ctx = _setup()
+        student = StudentProfileFactory(user=student_user, branch=mine_ctx["branch"])
+        enroll_student_in_cohort(cohort=mine_ctx["cohort"], student=student)
+        mine = _make_rule(mine_ctx)
+        other = _make_rule(other_ctx)
+
+    client = as_user(tenant_a, student_user)
+    listing = client.get("/api/v1/schedule/rules/")
+    assert listing.status_code == 200
+    assert {row["id"] for row in listing.json()["data"]} == {mine.id}
+    assert client.get(f"/api/v1/schedule/rules/{mine.id}/").status_code == 200
+    assert client.get(f"/api/v1/schedule/rules/{other.id}/").status_code == 404
+
+
+def test_parent_rule_api_is_scoped_to_child_cohorts(tenant_a, user_in, as_user):
+    from apps.cohorts.services import enroll_student_in_cohort
+    from apps.parents.tests.factories import GuardianFactory, ParentProfileFactory
+    from apps.students.tests.factories import StudentProfileFactory
+
+    parent_user = user_in(tenant_a, roles=["parent"])
+    with schema_context(tenant_a.schema_name):
+        mine_ctx = _setup()
+        other_ctx = _setup()
+        parent = ParentProfileFactory(user=parent_user)
+        student = StudentProfileFactory(branch=mine_ctx["branch"])
+        GuardianFactory(parent=parent, student=student)
+        enroll_student_in_cohort(cohort=mine_ctx["cohort"], student=student)
+        mine = _make_rule(mine_ctx)
+        other = _make_rule(other_ctx)
+
+    client = as_user(tenant_a, parent_user)
+    listing = client.get("/api/v1/schedule/rules/")
+    assert listing.status_code == 200
+    assert {row["id"] for row in listing.json()["data"]} == {mine.id}
+    assert client.get(f"/api/v1/schedule/rules/{mine.id}/").status_code == 200
+    assert client.get(f"/api/v1/schedule/rules/{other.id}/").status_code == 404
+
+
 # --- one-off op guards ---
 
 
