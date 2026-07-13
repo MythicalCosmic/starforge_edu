@@ -13,4 +13,4 @@ class DepartmentRepository(BaseRepository[Department], IDepartmentRepository):
     model = Department
 
     def get_queryset(self) -> QuerySet[Department]:
-        return Department.objects.select_related("branch", "head")
+        return Department.objects.select_related("branch", "head__teacher_profile")

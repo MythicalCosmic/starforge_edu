@@ -76,8 +76,12 @@ def test_compute_hourly(tenant_a):
         for i in range(2):  # two 1-hour lessons = 2 taught hours
             start = base + timedelta(hours=i)
             Lesson.objects.create(
-                term=term, cohort=cohort, teacher=teacher, title="L",
-                starts_at=start, ends_at=start + timedelta(hours=1),
+                term=term,
+                cohort=cohort,
+                teacher=teacher,
+                title="L",
+                starts_at=start,
+                ends_at=start + timedelta(hours=1),
             )
         set_payout_policy(teacher=teacher, method="hourly", hourly_rate_uzs=Decimal("50000"))
         start_d, end_d = _wide_period()
@@ -140,12 +144,18 @@ def test_percent_only_counts_the_teachers_own_cohort_tuition(tenant_a):
         CohortMembershipFactory(cohort=other_cohort, student=student)  # also in the OTHER course
         # 100k paid for MY cohort, 900k paid for the OTHER teacher's cohort.
         PaymentAllocation.objects.create(
-            invoice=InvoiceFactory(student=student, cohort=my_cohort), payment_id=1, amount_uzs=Decimal("100000.00")
+            invoice=InvoiceFactory(student=student, cohort=my_cohort),
+            payment_id=1,
+            amount_uzs=Decimal("100000.00"),
         )
         PaymentAllocation.objects.create(
-            invoice=InvoiceFactory(student=student, cohort=other_cohort), payment_id=2, amount_uzs=Decimal("900000.00")
+            invoice=InvoiceFactory(student=student, cohort=other_cohort),
+            payment_id=2,
+            amount_uzs=Decimal("900000.00"),
         )
-        set_payout_policy(teacher=teacher, method="percent_of_collected_tuition", tuition_percent=Decimal("50"))
+        set_payout_policy(
+            teacher=teacher, method="percent_of_collected_tuition", tuition_percent=Decimal("50")
+        )
         start_d, end_d = _wide_period()
         result = compute_payout(teacher=teacher, period_start=start_d, period_end=end_d)
         assert result["amount_uzs"] == Decimal("50000.00")  # 50% of only MY cohort's 100k
@@ -184,7 +194,7 @@ def test_generic_approvals_endpoint_cannot_mint_a_salary(tenant_a, as_role):
             "kind": "salary_prep",
             "title": "x",
             "amount_uzs": "50000000.00",
-            "payload": {"teacher_user_id": 999, "party_label": "Ghost"},
+            "payload": {"teacher_profile_id": 999, "party_label": "Ghost"},
         },
         format="json",
     )
@@ -216,7 +226,7 @@ def test_prepare_salary_creates_and_flows_through_approvals(tenant_a, as_role):
         req = ApprovalRequest.objects.get(pk=rid)
         assert req.kind == "salary_prep"
         assert req.amount_uzs == Decimal("2500000.00")
-        assert req.payload["teacher_user_id"] == teacher.user_id  # SoD beneficiary pinned
+        assert req.payload["teacher_profile_id"] == teacher.id  # SoD beneficiary pinned
 
 
 def test_teacher_cannot_approve_their_own_salary(tenant_a, user_in, as_user):

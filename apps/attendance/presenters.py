@@ -13,7 +13,7 @@ def record_to_dict(record: AttendanceRecord) -> dict:
     return {
         "id": record.id,
         "student": record.student_id,
-        "student_name": record.student.user.get_full_name(),
+        "student_name": record.student.get_full_name(),
         "lesson": record.lesson_id,
         "lesson_title": lesson.title,
         "lesson_starts_at": lesson.starts_at.isoformat(),
@@ -22,7 +22,7 @@ def record_to_dict(record: AttendanceRecord) -> dict:
         "cohort": lesson.cohort_id,
         "cohort_name": lesson.cohort.name,
         "teacher": lesson.teacher_id,
-        "teacher_name": lesson.teacher.user.get_full_name(),
+        "teacher_name": lesson.teacher.get_full_name(),
         "status": record.status,
         "arrived_at": record.arrived_at.isoformat() if record.arrived_at else None,
         "note": record.note,

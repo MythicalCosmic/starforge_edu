@@ -221,7 +221,9 @@ def enrollment_reasons_collection_view(request: HttpRequest) -> HttpResponse:
             default_ordering="name",
         )
         items, total, page, size = paginate(request, qs)
-        return paginated([enrollment_reason_to_dict(r) for r in items], total=total, page=page, page_size=size)
+        return paginated(
+            [enrollment_reason_to_dict(r) for r in items], total=total, page=page, page_size=size
+        )
     if request.method == "POST":
         check_perm(request, f"{_RESOURCE}:write")
         reason = _reason_service().create(data=_reason_create_data(read_json(request)))
@@ -396,6 +398,7 @@ def _create(request: HttpRequest) -> HttpResponse:
     assert_branch_id_in_scope(request, branch_id)  # create-scope (object_scope="branch")
     dto = StudentCreateDTO(
         branch_id=branch_id,  # type: ignore[arg-type]
+        username=str_field(body, "username"),
         phone=phone,
         email=email,
         first_name=str_field(body, "first_name"),
@@ -417,6 +420,15 @@ def _changes(body: dict[str, Any]) -> dict[str, Any]:
     """Only the directly-editable fields (StudentUpdateSerializer): current_cohort,
     branch, and status are intentionally NOT writable here."""
     changes: dict[str, Any] = {}
+    for f in ("first_name", "last_name", "middle_name", "phone", "email"):
+        if f in body:
+            changes[f] = str_field(body, f)
+    if "birthdate" in body:
+        changes["birthdate"] = _date_or_none(body, "birthdate")
+    if "gender" in body:
+        changes["gender"] = _choice(body, "gender", StudentProfile.Gender.values, allow_blank=True)
+    if "is_active" in body:
+        changes["is_active"] = bool_field(body, "is_active")
     for f in ("academic_level", "location", "previous_school", "medical_notes"):
         if f in body:
             changes[f] = str_field(body, f)
@@ -430,9 +442,7 @@ def _assert_active_branch(branch_id: int | None) -> None:
     from apps.org.models import Branch
 
     if branch_id is None or not Branch.objects.filter(pk=branch_id, archived_at__isnull=True).exists():
-        raise ValidationException(
-            "Invalid branch.", code="invalid_branch", fields={"branch": ["Not found."]}
-        )
+        raise ValidationException("Invalid branch.", code="invalid_branch", fields={"branch": ["Not found."]})
 
 
 def _emergency_contacts(body: dict[str, Any]) -> list:
@@ -449,7 +459,13 @@ def _emergency_contacts(body: dict[str, Any]) -> list:
 
 
 def _choice(
-    data: dict[str, Any], name: str, choices, *, required: bool = False, allow_blank: bool = False, default: str = ""
+    data: dict[str, Any],
+    name: str,
+    choices,
+    *,
+    required: bool = False,
+    allow_blank: bool = False,
+    default: str = "",
 ) -> str:
     raw = data.get(name)
     if raw in (None, ""):

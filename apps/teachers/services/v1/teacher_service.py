@@ -15,6 +15,16 @@ from apps.teachers.models import TeacherProfile
 from core.exceptions import NotFoundException, ValidationException
 
 _SCALAR_FIELDS = ("hire_date", "subjects", "qualifications", "salary_type", "rate", "is_substitute")
+_IDENTITY_FIELDS = (
+    "first_name",
+    "last_name",
+    "middle_name",
+    "phone",
+    "email",
+    "birthdate",
+    "gender",
+    "is_active",
+)
 
 
 class TeacherService(ITeacherService):
@@ -33,6 +43,7 @@ class TeacherService(ITeacherService):
         return create_teacher(
             branch=self._resolve_branch(data.branch_id),
             department=self._resolve_department(data.department_id),
+            username=data.username,
             phone=data.phone,
             email=data.email,
             first_name=data.first_name,
@@ -49,6 +60,11 @@ class TeacherService(ITeacherService):
         )
 
     def update(self, teacher: TeacherProfile, changes: dict[str, Any]) -> TeacherProfile:
+        identity_changes = {field: changes[field] for field in _IDENTITY_FIELDS if field in changes}
+        if identity_changes:
+            from apps.users.services import update_role_identity
+
+            update_role_identity(teacher, identity_changes)
         if "branch" in changes:
             teacher.branch = self._resolve_branch(changes["branch"])
         if "department" in changes:
@@ -70,6 +86,15 @@ class TeacherService(ITeacherService):
             if field in changes:
                 setattr(teacher, field, changes[field])
         teacher.save()
+        from apps.users.services import ensure_role_membership
+        from core.permissions import Role
+
+        ensure_role_membership(
+            teacher,
+            role=Role.TEACHER,
+            branch=teacher.branch,
+            department=teacher.department,
+        )
         return teacher
 
     def delete(self, teacher: TeacherProfile) -> None:

@@ -40,10 +40,10 @@ class EnrollmentGenerator(ReportGenerator):
             qs = qs.filter(current_cohort_id__in=teacher_cohort_ids(user))
 
         enforce_report_row_cap(qs)
-        rows = [
+        rows: list[dict[str, str]] = [
             {
                 "student_id": s.student_id,
-                "name": s.user.get_full_name() or s.user.username,
+                "name": s.get_full_name() or s.username or "",
                 "status": s.status,
                 "branch": s.branch.name if s.branch else "",
                 "cohort": s.current_cohort.name if s.current_cohort else "",

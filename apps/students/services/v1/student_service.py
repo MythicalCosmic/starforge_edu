@@ -24,7 +24,7 @@ from apps.students.interfaces.student_service import (
     IStudentService,
 )
 from apps.students.models import EnrollmentEvent, EnrollmentReason, StudentProfile
-from core.exceptions import NotFoundException, PermissionException, ValidationException
+from core.exceptions import NotFoundException, ValidationException
 
 
 def _reject(field: str, message: str) -> ValidationException:
@@ -62,10 +62,21 @@ class EnrollmentReasonService(IEnrollmentReasonService):
     def active_slugs(self) -> set[str]:
         return self._reasons.active_slugs()
 
+
 # Direct-edit fields only (StudentUpdateSerializer): current_cohort/branch/status
 # are deliberately NOT here — those change via the cohort move / transfer / transition
 # services so history + signals + capacity checks stay intact.
 _UPDATABLE = ("academic_level", "location", "previous_school", "medical_notes", "emergency_contacts")
+_IDENTITY_FIELDS = (
+    "first_name",
+    "last_name",
+    "middle_name",
+    "phone",
+    "email",
+    "birthdate",
+    "gender",
+    "is_active",
+)
 
 
 class StudentService(IStudentService):
@@ -84,6 +95,7 @@ class StudentService(IStudentService):
 
         return create_student(
             branch=self._resolve_active_branch(data.branch_id),
+            username=data.username,
             phone=data.phone,
             email=data.email,
             first_name=data.first_name,
@@ -100,10 +112,16 @@ class StudentService(IStudentService):
         )
 
     def update(self, student: StudentProfile, changes: dict[str, Any]) -> StudentProfile:
+        identity_changes = {field: changes[field] for field in _IDENTITY_FIELDS if field in changes}
+        if identity_changes:
+            from apps.users.services import update_role_identity
+
+            update_role_identity(student, identity_changes)
         for field in _UPDATABLE:
             if field in changes:
                 setattr(student, field, changes[field])
-        student.save()
+        if any(field in changes for field in _UPDATABLE):
+            student.save()
         return student
 
     def delete(self, student: StudentProfile) -> None:
@@ -137,27 +155,16 @@ class StudentService(IStudentService):
     def issue_credentials(self, student: StudentProfile, *, actor) -> dict[str, Any]:
         """Issue a ONE-TIME login password for the student so they can sign in at
         /role-login/ (accounts are created passwordless). Generates a temp password, sets
-        it on the linked User (the single source of truth role-login checks), flags the
-        student account must-change (so the client forces a reset on first login), ends any
-        existing session, and returns {username, temporary_password} — the temp is never
-        stored/echoed again."""
-        from apps.audit.services import audit_log
-        from apps.users.services import generate_temp_password, set_user_password
+        it on the student account, flags the account must-change (so the client forces a
+        reset on first login), ends any existing session, and returns
+        {username, temporary_password} — the temp is never stored/echoed again."""
+        from apps.users.services import issue_role_credentials
 
-        user = student.user
-        # Defense in depth: this student-scoped endpoint must NEVER be a lever to reset
-        # a staff/superuser password, even if a StudentProfile were somehow linked to one.
-        if user.is_staff or user.is_superuser:
-            raise PermissionException(
-                "Cannot set login credentials for a staff account here.", code="forbidden"
-            )
-        temp = generate_temp_password()
-        set_user_password(user, temp)  # sets user.password + ends existing sessions
-        if not student.must_change_password:
-            student.must_change_password = True
-            student.save(update_fields=["must_change_password"])
-        audit_log(actor=actor, action="update", resource_type="users.User", resource_id=str(user.pk))
-        return {"username": student.username or user.username, "temporary_password": temp}
+        return issue_role_credentials(
+            student,
+            actor=actor,
+            resource_type="students.StudentProfile",
+        )
 
     # --- collection actions ------------------------------------------------
     def import_csv(self, *, file_obj, branch_id: int) -> dict[str, Any]:

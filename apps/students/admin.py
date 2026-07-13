@@ -1,8 +1,6 @@
 from django.contrib import admin
-from django.urls import reverse
-from django.utils.html import format_html
 
-from core.admin_mixins import ReadOnlyAdmin
+from core.admin_mixins import ReadOnlyAdmin, RoleAccountAdminMixin
 
 from .models import EnrollmentEvent, EnrollmentReason, StudentIdCounter, StudentProfile
 
@@ -31,28 +29,29 @@ class EnrollmentEventInline(admin.TabularInline):
 
 
 @admin.register(StudentProfile)
-class StudentProfileAdmin(admin.ModelAdmin):
-    list_display = ("student_id", "first_name", "last_name", "phone", "status", "branch", "enrollment_date")
+class StudentProfileAdmin(RoleAccountAdminMixin):
+    list_display = (
+        "student_id",
+        "username",
+        "first_name",
+        "last_name",
+        "phone",
+        "status",
+        "branch",
+        "enrollment_date",
+    )
     list_filter = ("status", "branch", "gender")
-    search_fields = ("student_id", "first_name", "last_name", "phone", "email", "user__username")
-    autocomplete_fields = ("user", "branch", "current_cohort")
-    list_select_related = ("user", "branch", "current_cohort")
-    readonly_fields = ("login_account", "last_login_at")
-    exclude = ("password",)  # never render the login hash as an editable field
+    search_fields = ("student_id", "username", "first_name", "last_name", "phone", "email")
+    autocomplete_fields = ("branch", "current_cohort")
+    list_select_related = ("branch", "current_cohort")
     inlines = (EnrollmentEventInline,)
 
-    @admin.display(description="Login username", ordering="user__username")
-    def login_username(self, obj: StudentProfile) -> str:
-        return obj.user.username
+    def save_model(self, request, obj, form, change) -> None:
+        super().save_model(request, obj, form, change)
+        from apps.users.services import ensure_role_membership
+        from core.permissions import Role
 
-    @admin.display(description="Login account")
-    def login_account(self, obj: StudentProfile):
-        """Link to the User change page, where the login username + password are set
-        (accounts are created passwordless; set a password so the student can sign in)."""
-        if not obj.user_id:
-            return "—"
-        url = reverse("admin:users_user_change", args=[obj.user_id])
-        return format_html('<a href="{}">{}</a> — set the login password here', url, obj.user.username)
+        ensure_role_membership(obj, role=Role.STUDENT, branch=obj.branch)
 
 
 @admin.register(EnrollmentEvent)

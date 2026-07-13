@@ -22,7 +22,7 @@ _MAX_AMOUNT = Decimal("1e16")  # NUMERIC(18,2): at most 16 integer digits
 
 
 def _party_label(student) -> str:
-    name = (student.user.get_full_name() if student.user else "") or student.student_id
+    name = student.get_full_name() or student.student_id
     return name[:200]
 
 

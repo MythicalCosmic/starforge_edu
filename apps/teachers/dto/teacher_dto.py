@@ -12,6 +12,7 @@ from decimal import Decimal
 @dataclass(frozen=True)
 class TeacherCreateDTO:
     branch_id: int
+    username: str = ""
     phone: str = ""
     email: str = ""
     first_name: str = ""

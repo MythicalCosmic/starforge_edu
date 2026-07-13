@@ -46,7 +46,7 @@ class GradesGenerator(ReportGenerator):
         enforce_report_row_cap(qs)
         rows = [
             {
-                "student": g.student.user.get_full_name() or g.student.user.username,
+                "student": g.student.get_full_name() or g.student.username,
                 "student_id": g.student.student_id,
                 "subject": g.subject.name,
                 "term": g.term.name if g.term_id else "",

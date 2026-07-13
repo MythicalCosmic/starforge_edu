@@ -224,17 +224,17 @@ def _validate_payment_delay_payload(payload: dict) -> dict:
 
 
 def _validate_salary_prep_payload(payload: dict) -> dict:
-    """Validate a salary_prep payload (F13-1). It must name the beneficiary teacher's User
-    id (so SoD extends to them) and carry a `party_label` so the disbursement's immutable
+    """Validate a salary_prep payload (F13-1). It must name the beneficiary TeacherProfile
+    (so SoD extends to them) and carry a `party_label` so the disbursement's immutable
     ledger row names the teacher. The computed `breakdown` + period keys are preserved for
     the audit trail. Built by apps.teachers.services.prepare_salary (which computes the
     amount from the teacher's dynamic PayoutPolicy) — never a raw human-entered figure."""
-    teacher_user_id = payload.get("teacher_user_id")
-    if not isinstance(teacher_user_id, int) or isinstance(teacher_user_id, bool):
+    teacher_profile_id = payload.get("teacher_profile_id")
+    if not isinstance(teacher_profile_id, int) or isinstance(teacher_profile_id, bool):
         raise ValidationException(
-            _("A salary request must name the teacher (teacher_user_id)."),
+            _("A salary request must name the teacher (teacher_profile_id)."),
             code="salary_teacher_required",
-            fields={"teacher_user_id": ["An integer user id is required."]},
+            fields={"teacher_profile_id": ["An integer teacher profile id is required."]},
         )
     out = dict(payload)
     if not out.get("party_label"):
@@ -809,7 +809,7 @@ def _assert_not_self_approval(req: ApprovalRequest, actor) -> None:
         raise PermissionException(_("You cannot approve your own request."), code="self_approval")
 
 
-# Money-OUT-to-a-named-STAFF-member kinds pin the beneficiary's User id in the
+# Money-OUT-to-a-named-STAFF-member kinds pin the beneficiary identity in the
 # payload under a per-kind key. SoD extends to that beneficiary — they may neither
 # approve nor disburse a payout to themselves. Each entry: (payload key, error code,
 # message). Supplier/vendor payees (procurement/expense party_label) and student
@@ -822,7 +822,7 @@ _BENEFICIARY_SELF_DEALING: dict[str, tuple[str, str, Any]] = {
         _("You cannot approve or disburse your own reward."),
     ),
     KIND_SALARY_PREP: (
-        "teacher_user_id",
+        "teacher_profile_id",
         "salary_self_dealing",
         _("You cannot approve or disburse your own salary."),
     ),
@@ -848,9 +848,16 @@ def _assert_not_beneficiary_self_dealing(req: ApprovalRequest, actor) -> None:
     # blocks.
     raw = req.payload.get(key)
     try:
-        beneficiary_id = int(raw)
+        parsed_beneficiary_id = int(raw)
     except (TypeError, ValueError):
         return
+    beneficiary_id: int | None = parsed_beneficiary_id
+    if req.kind == KIND_SALARY_PREP:
+        from apps.teachers.models import TeacherProfile
+
+        beneficiary_id = (
+            TeacherProfile.objects.filter(pk=parsed_beneficiary_id).values_list("user_id", flat=True).first()
+        )
     if beneficiary_id == getattr(actor, "id", None):
         raise PermissionException(message, code=code)
 

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class ParentCreateDTO:
+    username: str = ""
     phone: str = ""
     email: str = ""
     first_name: str = ""

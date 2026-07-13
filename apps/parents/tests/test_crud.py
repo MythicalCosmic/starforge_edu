@@ -25,7 +25,8 @@ def test_director_parent_create_list_retrieve_update_delete(tenant_a, as_role):
     body = resp.json()
     assert body["success"] is True
     pid = body["data"]["id"]
-    assert body["data"]["user"]["first_name"] == "Ada"
+    assert body["data"]["first_name"] == "Ada"
+    assert "user" not in body["data"]
     assert body["data"]["workplace"] == "Acme"
 
     listed = client.get(PARENTS).json()
@@ -104,9 +105,7 @@ def test_guardian_list_includes_readable_names(tenant_a, as_role):
     client, _ = as_role(Role.DIRECTOR)
     with schema_context(tenant_a.schema_name):
         branch = BranchFactory()
-        student = create_student(
-            branch=branch, phone="+998905553060", first_name="Kid", last_name="Smith"
-        )
+        student = create_student(branch=branch, phone="+998905553060", first_name="Kid", last_name="Smith")
         parent = create_parent(phone="+998905553061", first_name="Ada", last_name="Lovelace")
         expected_parent_name = parent.user.get_full_name()
         expected_student_name = student.user.get_full_name()

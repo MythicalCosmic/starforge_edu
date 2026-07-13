@@ -10,6 +10,7 @@ from apps.students.models import StudentProfile
 @dataclass(frozen=True)
 class StudentCreateDTO:
     branch_id: int
+    username: str = ""
     phone: str = ""
     email: str = ""
     first_name: str = ""

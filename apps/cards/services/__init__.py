@@ -90,9 +90,7 @@ def scan_card(*, code: str, scanned_by=None) -> dict:
             from apps.attendance.services import mark_present_from_scan
 
             with transaction.atomic():
-                record = mark_present_from_scan(
-                    student=student, at=scan.scanned_at, marked_by=scanned_by
-                )
+                record = mark_present_from_scan(student=student, at=scan.scanned_at, marked_by=scanned_by)
             attendance_lesson_id = record.lesson_id if record is not None else None
         except Exception:
             logger.exception("card-scan attendance marking failed for student %s", student.pk)
@@ -100,7 +98,7 @@ def scan_card(*, code: str, scanned_by=None) -> dict:
         "scan_id": scan.pk,
         "valid": valid,
         "student": student.pk,
-        "student_name": (student.user.get_full_name() if student.user else "") or "",
+        "student_name": student.get_full_name(),
         "card_type": card.card_type.name,
         "scanned_at": scan.scanned_at,
         "attendance_lesson": attendance_lesson_id,

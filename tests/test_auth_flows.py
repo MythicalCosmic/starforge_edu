@@ -76,9 +76,9 @@ def test_role_login_student_signs_in_as_their_role(tenant_a, client_for):
 
     with schema_context(tenant_a.schema_name):
         student = StudentProfileFactory(username="ada.student")
-        student.user.set_password(PASSWORD)
-        student.user.save(update_fields=["password"])
-        user_id = student.user_id
+        student.set_password(PASSWORD)
+        student.save(update_fields=["password"])
+        student_id = student.id
 
     client = client_for(tenant_a)
     resp = client.post(ROLE_LOGIN_URL, {"username": "ada.student", "password": PASSWORD}, format="json")
@@ -92,7 +92,8 @@ def test_role_login_student_signs_in_as_their_role(tenant_a, client_for):
     authed.credentials(HTTP_AUTHORIZATION=f"Bearer {body['access']}")
     me = authed.get(ME_URL)
     assert me.status_code == 200
-    assert me.json()["data"]["id"] == user_id  # authenticated as the student's linked account
+    assert me.json()["data"]["id"] == student_id
+    assert me.json()["data"]["account_type"] == "student"
 
 
 def test_role_login_wrong_password_401(tenant_a, client_for):
@@ -121,13 +122,13 @@ def test_role_login_tracks_current_user_password_after_change(tenant_a, client_f
     of truth), so a password change/reset takes effect immediately — the OLD password 401s and
     the NEW one works — with no drift from a stale role-account snapshot."""
     from apps.students.tests.factories import StudentProfileFactory
-    from apps.users.services import set_user_password
+    from apps.users.services import set_role_account_password
 
     with schema_context(tenant_a.schema_name):
         student = StudentProfileFactory(username="cy.student")
-        student.user.set_password(PASSWORD)
-        student.user.save(update_fields=["password"])
-        set_user_password(student.user, NEW_PASSWORD)  # a change / reset happens
+        student.set_password(PASSWORD)
+        student.save(update_fields=["password"])
+        set_role_account_password(student, NEW_PASSWORD)
 
     client = client_for(tenant_a)
     old = client.post(ROLE_LOGIN_URL, {"username": "cy.student", "password": PASSWORD}, format="json")

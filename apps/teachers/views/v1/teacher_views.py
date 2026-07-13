@@ -92,6 +92,25 @@ def _teacher_in_scope(request: HttpRequest, pk: int) -> TeacherProfile:
 
 @csrf_exempt
 @require_auth
+def teacher_credentials_view(request: HttpRequest, pk: int) -> HttpResponse:
+    """Issue a one-time teacher password; the raw value is never stored or repeated."""
+    if request.method != "POST":
+        return error("Method not allowed.", code="method_not_allowed", status=405)
+    check_perm(request, f"{_RESOURCE}:write")
+    teacher = _teacher_in_scope(request, pk)
+    from apps.users.services import issue_role_credentials
+
+    return success(
+        issue_role_credentials(
+            teacher,
+            actor=request.user,
+            resource_type="teachers.TeacherProfile",
+        )
+    )
+
+
+@csrf_exempt
+@require_auth
 def teacher_payout_policy_view(request: HttpRequest, pk: int) -> HttpResponse:
     """F13-1: GET / set a teacher's dynamic pay rule (method + params). teachers:read to
     view, teachers:write to configure — the manager sets HOW the teacher is paid."""
@@ -176,6 +195,7 @@ def _create(request: HttpRequest) -> HttpResponse:
     dto = TeacherCreateDTO(
         branch_id=branch_id,  # type: ignore[arg-type]
         department_id=int_field(body, "department"),
+        username=str_field(body, "username"),
         phone=phone,
         email=email,
         first_name=str_field(body, "first_name"),
@@ -196,6 +216,15 @@ def _create(request: HttpRequest) -> HttpResponse:
 def _changes(body: dict[str, Any]) -> dict[str, Any]:
     """The provided updatable fields only (PATCH-correct: absent vs null differ)."""
     changes: dict[str, Any] = {}
+    for field in ("first_name", "last_name", "middle_name", "phone", "email"):
+        if field in body:
+            changes[field] = str_field(body, field)
+    if "birthdate" in body:
+        changes["birthdate"] = _date(body, "birthdate")
+    if "gender" in body:
+        changes["gender"] = _gender(body)
+    if "is_active" in body:
+        changes["is_active"] = bool_field(body, "is_active")
     if "branch" in body:
         changes["branch"] = int_field(body, "branch", required=True)
     if "department" in body:

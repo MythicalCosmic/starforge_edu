@@ -88,9 +88,34 @@ class AuthService(IAuthService):
 
         logout_everywhere(user)
 
-    def change_password(self, user: User, data: ChangePasswordDTO) -> dict[str, str]:
+    def change_password(
+        self,
+        user: User,
+        data: ChangePasswordDTO,
+        *,
+        principal_kind: str = "",
+        principal_id: int | None = None,
+    ) -> dict[str, str]:
         from apps.auth.services import _validate_new_password
-        from apps.users.services import set_user_password
+        from apps.users.services import set_role_account_password, set_user_password
+
+        if principal_kind and principal_id is not None:
+            from apps.auth.services import _role_account_models
+
+            model = _role_account_models().get(principal_kind)
+            account = model.objects.filter(pk=principal_id, user=user).first() if model else None
+            if account is None:
+                raise AuthenticationException(_("Invalid account session."), code="authentication_failed")
+            if not account.check_password(data.old_password):
+                raise ValidationException(_("Current password is incorrect."), code="wrong_password")
+            _validate_new_password(data.new_password, account)
+            set_role_account_password(account, data.new_password, must_change=False)
+            session = self._sessions.create_for(
+                user,
+                principal_kind=principal_kind,
+                principal_id=principal_id,
+            )
+            return {"access": session.key}
 
         if not user.check_password(data.old_password):
             raise ValidationException(_("Current password is incorrect."), code="wrong_password")
@@ -102,7 +127,12 @@ class AuthService(IAuthService):
     def request_reset(self, data: ResetRequestDTO, ctx: SessionContextDTO) -> None:
         from apps.auth.services import request_password_reset
 
-        request_password_reset(identifier=data.identifier, ip=ctx.ip, user_agent=ctx.user_agent)
+        request_password_reset(
+            identifier=data.identifier,
+            account_type=data.account_type,
+            ip=ctx.ip,
+            user_agent=ctx.user_agent,
+        )
 
     def confirm_reset(self, data: ResetConfirmDTO, ctx: SessionContextDTO) -> None:
         from apps.auth.services import reset_password
@@ -111,6 +141,7 @@ class AuthService(IAuthService):
             identifier=data.identifier,
             code=data.code,
             new_password=data.new_password,
+            account_type=data.account_type,
             ip=ctx.ip,
             user_agent=ctx.user_agent,
         )

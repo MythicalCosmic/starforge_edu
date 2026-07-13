@@ -66,7 +66,7 @@ def submission_to_dict(s: Submission) -> dict[str, Any]:
         "assignment_title": s.assignment.title,
         "assignment_due_at": s.assignment.due_at.isoformat() if s.assignment.due_at else None,
         "student": s.student_id,
-        "student_name": s.student.user.get_full_name(),
+        "student_name": s.student.get_full_name(),
         "text": s.text,
         "attachments": s.attachments,
         "submitted_at": s.submitted_at.isoformat() if s.submitted_at else None,

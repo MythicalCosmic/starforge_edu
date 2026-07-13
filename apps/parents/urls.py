@@ -13,6 +13,7 @@ from apps.parents.views.v1.guardian_views import guardian_detail_view, guardians
 from apps.parents.views.v1.parent_views import (
     parent_child_report_view,
     parent_children_view,
+    parent_credentials_view,
     parent_detail_view,
     parent_students_view,
     parents_collection_view,
@@ -33,4 +34,5 @@ urlpatterns = [
     path("", parents_collection_view, name="parents-collection"),
     path("<int:pk>/", parent_detail_view, name="parents-detail"),
     path("<int:pk>/students/", parent_students_view, name="parents-students"),
+    path("<int:pk>/credentials/", parent_credentials_view, name="parents-credentials"),
 ]

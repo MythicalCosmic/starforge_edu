@@ -15,9 +15,7 @@ pytestmark = pytest.mark.django_db
 def test_branch_create_list_retrieve_update(as_role):
     client, _ = as_role(Role.DIRECTOR)
 
-    resp = client.post(
-        "/api/v1/org/branches/", {"name": "Downtown", "slug": "downtown"}, format="json"
-    )
+    resp = client.post("/api/v1/org/branches/", {"name": "Downtown", "slug": "downtown"}, format="json")
     assert resp.status_code == 201, resp.content
     body = resp.json()
     assert body["success"] is True
@@ -109,14 +107,14 @@ def test_department_list_surfaces_readable_fk_names(as_role, tenant_a):
         branch = BranchFactory(name="Central Campus")
         dept = DepartmentFactory(branch=branch)
         teacher = create_teacher(branch=branch, phone="+998905559050", first_name="Dana")
-        set_department_head(dept, teacher.user)
-        expected_head = teacher.user.get_full_name()
-        head_user_id = teacher.user_id
+        set_department_head(dept, teacher)
+        expected_head = teacher.get_full_name()
+        head_teacher_id = teacher.id
 
     row = next(d for d in client.get("/api/v1/org/departments/").json()["data"] if d["id"] == dept.id)
     assert row["branch"] == branch.id
     assert row["branch_name"] == "Central Campus"
-    assert row["head"] == head_user_id
+    assert row["head"] == head_teacher_id
     assert row["head_name"] == expected_head
 
 

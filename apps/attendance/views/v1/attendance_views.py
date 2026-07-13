@@ -287,7 +287,7 @@ def _csv_rows(records):
             [
                 timezone.localdate(record.lesson.starts_at).isoformat(),
                 record.lesson.title,
-                record.student.user.get_full_name(),
+                record.student.get_full_name(),
                 record.status,
                 getattr(record.marked_by, "username", "") or ("auto" if record.auto_marked else ""),
             ]

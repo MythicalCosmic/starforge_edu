@@ -11,6 +11,7 @@ from datetime import time
 from decimal import Decimal
 
 from django.db import models
+from django.db.models.functions import Lower
 from django.utils.translation import gettext_lazy as _
 
 from apps.users.models import RoleAccount
@@ -35,7 +36,11 @@ class StaffProfile(RoleAccount):
         MALE = "m", _("Male")
         FEMALE = "f", _("Female")
 
-    user = models.OneToOneField("users.User", on_delete=models.CASCADE, related_name="staff_profile")
+    # Internal compatibility principal for permissions, sessions, and historical audit FKs.
+    # StaffProfile owns identity + login credentials; operators never select this relation.
+    user = models.OneToOneField(
+        "users.User", on_delete=models.CASCADE, related_name="staff_profile", editable=False
+    )
     first_name = models.CharField(max_length=150, blank=True)
     last_name = models.CharField(max_length=150, blank=True)
     middle_name = models.CharField(max_length=150, blank=True)
@@ -48,9 +53,21 @@ class StaffProfile(RoleAccount):
 
     class Meta:
         ordering = ("last_name", "first_name")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("phone",),
+                condition=~models.Q(phone=""),
+                name="staff_phone_unique_nonblank",
+            ),
+            models.UniqueConstraint(
+                Lower("email"),
+                condition=~models.Q(email=""),
+                name="staff_email_unique_nonblank_ci",
+            ),
+        ]
 
     def __str__(self) -> str:  # pragma: no cover
-        return self.get_full_name() or f"staff#{self.user_id}"
+        return self.get_full_name() or self.username or f"staff#{self.pk}"
 
     def get_full_name(self) -> str:
         parts = [self.first_name, self.middle_name, self.last_name]
@@ -96,9 +113,8 @@ class Department(models.Model):
     description = models.TextField(blank=True)
     is_active = models.BooleanField(default=True)
 
-    # head targets users.User (not teachers.TeacherProfile) because Lane D merges
-    # after Lane F. `set_department_head` validates a TeacherProfile exists once
-    # that app lands (D1-LF-4 / D1-LD-10).
+    # Compatibility FK for the existing authorization graph. Admin/API expose a
+    # TeacherProfile id and resolve this bridge internally; operators never choose User.
     head = models.ForeignKey(
         "users.User",
         on_delete=models.SET_NULL,

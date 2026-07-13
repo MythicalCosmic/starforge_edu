@@ -14,6 +14,8 @@ class ParentProfileFactory(factory.django.DjangoModelFactory[ParentProfile]):
         model = ParentProfile
 
     user = factory.SubFactory(UserFactory)
+    username = factory.LazyAttribute(lambda o: o.user.username)
+    password = factory.LazyAttribute(lambda o: o.user.password)
     # Identity is owned by the parent model now; mirror it off the user (as create_parent
     # does) so a test that sets user.first_name / user.birthdate flows through.
     first_name = factory.LazyAttribute(lambda o: o.user.first_name)

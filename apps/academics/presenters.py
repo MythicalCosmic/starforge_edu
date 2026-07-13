@@ -64,7 +64,7 @@ def exam_result_to_dict(result: ExamResult) -> dict:
         "id": result.id,
         "exam": result.exam_id,
         "student": result.student_id,
-        "student_name": result.student.user.get_full_name(),
+        "student_name": result.student.get_full_name(),
         "score": _dec(result.score, 2),
         "note": result.note,
         "graded_by": result.graded_by_id,
@@ -76,7 +76,7 @@ def grade_to_dict(grade: Grade) -> dict:
     return {
         "id": grade.id,
         "student": grade.student_id,
-        "student_name": grade.student.user.get_full_name(),
+        "student_name": grade.student.get_full_name(),
         "subject": grade.subject_id,
         "subject_name": grade.subject.name,
         "term": grade.term_id,

@@ -120,10 +120,11 @@ def find_role_account(username: str):
 def role_login(
     *, username: str, password: str, ip: str = "", user_agent: str = "", device_id: str = ""
 ) -> dict:
-    """Role-native login: authenticate a role account by its OWN username+password and issue
-    a session bound to the account's linked User (so all downstream authz/audit is unchanged)
-    plus the role principal. Unknown username, wrong password, and an inactive account are
-    indistinguishable (timing-equalized), mirroring ``login_with_password``."""
+    """Authenticate against the role table's own password and issue a role session.
+
+    The session retains an internal User bridge for the existing permission/audit graph,
+    but that bridge is not a usable login account and is never exposed to operators.
+    """
     from core.session_auth import create_session
 
     username = username.strip()
@@ -132,20 +133,19 @@ def role_login(
         check_password(password, _dummy_hash())  # constant-time-ish equalizer
         _fire_login_failed(username, ip, user_agent, reason="unknown_username")
         raise AuthenticationException(_("Invalid username or password."), code="invalid_credentials")
-    # The username locates the role account, but the PASSWORD is checked against the linked
-    # User — the single source of truth that every change/reset flow (set_user_password)
-    # keeps current. Checking the role account's own snapshot column would drift (an old
-    # password would survive a reset; a provisioned account could never sign in). The
-    # account.password field stays a snapshot until the final cut-over moves the source there.
-    if not account.user.check_password(password) or not account.is_active or not account.user.is_active:
+    # Role accounts own their credentials. The linked User is only the hidden authorization
+    # principal needed by the existing permission and session graph.
+    if not account.check_password(password) or not account.is_active:
         reason = "wrong_password" if account.is_active else "inactive_account"
         _fire_login_failed(username, ip, user_agent, reason=reason)
         raise AuthenticationException(_("Invalid username or password."), code="invalid_credentials")
 
     now = timezone.now()
     type(account).objects.filter(pk=account.pk).update(last_login_at=now)
+    if not account.user.is_active:
+        account.user.is_active = True
     account.user.last_seen_at = now
-    account.user.save(update_fields=["last_seen_at"])
+    account.user.save(update_fields=["is_active", "last_seen_at"])
     login_succeeded.send(
         sender=User,
         username=username,
@@ -369,7 +369,9 @@ def verify_otp(
     )
 
 
-def request_password_reset(*, identifier: str, ip: str = "", user_agent: str = "") -> None:
+def request_password_reset(
+    *, identifier: str, account_type: str = "", ip: str = "", user_agent: str = ""
+) -> None:
     """Send a reset OTP if (and only if) an account matches the identifier.
 
     Unknown identifiers are silently accepted — no SMS is sent, no OTP row is
@@ -395,7 +397,7 @@ def request_password_reset(*, identifier: str, ip: str = "", user_agent: str = "
         window=settings.OTP_GLOBAL_RATE_WINDOW_SECONDS,
     )
     _enforce_ip_cap(ip, identifier)
-    if _find_by_identifier(identifier) is None:
+    if _find_by_identifier(identifier, account_type=account_type) is None:
         return
     try:
         send_otp(identifier=identifier, purpose=OTP.PURPOSE_RESET, ip=ip, user_agent=user_agent)
@@ -410,12 +412,18 @@ def request_password_reset(*, identifier: str, ip: str = "", user_agent: str = "
 
 
 def reset_password(
-    *, identifier: str, code: str, new_password: str, ip: str = "", user_agent: str = ""
+    *,
+    identifier: str,
+    code: str,
+    new_password: str,
+    account_type: str = "",
+    ip: str = "",
+    user_agent: str = "",
 ) -> None:
     """Complete a password reset: verify the OTP, set the password, end all
     sessions. The user logs in fresh with the new password afterwards."""
     identifier = _normalize(identifier)
-    user = _find_by_identifier(identifier)
+    user = _find_by_identifier(identifier, account_type=account_type)
     # Validate the new password BEFORE consuming the OTP, so a weak-password attempt
     # doesn't burn the (correct) code. Validate EVEN when the account is unknown
     # (user=None) so the weak_password response can't distinguish a registered
@@ -424,12 +432,33 @@ def reset_password(
     verify_otp(identifier=identifier, code=code, purpose=OTP.PURPOSE_RESET, ip=ip, user_agent=user_agent)
     if user is None:  # unreachable in practice: no OTP is issued for unknowns
         raise ValidationException(_("Invalid code."))
-    set_user_password(user, new_password)
+    if isinstance(user, User):
+        set_user_password(user, new_password)
+    else:
+        from apps.users.services import set_role_account_password
+
+        set_role_account_password(user, new_password, must_change=False)
 
 
-def _find_by_identifier(identifier: str) -> User | None:
+def _find_by_identifier(identifier: str, *, account_type: str = ""):
     lookup = {"email": identifier} if "@" in identifier else {"phone": identifier}
-    return User.objects.filter(**lookup).first()
+    if account_type:
+        model = _role_account_models().get(account_type)
+        return model.objects.filter(**lookup).first() if model is not None else None
+    role_matches = []
+    for model in _role_account_models().values():
+        role_matches.extend(model.objects.filter(**lookup)[:2])
+        if len(role_matches) > 1:
+            return None  # ambiguous contact: require account_type, never reset the wrong account
+    if role_matches:
+        account = role_matches[0]
+        # Pre-cutover bridge rows can still mirror the same contact. Treat that as one
+        # logical account, but reject if a different platform User owns it.
+        if User.objects.filter(**lookup).exclude(pk=account.user_id).exists():
+            return None
+        return account
+    users = list(User.objects.filter(**lookup)[:2])
+    return users[0] if len(users) == 1 else None
 
 
 def _fire_failed(identifier: str, ip: str, user_agent: str, *, reason: str) -> None:
@@ -448,9 +477,7 @@ def _fire_failed(identifier: str, ip: str, user_agent: str, *, reason: str) -> N
 # ---------------------------------------------------------------------------
 
 
-def issue_token(
-    user: User, *, ip: str = "", user_agent: str = "", device_id: str = ""
-) -> dict[str, str]:
+def issue_token(user: User, *, ip: str = "", user_agent: str = "", device_id: str = "") -> dict[str, str]:
     """Issue an auth session and return its opaque key as ``{"access": <key>}``.
 
     Custom session auth (no JWT library): the key IS the credential — tenant-bound by

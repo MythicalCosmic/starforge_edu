@@ -31,6 +31,7 @@ class ChangePasswordDTO:
 @dataclass(frozen=True)
 class ResetRequestDTO:
     identifier: str  # phone or email on file
+    account_type: str = ""
 
 
 @dataclass(frozen=True)
@@ -38,3 +39,4 @@ class ResetConfirmDTO:
     identifier: str
     code: str
     new_password: str
+    account_type: str = ""

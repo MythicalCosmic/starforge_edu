@@ -14,6 +14,16 @@ from apps.parents.models import ParentProfile
 from core.exceptions import NotFoundException
 
 _UPDATABLE = ("workplace", "notes")
+_IDENTITY_FIELDS = (
+    "first_name",
+    "last_name",
+    "middle_name",
+    "phone",
+    "email",
+    "birthdate",
+    "gender",
+    "is_active",
+)
 
 
 class ParentService(IParentService):
@@ -30,6 +40,7 @@ class ParentService(IParentService):
         from apps.parents.services import create_parent
 
         return create_parent(
+            username=data.username,
             phone=data.phone,
             email=data.email,
             first_name=data.first_name,
@@ -42,10 +53,16 @@ class ParentService(IParentService):
         )
 
     def update(self, parent: ParentProfile, changes: dict[str, Any]) -> ParentProfile:
+        identity_changes = {field: changes[field] for field in _IDENTITY_FIELDS if field in changes}
+        if identity_changes:
+            from apps.users.services import update_role_identity
+
+            update_role_identity(parent, identity_changes)
         for field in _UPDATABLE:
             if field in changes:
                 setattr(parent, field, changes[field])
-        parent.save()
+        if any(field in changes for field in _UPDATABLE):
+            parent.save()
         return parent
 
     def delete(self, parent: ParentProfile) -> None:

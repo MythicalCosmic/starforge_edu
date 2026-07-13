@@ -1,5 +1,7 @@
 from django.contrib import admin
 
+from core.admin_mixins import RoleAccountAdminMixin
+
 from .models import Guardian, ParentProfile, PickupAuthorization
 
 
@@ -14,15 +16,28 @@ class GuardianInline(admin.TabularInline):
 
 
 @admin.register(ParentProfile)
-class ParentProfileAdmin(admin.ModelAdmin):
-    list_display = ("user", "first_name", "last_name", "phone", "workplace", "created_at")
+class ParentProfileAdmin(RoleAccountAdminMixin):
+    list_display = ("username", "first_name", "last_name", "phone", "workplace", "created_at")
     list_filter = ("gender",)
-    search_fields = ("first_name", "last_name", "phone", "email", "user__username")
-    autocomplete_fields = ("user",)
-    list_select_related = ("user",)
-    readonly_fields = ("last_login_at",)
-    exclude = ("password",)  # never render the login hash as an editable field
+    search_fields = ("username", "first_name", "last_name", "phone", "email")
     inlines = (GuardianInline,)
+
+    def save_related(self, request, form, formsets, change) -> None:
+        super().save_related(request, form, formsets, change)
+        from apps.users.models import RoleMembership
+        from core.permissions import Role
+
+        parent = form.instance
+        for branch in {
+            guardian.student.branch
+            for guardian in parent.guardianships.select_related("student__branch").all()
+        }:
+            RoleMembership.objects.get_or_create(
+                user=parent.user,
+                role=Role.PARENT,
+                branch=branch,
+                department=None,
+            )
 
 
 @admin.register(Guardian)

@@ -52,9 +52,7 @@ def login_view(request: HttpRequest) -> HttpResponse:
     # flood of "admin" on one center never locks "admin" out on another.
     from core.utils import current_schema
 
-    check_rate(
-        scope="login_user", key=f"{current_schema()}:{username.strip().lower()}", limit=5, window=60
-    )
+    check_rate(scope="login_user", key=f"{current_schema()}:{username.strip().lower()}", limit=5, window=60)
     dto = LoginDTO(
         username=username,
         password=password,
@@ -78,9 +76,7 @@ def role_login_view(request: HttpRequest) -> HttpResponse:
         return validation_error({"username": ["required"], "password": ["required"]})
     from core.utils import current_schema
 
-    check_rate(
-        scope="login_user", key=f"{current_schema()}:{username.strip().lower()}", limit=5, window=60
-    )
+    check_rate(scope="login_user", key=f"{current_schema()}:{username.strip().lower()}", limit=5, window=60)
     dto = LoginDTO(
         username=username,
         password=password,
@@ -109,7 +105,15 @@ def password_change_view(request: HttpRequest) -> HttpResponse:
         old_password=str_field(body, "old_password"),
         new_password=str_field(body, "new_password"),
     )
-    return success(_service().change_password(request.user, dto))  # type: ignore[arg-type]
+    session = getattr(request, "auth", None)
+    return success(
+        _service().change_password(
+            request.user,  # type: ignore[arg-type]
+            dto,
+            principal_kind=getattr(session, "principal_kind", ""),
+            principal_id=getattr(session, "principal_id", None),
+        )
+    )
 
 
 @csrf_exempt
@@ -117,7 +121,10 @@ def password_change_view(request: HttpRequest) -> HttpResponse:
 @ratelimit(limit=10, window=60, scope="reset_ip")
 def password_reset_request_view(request: HttpRequest) -> HttpResponse:
     body = read_json(request)
-    dto = ResetRequestDTO(identifier=str_field(body, "identifier"))
+    dto = ResetRequestDTO(
+        identifier=str_field(body, "identifier"),
+        account_type=str_field(body, "account_type"),
+    )
     _service().request_reset(dto, _ctx(request))
     # Always 202 whether or not an account matched (anti-enumeration).
     return success(message="If the account exists, a reset code has been sent.", status=202)
@@ -132,6 +139,7 @@ def password_reset_confirm_view(request: HttpRequest) -> HttpResponse:
         identifier=str_field(body, "identifier"),
         code=str_field(body, "code"),
         new_password=str_field(body, "new_password"),
+        account_type=str_field(body, "account_type"),
     )
     _service().confirm_reset(dto, _ctx(request))
     return no_content()

@@ -15,8 +15,10 @@ from django.utils.translation import gettext_lazy as _
 from apps.org.selectors import get_center_settings
 from apps.org.services import validate_student_id_pattern
 from apps.students.models import EnrollmentEvent, StudentIdCounter, StudentProfile
-from apps.users.services import resolve_or_create_user
+from apps.users.models import RoleMembership
+from apps.users.services import create_role_user_bridge, prepare_role_identity
 from core.exceptions import ValidationException
+from core.permissions import Role
 from core.utils import current_schema
 
 # Max rows accepted in one CSV import — bounds a single request's DB write fan-out
@@ -103,16 +105,22 @@ def create_student(
     medical_notes: str = "",
     emergency_contacts: list | None = None,
     skip_limit_check: bool = False,
+    username: str = "",
 ) -> StudentProfile:
-    user = resolve_or_create_user(
+    identity = prepare_role_identity(
         phone=phone,
         email=email,
         first_name=first_name,
         last_name=last_name,
         middle_name=middle_name,
     )
-    if StudentProfile.objects.filter(user=user).exists():
+    if not identity["phone"] and not identity["email"]:
+        raise ValidationException(_("phone or email is required."), code="identifier_required")
+    if (identity["phone"] and StudentProfile.objects.filter(phone=identity["phone"]).exists()) or (
+        identity["email"] and StudentProfile.objects.filter(email__iexact=identity["email"]).exists()
+    ):
         raise ValidationException(_("This person already has a student profile."), code="duplicate_student")
+    user, username, identity = create_role_user_bridge(username=username, **identity)
     # TD-8 paywall: creating directly at a seat-consuming status (enrolled/active)
     # acquires a seat just like the ENROLLED transition, so it must honour the
     # plan's max_students cap (raises 402 plan_limit_exceeded at the cap). The
@@ -129,16 +137,15 @@ def create_student(
         branch=branch,
         student_id=generate_student_id(),
         status=status,
-        # Identity is OWNED by the student model (role-native auth). name/phone/email
-        # mirror the login account during the transition; birthdate/gender live only here.
-        # username makes the account findable by /role-login/ (password stays on the
-        # linked User — the single source of truth — until the final cut-over).
-        username=user.username,
-        first_name=user.first_name,
-        last_name=user.last_name,
-        middle_name=user.middle_name,
-        phone=user.phone or "",
-        email=user.email or "",
+        # Identity and credentials are owned by the student account. The linked User is
+        # an internal, password-disabled authorization bridge and is never operator-facing.
+        username=username,
+        password=user.password,
+        first_name=identity["first_name"],
+        last_name=identity["last_name"],
+        middle_name=identity["middle_name"],
+        phone=identity["phone"],
+        email=identity["email"],
         birthdate=birthdate,
         gender=gender,
         enrollment_date=timezone.localdate() if status in _ENROLLED_OR_LATER else None,
@@ -159,6 +166,12 @@ def create_student(
             note=f"auto: created at status '{status}'",
         )
         for from_status, to_status in itertools.pairwise(chain)
+    )
+    RoleMembership.objects.get_or_create(
+        user=user,
+        branch=branch,
+        department=None,
+        role=Role.STUDENT,
     )
     return student
 

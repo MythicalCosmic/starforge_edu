@@ -18,7 +18,7 @@ from django.views.decorators.csrf import csrf_exempt
 
 from apps.users.interfaces.services import IUserService
 from apps.users.models import Device, User
-from apps.users.presenters import device_to_dict, user_to_dict
+from apps.users.presenters import device_to_dict, role_account_to_dict, user_to_dict
 from core.api_auth import check_perm, deny_read_only_token, require_auth
 from core.container import container
 from core.exceptions import NotFoundException, ValidationException
@@ -36,6 +36,27 @@ _FALSE = frozenset({"false", "0", "no", "n", "f", "off"})
 
 def _service() -> IUserService:
     return container.resolve(IUserService)  # type: ignore[type-abstract]
+
+
+def _role_account(request: HttpRequest):
+    """Return ``(kind, account)`` for a role session, else ``("", None)``."""
+    session = getattr(request, "auth", None)
+    kind = getattr(session, "principal_kind", "")
+    account_id = getattr(session, "principal_id", None)
+    if not kind or account_id is None:
+        return "", None
+    from apps.auth.services import _role_account_models
+    from core.exceptions import AuthenticationException
+
+    model = _role_account_models().get(kind)
+    account = (
+        model.objects.select_related("user").filter(pk=account_id, user=request.user).first()
+        if model
+        else None
+    )
+    if account is None:
+        raise AuthenticationException("Invalid account session.", code="authentication_failed")
+    return kind, account
 
 
 def _method_not_allowed() -> HttpResponse:
@@ -202,13 +223,33 @@ def user_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
 @require_auth
 def me_view(request: HttpRequest) -> HttpResponse:
     user: Any = request.user
+    kind, account = _role_account(request)
     if request.method in ("GET", "HEAD"):
-        return success(user_to_dict(user))
+        return success(role_account_to_dict(kind, account) if account is not None else user_to_dict(user))
     if request.method == "PATCH":
         # Self-scoped write with no perm code -> reinstate the read-only-token deny
         # the old DenyWriteForReadOnlyToken gave (an impersonating admin must not
         # edit the target's profile).
         deny_read_only_token(request)
+        if account is not None:
+            body = read_json(request)
+            changes = {
+                field: body[field]
+                for field in ("first_name", "last_name", "middle_name", "phone", "email")
+                if field in body
+            }
+            if "birthdate" in body:
+                changes["birthdate"] = _date_value(body["birthdate"])
+            if "gender" in body:
+                raw_gender = _reject_null(body["gender"], "gender")
+                choices = {choice for choice, _label in type(account).Gender.choices}
+                if not isinstance(raw_gender, str) or (raw_gender and raw_gender not in choices):
+                    raise _reject("gender", f"Must be blank or one of: {', '.join(sorted(choices))}.")
+                changes["gender"] = raw_gender
+            from apps.users.services import update_role_identity
+
+            update_role_identity(account, changes)
+            return success(role_account_to_dict(kind, account))
         updated = _service().update_me(user=user, changes=_me_changes(request))
         return success(user_to_dict(updated))
     return _method_not_allowed()

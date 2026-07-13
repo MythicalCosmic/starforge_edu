@@ -35,7 +35,14 @@ class IAuthService(ABC):
         """Revoke every session for the caller (instant server-side logout)."""
 
     @abstractmethod
-    def change_password(self, user: User, data: ChangePasswordDTO) -> dict[str, str]:
+    def change_password(
+        self,
+        user: User,
+        data: ChangePasswordDTO,
+        *,
+        principal_kind: str = "",
+        principal_id: int | None = None,
+    ) -> dict[str, str]:
         """Verify the old password, set the new one (revoking all sessions), and return
         a fresh session so the current device stays logged in."""
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from django.db import models
 from django.db.models import Q
+from django.db.models.functions import Lower
 from django.utils.translation import gettext_lazy as _
 
 from apps.users.models import RoleAccount
@@ -18,10 +19,12 @@ class ParentProfile(RoleAccount):
         MALE = "m", _("Male")
         FEMALE = "f", _("Female")
 
-    # The account this parent signs in with. During the role-native-auth migration the
-    # parent model OWNS the personal identity below; `user` is being reduced to the
-    # login/credential principal (and, at cut-over, /admin/-only). See TD role-native auth.
-    user = models.OneToOneField("users.User", on_delete=models.CASCADE, related_name="parent_profile")
+    # Internal compatibility principal for permissions, sessions, and historical audit FKs.
+    # It is provisioned automatically and is deliberately not editable or exposed as part
+    # of the parent account. ParentProfile owns identity + login credentials.
+    user = models.OneToOneField(
+        "users.User", on_delete=models.CASCADE, related_name="parent_profile", editable=False
+    )
 
     # --- Identity (owned by the parent, moving off users.User) ----------------
     first_name = models.CharField(max_length=150, blank=True)
@@ -39,9 +42,21 @@ class ParentProfile(RoleAccount):
 
     class Meta:
         ordering = ("-created_at",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=("phone",),
+                condition=~models.Q(phone=""),
+                name="parent_phone_unique_nonblank",
+            ),
+            models.UniqueConstraint(
+                Lower("email"),
+                condition=~models.Q(email=""),
+                name="parent_email_unique_nonblank_ci",
+            ),
+        ]
 
     def __str__(self) -> str:  # pragma: no cover
-        return f"parent#{self.user_id}"
+        return self.get_full_name() or self.username or f"parent#{self.pk}"
 
     def get_full_name(self) -> str:
         parts = [self.first_name, self.middle_name, self.last_name]

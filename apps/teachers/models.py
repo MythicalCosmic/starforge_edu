@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from django.db import models
+from django.db.models.functions import Lower
 from django.utils.translation import gettext_lazy as _
 
 from apps.users.models import RoleAccount
@@ -17,10 +18,12 @@ class TeacherProfile(RoleAccount):
         MALE = "m", _("Male")
         FEMALE = "f", _("Female")
 
-    # The account this teacher signs in with. During the role-native-auth migration the
-    # teacher model OWNS the personal identity below; `user` is being reduced to the
-    # login/credential principal (and, at cut-over, /admin/-only). See TD role-native auth.
-    user = models.OneToOneField("users.User", on_delete=models.CASCADE, related_name="teacher_profile")
+    # Internal compatibility principal for permissions, sessions, and historical audit FKs.
+    # It is provisioned automatically and is deliberately not editable or exposed as part
+    # of the teacher account. TeacherProfile owns identity + login credentials.
+    user = models.OneToOneField(
+        "users.User", on_delete=models.CASCADE, related_name="teacher_profile", editable=False
+    )
 
     # --- Identity (owned by the teacher, moving off users.User) ---------------
     first_name = models.CharField(max_length=150, blank=True)
@@ -50,9 +53,21 @@ class TeacherProfile(RoleAccount):
 
     class Meta:
         ordering = ("-created_at",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=("phone",),
+                condition=~models.Q(phone=""),
+                name="teacher_phone_unique_nonblank",
+            ),
+            models.UniqueConstraint(
+                Lower("email"),
+                condition=~models.Q(email=""),
+                name="teacher_email_unique_nonblank_ci",
+            ),
+        ]
 
     def __str__(self) -> str:  # pragma: no cover
-        return f"teacher#{self.user_id}"
+        return self.get_full_name() or self.username or f"teacher#{self.pk}"
 
     def get_full_name(self) -> str:
         parts = [self.first_name, self.middle_name, self.last_name]
@@ -73,9 +88,7 @@ class PayoutPolicy(models.Model):
         PERCENT_OF_TUITION = "percent_of_collected_tuition", _("% of collected tuition")
         FLAT_MONTHLY = "flat_monthly", _("Flat amount per period")
 
-    teacher = models.OneToOneField(
-        TeacherProfile, on_delete=models.CASCADE, related_name="payout_policy"
-    )
+    teacher = models.OneToOneField(TeacherProfile, on_delete=models.CASCADE, related_name="payout_policy")
     method = models.CharField(max_length=32, choices=Method.choices)
     # Per taught hour (HOURLY).
     hourly_rate_uzs = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)

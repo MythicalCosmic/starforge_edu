@@ -61,7 +61,7 @@ class AttendanceGenerator(ReportGenerator):
                     "date": timezone.localdate(rec.lesson.starts_at).isoformat() if rec.lesson_id else "",
                     "lesson": rec.lesson.title if rec.lesson_id else "",
                     "cohort": rec.lesson.cohort.name if rec.lesson_id and rec.lesson.cohort_id else "",
-                    "student": rec.student.user.get_full_name() or rec.student.user.username,
+                    "student": rec.student.get_full_name() or rec.student.username,
                     "status": status,
                 }
             )

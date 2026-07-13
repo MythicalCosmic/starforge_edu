@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 from apps.parents.models import Guardian, ParentProfile, PickupAuthorization
-from apps.users.presenters import user_brief
 
 
 def parent_to_dict(parent: ParentProfile) -> dict[str, Any]:
@@ -13,6 +12,10 @@ def parent_to_dict(parent: ParentProfile) -> dict[str, Any]:
     the top level; ``user`` is retained for the login/username reference + back-compat."""
     return {
         "id": parent.id,
+        "username": parent.username,
+        "is_active": parent.is_active,
+        "must_change_password": parent.must_change_password,
+        "last_login_at": parent.last_login_at.isoformat() if parent.last_login_at else None,
         # Identity owned by the parent model.
         "first_name": parent.first_name,
         "last_name": parent.last_name,
@@ -22,7 +25,6 @@ def parent_to_dict(parent: ParentProfile) -> dict[str, Any]:
         "email": parent.email,
         "birthdate": parent.birthdate.isoformat() if parent.birthdate else None,
         "gender": parent.gender,
-        "user": user_brief(parent.user),
         "workplace": parent.workplace,
         "notes": parent.notes,
         "created_at": parent.created_at.isoformat(),
@@ -36,9 +38,9 @@ def guardian_to_dict(g: Guardian) -> dict[str, Any]:
     return {
         "id": g.id,
         "parent": g.parent_id,
-        "parent_name": g.parent.user.get_full_name() if g.parent_id else None,
+        "parent_name": g.parent.get_full_name() if g.parent_id else None,
         "student": g.student_id,
-        "student_name": g.student.user.get_full_name() if g.student_id else None,
+        "student_name": g.student.get_full_name() if g.student_id else None,
         "relationship": g.relationship,
         "is_primary": g.is_primary,
         "custody_notes": g.custody_notes,
@@ -52,7 +54,7 @@ def pickup_to_dict(p: PickupAuthorization) -> dict[str, Any]:
     return {
         "id": p.id,
         "student": p.student_id,
-        "student_name": p.student.user.get_full_name() if p.student_id else None,
+        "student_name": p.student.get_full_name() if p.student_id else None,
         "full_name": p.full_name,
         "phone": p.phone,
         "relationship": p.relationship,

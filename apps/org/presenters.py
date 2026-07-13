@@ -26,6 +26,7 @@ def _dec(value) -> str | None:
 
 
 def department_to_dict(d: Department) -> dict[str, Any]:
+    teacher = getattr(d.head, "teacher_profile", None) if d.head else None
     return {
         "id": d.id,
         "branch": d.branch_id,
@@ -37,10 +38,10 @@ def department_to_dict(d: Department) -> dict[str, Any]:
         "slug": d.slug,
         "description": d.description,
         "is_active": d.is_active,
-        "head": d.head_id,
+        "head": teacher.pk if teacher is not None else None,
         # Object-guard (not head_id): a null FK short-circuits with no query, a set
         # FK is select_related/prefetched — and it narrows the Optional for the checker.
-        "head_name": d.head.get_full_name() if d.head else None,
+        "head_name": teacher.get_full_name() if teacher is not None else None,
         "budget": _dec(d.budget),
         "created_at": d.created_at.isoformat(),
     }
@@ -105,9 +106,7 @@ def branch_capacity_status(b: Branch) -> dict[str, Any]:
         current = 0
     else:
         current = (
-            StudentProfile.objects.filter(branch=b)
-            .exclude(status__in=("graduated", "withdrawn"))
-            .count()
+            StudentProfile.objects.filter(branch=b).exclude(status__in=("graduated", "withdrawn")).count()
         )
     return {
         "current_students": current,
@@ -190,3 +189,35 @@ def settings_to_dict(s: CenterSettings) -> dict[str, Any]:
     out["quiet_hours_end"] = s.quiet_hours_end.isoformat()
     out["updated_at"] = s.updated_at.isoformat()
     return out
+
+
+def staff_to_dict(staff) -> dict[str, Any]:
+    """Role-native staff payload; the internal User bridge is intentionally absent."""
+    memberships = [rm for rm in staff.user.role_memberships.all() if rm.revoked_at is None]
+    return {
+        "id": staff.id,
+        "username": staff.username,
+        "first_name": staff.first_name,
+        "last_name": staff.last_name,
+        "middle_name": staff.middle_name,
+        "full_name": staff.get_full_name(),
+        "phone": staff.phone,
+        "email": staff.email,
+        "birthdate": staff.birthdate.isoformat() if staff.birthdate else None,
+        "gender": staff.gender,
+        "is_active": staff.is_active,
+        "must_change_password": staff.must_change_password,
+        "last_login_at": staff.last_login_at.isoformat() if staff.last_login_at else None,
+        "role_memberships": [
+            {
+                "id": membership.id,
+                "role": membership.role,
+                "branch": membership.branch_id,
+                "department": membership.department_id,
+                "granted_at": membership.granted_at.isoformat(),
+            }
+            for membership in memberships
+        ],
+        "created_at": staff.created_at.isoformat(),
+        "updated_at": staff.updated_at.isoformat(),
+    }

@@ -9,11 +9,89 @@ from django.db import transaction
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
-from apps.org.models import Branch, BranchTransfer, BranchWorkingHours, Department
+from apps.org.models import Branch, BranchTransfer, BranchWorkingHours, Department, StaffProfile
+from apps.users.models import RoleMembership
+from apps.users.services import create_role_user_bridge, prepare_role_identity
 from core.exceptions import ConflictException, ValidationException
+from core.permissions import Role
 
 # Enrollment states that still occupy capacity (mirrors Lane D's StudentProfile).
 ACTIVE_STUDENT_STATUSES_EXCLUDED = ("graduated", "withdrawn")
+STAFF_ROLES = tuple(role for role in Role.ALL if role not in {Role.STUDENT, Role.TEACHER, Role.PARENT})
+
+
+@transaction.atomic
+def create_staff_account(
+    *,
+    branch: Branch,
+    role: str,
+    department: Department | None = None,
+    username: str = "",
+    phone: str = "",
+    email: str = "",
+    first_name: str = "",
+    last_name: str = "",
+    middle_name: str = "",
+    birthdate=None,
+    gender: str = "",
+) -> StaffProfile:
+    """Create an independent staff account plus its initial scoped role grant."""
+    if role not in STAFF_ROLES:
+        raise ValidationException(
+            _("Invalid staff role."),
+            code="validation_error",
+            fields={"role": ["Choose a staff role."]},
+        )
+    if department is not None and department.branch_id != branch.pk:
+        raise ValidationException(
+            _("Department must belong to the selected branch."),
+            code="department_branch_mismatch",
+        )
+    identity = prepare_role_identity(
+        phone=phone,
+        email=email,
+        first_name=first_name,
+        last_name=last_name,
+        middle_name=middle_name,
+    )
+    if (identity["phone"] and StaffProfile.objects.filter(phone=identity["phone"]).exists()) or (
+        identity["email"] and StaffProfile.objects.filter(email__iexact=identity["email"]).exists()
+    ):
+        raise ValidationException(_("This person already has a staff account."), code="duplicate_staff")
+    user, username, identity = create_role_user_bridge(username=username, **identity)
+    staff = StaffProfile.objects.create(
+        user=user,
+        username=username,
+        password=user.password,
+        first_name=identity["first_name"],
+        last_name=identity["last_name"],
+        middle_name=identity["middle_name"],
+        phone=identity["phone"],
+        email=identity["email"],
+        birthdate=birthdate,
+        gender=gender,
+    )
+    RoleMembership.objects.create(
+        user=user,
+        branch=branch,
+        department=department,
+        role=role,
+    )
+    return staff
+
+
+@transaction.atomic
+def deactivate_staff_account(staff: StaffProfile) -> None:
+    """Disable login and revoke grants/sessions without destroying audit history."""
+    now = timezone.now()
+    staff.is_active = False
+    staff.save(update_fields=["is_active", "updated_at"])
+    staff.user.is_active = False
+    staff.user.save(update_fields=["is_active"])
+    RoleMembership.objects.filter(user=staff.user, revoked_at__isnull=True).update(revoked_at=now)
+    from core.session_auth import revoke_all_for_user
+
+    revoke_all_for_user(staff.user_id)
 
 
 def _teacher_profile_model():
@@ -30,18 +108,17 @@ def _student_profile_model():
         return None
 
 
-def validate_department_head(user, *, branch_id: int | None = None) -> None:
-    """Raise unless `user` may head a department (must have a TeacherProfile).
+def validate_department_head(teacher, *, branch_id: int | None = None) -> None:
+    """Raise unless ``teacher`` is a TeacherProfile in the department branch.
 
     Single source of truth for D1-LF-4 / D1-LD-10 — shared by the service and
     DepartmentSerializer.validate_head. Once `teachers.TeacherProfile` exists
     the user must have one; until then the check is skipped."""
-    if user is None:
+    if teacher is None:
         return
     TeacherProfile = _teacher_profile_model()
     if TeacherProfile is not None:
-        teacher = TeacherProfile.objects.filter(user=user).first()
-        if teacher is None:
+        if not isinstance(teacher, TeacherProfile):
             raise ValidationException(_("Department head must be a teacher."), code="head_not_teacher")
         if branch_id is not None and teacher.branch_id != branch_id:
             raise ValidationException(
@@ -51,10 +128,10 @@ def validate_department_head(user, *, branch_id: int | None = None) -> None:
             )
 
 
-def set_department_head(department: Department, user) -> Department:
+def set_department_head(department: Department, teacher) -> Department:
     """Assign a department head (validated: head must be a teacher)."""
-    validate_department_head(user, branch_id=department.branch_id)
-    department.head = user
+    validate_department_head(teacher, branch_id=department.branch_id)
+    department.head = teacher.user if teacher is not None else None
     department.save(update_fields=["head", "updated_at"])
     return department
 

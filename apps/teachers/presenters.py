@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 from apps.teachers.models import PayoutPolicy, TeacherProfile
-from apps.users.presenters import user_brief
 
 
 def payout_policy_to_dict(policy: PayoutPolicy) -> dict[str, Any]:
@@ -30,6 +29,10 @@ def teacher_to_dict(teacher: TeacherProfile) -> dict[str, Any]:
     # these add JOINs, not queries. `branch` is non-null; `department` is nullable.
     return {
         "id": teacher.id,
+        "username": teacher.username,
+        "is_active": teacher.is_active,
+        "must_change_password": teacher.must_change_password,
+        "last_login_at": teacher.last_login_at.isoformat() if teacher.last_login_at else None,
         # Identity owned by the teacher model (role-native auth); `user` kept for the
         # login/username reference + back-compat.
         "first_name": teacher.first_name,
@@ -40,7 +43,6 @@ def teacher_to_dict(teacher: TeacherProfile) -> dict[str, Any]:
         "email": teacher.email,
         "birthdate": teacher.birthdate.isoformat() if teacher.birthdate else None,
         "gender": teacher.gender,
-        "user": user_brief(teacher.user),
         "branch": teacher.branch_id,
         "branch_name": teacher.branch.name if teacher.branch_id else None,
         "department": teacher.department_id,

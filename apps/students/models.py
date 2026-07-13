@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from django.db import models
+from django.db.models.functions import Lower
 from django.utils.translation import gettext_lazy as _
 
 from apps.users.models import RoleAccount
@@ -23,10 +24,12 @@ class StudentProfile(RoleAccount):
         MALE = "m", _("Male")
         FEMALE = "f", _("Female")
 
-    # The account this student signs in with. During the role-native-auth migration the
-    # student model OWNS the personal identity below; `user` is being reduced to the
-    # login/credential principal (and, at cut-over, /admin/-only). See TD role-native auth.
-    user = models.OneToOneField("users.User", on_delete=models.CASCADE, related_name="student_profile")
+    # Internal compatibility principal for permissions, sessions, and historical audit FKs.
+    # It is provisioned automatically and is deliberately not editable or exposed as part
+    # of the student account. StudentProfile owns identity + login credentials.
+    user = models.OneToOneField(
+        "users.User", on_delete=models.CASCADE, related_name="student_profile", editable=False
+    )
     student_id = models.CharField(max_length=32, unique=True)
 
     # --- Identity (owned by the student, moving off users.User) ---------------
@@ -63,6 +66,18 @@ class StudentProfile(RoleAccount):
 
     class Meta:
         ordering = ("-created_at",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=("phone",),
+                condition=~models.Q(phone=""),
+                name="student_phone_unique_nonblank",
+            ),
+            models.UniqueConstraint(
+                Lower("email"),
+                condition=~models.Q(email=""),
+                name="student_email_unique_nonblank_ci",
+            ),
+        ]
         indexes = [
             models.Index(fields=("status", "branch")),
             # Serve the default newest-first directory list (ORDER BY created_at DESC, id)

@@ -27,9 +27,7 @@ def cohort_to_dict(cohort: Cohort) -> dict[str, Any]:
         "end_date": cohort.end_date.isoformat(),
         "capacity": cohort.capacity,
         "primary_teacher": cohort.primary_teacher_id,
-        "primary_teacher_name": (
-            cohort.primary_teacher.user.get_full_name() if cohort.primary_teacher else None
-        ),
+        "primary_teacher_name": (cohort.primary_teacher.get_full_name() if cohort.primary_teacher else None),
         "default_room": cohort.default_room_id,
         "default_room_name": cohort.default_room.name if cohort.default_room else None,
         "is_archived": cohort.is_archived,
@@ -46,7 +44,7 @@ def membership_to_dict(m: CohortMembership) -> dict[str, Any]:
         "cohort": m.cohort_id,
         "cohort_name": m.cohort.name,
         "student": m.student_id,
-        "student_name": m.student.user.get_full_name(),
+        "student_name": m.student.get_full_name(),
         "start_date": m.start_date.isoformat(),
         "end_date": m.end_date.isoformat() if m.end_date else None,
         "moved_reason": m.moved_reason,

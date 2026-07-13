@@ -26,32 +26,17 @@ def can_see_medical_notes(request: Any) -> bool:
     return bool(get_user_roles(request) & MEDICAL_NOTES_ROLES)
 
 
-def student_user(user) -> dict[str, Any]:
-    """The embedded person view. Includes ``username`` — the student's login
-    identifier — so staff (and the student/parent) can see the account they sign in
-    with; the password is set via the credentials endpoint, never echoed."""
-    return {
-        "id": user.id,
-        "username": user.username,
-        "phone": user.phone,
-        "email": user.email,
-        "first_name": user.first_name,
-        "last_name": user.last_name,
-        "middle_name": user.middle_name,
-        "full_name": user.get_full_name(),
-        "birthdate": user.birthdate.isoformat() if user.birthdate else None,
-        "gender": user.gender,
-    }
-
-
 def student_to_dict(s: StudentProfile) -> dict[str, Any]:
     """List/action payload (StudentReadSerializer) — deliberately NO medical_notes.
 
-    Personal identity is now OWNED by the student model (role-native auth), surfaced at
-    the top level; ``user`` is retained for the login/username reference + back-compat."""
+    Personal identity is owned by the student model and surfaced at the top level."""
     return {
         "id": s.id,
         "student_id": s.student_id,
+        "username": s.username,
+        "is_active": s.is_active,
+        "must_change_password": s.must_change_password,
+        "last_login_at": s.last_login_at.isoformat() if s.last_login_at else None,
         # Identity owned by the student model.
         "first_name": s.first_name,
         "last_name": s.last_name,
@@ -72,7 +57,6 @@ def student_to_dict(s: StudentProfile) -> dict[str, Any]:
         "blocked_at": s.blocked_at.isoformat() if s.blocked_at else None,
         "block_reason": s.block_reason,
         "emergency_contacts": s.emergency_contacts,
-        "user": student_user(s.user),
         "created_at": s.created_at.isoformat(),
         "updated_at": s.updated_at.isoformat(),
     }

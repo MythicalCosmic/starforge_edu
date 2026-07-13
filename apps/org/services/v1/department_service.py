@@ -42,11 +42,7 @@ class DepartmentService(IDepartmentService):
 
     def update(self, department: Department, changes: dict[str, Any]) -> Department:
         if "branch" in changes or "head" in changes:
-            branch = (
-                self._resolve_branch(changes["branch"])
-                if "branch" in changes
-                else department.branch
-            )
+            branch = self._resolve_branch(changes["branch"]) if "branch" in changes else department.branch
             head_id = changes.get("head", department.head_id)
             department.branch = branch
             department.head = self._resolve_head(head_id, branch_id=branch.pk)
@@ -66,15 +62,15 @@ class DepartmentService(IDepartmentService):
         if head_id is None:
             validate_department_head(None)  # clearing is always allowed
             return None
-        from apps.users.models import User
+        from apps.teachers.models import TeacherProfile
 
-        user = User.objects.filter(pk=head_id).first()
-        if user is None:
+        teacher = TeacherProfile.objects.select_related("user").filter(pk=head_id).first()
+        if teacher is None:
             raise ValidationException(
                 _("Invalid head."), code="invalid_head", fields={"head": ["Not found."]}
             )
-        validate_department_head(user, branch_id=branch_id)
-        return user
+        validate_department_head(teacher, branch_id=branch_id)
+        return teacher.user
 
     @staticmethod
     def _resolve_branch(branch_id: int):
@@ -99,7 +95,5 @@ class DepartmentService(IDepartmentService):
                 fields={"slug": ["Already used in this branch."]},
             ) from exc
         except DataError as exc:  # e.g. budget out of range -> clean 400, not a 500
-            raise ValidationException(
-                _("A field value is out of range."), code="validation_error"
-            ) from exc
+            raise ValidationException(_("A field value is out of range."), code="validation_error") from exc
         return department

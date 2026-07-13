@@ -11,8 +11,10 @@ from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
 from apps.teachers.models import PayoutPolicy, TeacherProfile
-from apps.users.services import resolve_or_create_user
+from apps.users.models import RoleMembership
+from apps.users.services import create_role_user_bridge, prepare_role_identity
 from core.exceptions import UnprocessableEntity, ValidationException
+from core.permissions import Role
 
 _CENT = Decimal("0.01")
 
@@ -35,29 +37,35 @@ def create_teacher(
     salary_type: str = TeacherProfile.SalaryType.MONTHLY,
     rate=None,
     is_substitute: bool = False,
+    username: str = "",
 ) -> TeacherProfile:
     if department is not None and department.branch_id != branch.id:
         raise ValidationException(
             _("Department must belong to the teacher's branch."), code="department_branch_mismatch"
         )
-    user = resolve_or_create_user(
+    identity = prepare_role_identity(
         phone=phone, email=email, first_name=first_name, last_name=last_name, middle_name=middle_name
     )
-    if TeacherProfile.objects.filter(user=user).exists():
+    if not identity["phone"] and not identity["email"]:
+        raise ValidationException(_("phone or email is required."), code="identifier_required")
+    if (identity["phone"] and TeacherProfile.objects.filter(phone=identity["phone"]).exists()) or (
+        identity["email"] and TeacherProfile.objects.filter(email__iexact=identity["email"]).exists()
+    ):
         raise ValidationException(_("This person already has a teacher profile."), code="duplicate_teacher")
-    return TeacherProfile.objects.create(
+    user, username, identity = create_role_user_bridge(username=username, **identity)
+    teacher = TeacherProfile.objects.create(
         user=user,
         branch=branch,
         department=department,
-        # Identity is OWNED by the teacher model (role-native auth). name/phone/email
-        # mirror the login account during the transition; birthdate/gender live only here.
-        # username makes the account findable by /role-login/ (password stays on the User).
-        username=user.username,
-        first_name=user.first_name,
-        last_name=user.last_name,
-        middle_name=user.middle_name,
-        phone=user.phone or "",
-        email=user.email or "",
+        # Identity and credentials are owned by the teacher account. The linked User is
+        # an internal, password-disabled authorization bridge and is never operator-facing.
+        username=username,
+        password=user.password,
+        first_name=identity["first_name"],
+        last_name=identity["last_name"],
+        middle_name=identity["middle_name"],
+        phone=identity["phone"],
+        email=identity["email"],
         birthdate=birthdate,
         gender=gender,
         hire_date=hire_date,
@@ -67,6 +75,13 @@ def create_teacher(
         rate=rate,
         is_substitute=is_substitute,
     )
+    RoleMembership.objects.get_or_create(
+        user=user,
+        branch=branch,
+        department=department,
+        role=Role.TEACHER,
+    )
+    return teacher
 
 
 # ---------------------------------------------------------------------------
@@ -77,9 +92,13 @@ def _money(raw, field: str) -> Decimal:
     try:
         amount = Decimal(str(raw))
     except (InvalidOperation, ValueError, TypeError):
-        raise ValidationException(_("Must be a number."), code="validation_error", fields={field: ["Must be a number."]}) from None
+        raise ValidationException(
+            _("Must be a number."), code="validation_error", fields={field: ["Must be a number."]}
+        ) from None
     if not amount.is_finite() or amount <= 0 or amount >= Decimal("1e12"):
-        raise ValidationException(_("Out of range."), code="validation_error", fields={field: ["Must be a positive amount."]})
+        raise ValidationException(
+            _("Out of range."), code="validation_error", fields={field: ["Must be a positive amount."]}
+        )
     return amount.quantize(_CENT, rounding=ROUND_HALF_UP)
 
 
@@ -87,27 +106,46 @@ def _percent(raw) -> Decimal:
     try:
         pct = Decimal(str(raw))
     except (InvalidOperation, ValueError, TypeError):
-        raise ValidationException(_("Percent must be a number."), code="validation_error", fields={"tuition_percent": ["Must be a number."]}) from None
+        raise ValidationException(
+            _("Percent must be a number."),
+            code="validation_error",
+            fields={"tuition_percent": ["Must be a number."]},
+        ) from None
     if not pct.is_finite() or not (Decimal("0") < pct <= Decimal("100")):
-        raise ValidationException(_("Percent must be between 0 and 100."), code="validation_error", fields={"tuition_percent": ["0 < percent <= 100."]})
+        raise ValidationException(
+            _("Percent must be between 0 and 100."),
+            code="validation_error",
+            fields={"tuition_percent": ["0 < percent <= 100."]},
+        )
     return pct.quantize(_CENT, rounding=ROUND_HALF_UP)
 
 
 @transaction.atomic
 def set_payout_policy(
-    *, teacher: TeacherProfile, method: str, hourly_rate_uzs=None, flat_amount_uzs=None,
-    tuition_percent=None, is_active: bool = True,
+    *,
+    teacher: TeacherProfile,
+    method: str,
+    hourly_rate_uzs=None,
+    flat_amount_uzs=None,
+    tuition_percent=None,
+    is_active: bool = True,
 ) -> PayoutPolicy:
     """Create or replace a teacher's dynamic pay rule (F13-1). Validates that the params
     required by the chosen method are present + in range; irrelevant params are cleared so
     a policy can't carry stale values from a prior method."""
     if method not in PayoutPolicy.Method.values:
         raise ValidationException(
-            _("Unknown payout method."), code="validation_error",
+            _("Unknown payout method."),
+            code="validation_error",
             fields={"method": [f"Must be one of {list(PayoutPolicy.Method.values)}."]},
         )
-    fields: dict = {"method": method, "is_active": is_active,
-                    "hourly_rate_uzs": None, "flat_amount_uzs": None, "tuition_percent": None}
+    fields: dict = {
+        "method": method,
+        "is_active": is_active,
+        "hourly_rate_uzs": None,
+        "flat_amount_uzs": None,
+        "tuition_percent": None,
+    }
     if method == PayoutPolicy.Method.HOURLY:
         fields["hourly_rate_uzs"] = _money(hourly_rate_uzs, "hourly_rate_uzs")
     elif method == PayoutPolicy.Method.FLAT_MONTHLY:
@@ -123,7 +161,8 @@ def _period_bounds(period_start: dt.date, period_end: dt.date) -> tuple[dt.datet
     the start and end dates."""
     if period_end < period_start:
         raise ValidationException(
-            _("period_end must be on or after period_start."), code="validation_error",
+            _("period_end must be on or after period_start."),
+            code="validation_error",
             fields={"period_end": ["Must be on or after period_start."]},
         )
     tz = timezone.get_current_timezone()
@@ -158,9 +197,7 @@ def compute_payout(*, teacher: TeacherProfile, period_start: dt.date, period_end
     Returns {method, amount_uzs (Decimal, 2dp), breakdown} — a pure read, no side effects."""
     policy = PayoutPolicy.objects.filter(teacher=teacher, is_active=True).first()
     if policy is None:
-        raise UnprocessableEntity(
-            _("This teacher has no active payout policy."), code="no_payout_policy"
-        )
+        raise UnprocessableEntity(_("This teacher has no active payout policy."), code="no_payout_policy")
     start_dt, end_dt = _period_bounds(period_start, period_end)
 
     if policy.method == PayoutPolicy.Method.HOURLY:
@@ -186,17 +223,13 @@ def compute_payout(*, teacher: TeacherProfile, period_start: dt.date, period_end
         # this teacher for tuition they paid for that OTHER course, so the total payout
         # could exceed the tuition actually collected.
         cohort_ids = _teacher_cohort_ids(teacher)
-        collected = (
-            PaymentAllocation.objects.filter(
-                invoice__cohort_id__in=cohort_ids,
-                created_at__gte=start_dt, created_at__lt=end_dt,
-            ).aggregate(total=Sum("amount_uzs"))["total"]
-            or Decimal("0")
-        )
+        collected = PaymentAllocation.objects.filter(
+            invoice__cohort_id__in=cohort_ids,
+            created_at__gte=start_dt,
+            created_at__lt=end_dt,
+        ).aggregate(total=Sum("amount_uzs"))["total"] or Decimal("0")
         assert policy.tuition_percent is not None  # invariant: set for the PERCENT method
-        amount = (collected * policy.tuition_percent / Decimal("100")).quantize(
-            _CENT, rounding=ROUND_HALF_UP
-        )
+        amount = (collected * policy.tuition_percent / Decimal("100")).quantize(_CENT, rounding=ROUND_HALF_UP)
         breakdown = {"collected_uzs": str(collected), "tuition_percent": str(policy.tuition_percent)}
 
     else:  # FLAT_MONTHLY
@@ -207,9 +240,7 @@ def compute_payout(*, teacher: TeacherProfile, period_start: dt.date, period_end
     return {"method": policy.method, "amount_uzs": amount, "breakdown": breakdown}
 
 
-def prepare_salary(
-    *, teacher: TeacherProfile, period_start: dt.date, period_end: dt.date, requested_by=None
-):
+def prepare_salary(*, teacher: TeacherProfile, period_start: dt.date, period_end: dt.date, requested_by=None):
     """Compute the teacher's payout for the period and raise a salary-prep request through
     the A-1 approvals engine (F13-1). A manager approves it and a cashier disburses it — the
     teacher never approves or disburses their own pay (SoD, wired in approvals). Returns the
@@ -223,7 +254,7 @@ def prepare_salary(
             _("The computed payout for this period is zero — nothing to prepare."),
             code="zero_payout",
         )
-    payee = (teacher.user.get_full_name() if teacher.user else "") or f"teacher#{teacher.pk}"
+    payee = teacher.get_full_name() or f"teacher#{teacher.pk}"
     return create_request(
         kind=KIND_SALARY_PREP,
         title=f"Salary {period_start.isoformat()}..{period_end.isoformat()}: {payee}"[:200],
@@ -231,7 +262,7 @@ def prepare_salary(
         amount_uzs=amount,
         branch=teacher.branch,
         payload={
-            "teacher_user_id": teacher.user_id,
+            "teacher_profile_id": teacher.pk,
             "party_label": payee,
             "period_start": period_start.isoformat(),
             "period_end": period_end.isoformat(),

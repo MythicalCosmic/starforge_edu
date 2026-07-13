@@ -115,7 +115,7 @@ def student_risk(students: QuerySet[StudentProfile], *, now=None, include_financ
         out.append(
             {
                 "student": sid,
-                "name": student.user.get_full_name() if student.user else "",
+                "name": student.get_full_name(),
                 "cohort": student.current_cohort_id,
                 "score": score,
                 "level": _level(score),
@@ -446,7 +446,7 @@ def student_risk_detail(student: StudentProfile, *, now=None, include_finance: b
         return rows[0]
     return {
         "student": student.pk,
-        "name": student.user.get_full_name() if student.user else "",
+        "name": student.get_full_name(),
         "cohort": student.current_cohort_id,
         "score": 0,
         "level": "none",
@@ -511,7 +511,7 @@ def teacher_engagement(teachers: QuerySet, *, now=None) -> list[dict]:
         out.append(
             {
                 "teacher": tid,
-                "name": teacher.user.get_full_name() if teacher.user_id else "",
+                "name": teacher.get_full_name(),
                 "lessons_delivered": lessons.get(tid, 0),
                 "students_reached": att.get("students", 0),
                 "marks_sampled": total,

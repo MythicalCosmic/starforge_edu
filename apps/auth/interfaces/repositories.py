@@ -25,7 +25,14 @@ class IUserRepository(IBaseRepository[User]):
 class ISessionRepository(IBaseRepository[Session]):
     @abstractmethod
     def create_for(
-        self, user: User, *, ip: str = "", user_agent: str = "", device_id: str = ""
+        self,
+        user: User,
+        *,
+        ip: str = "",
+        user_agent: str = "",
+        device_id: str = "",
+        principal_kind: str = "",
+        principal_id: int | None = None,
     ) -> Session: ...
 
     @abstractmethod

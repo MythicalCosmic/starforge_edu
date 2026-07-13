@@ -14,7 +14,7 @@ class BranchRepository(BaseRepository[Branch], IBranchRepository):
     model = Branch
 
     def get_queryset(self) -> QuerySet[Branch]:
-        return Branch.objects.prefetch_related("departments__head", "working_hours")
+        return Branch.objects.prefetch_related("departments__head__teacher_profile", "working_hours")
 
     def active(self) -> QuerySet[Branch]:
         # Archived branches drop out of the default surface (D1-LF-7).

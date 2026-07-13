@@ -21,7 +21,7 @@ from apps.parents.presenters import parent_to_dict
 from core.api_auth import check_perm, require_auth
 from core.container import container
 from core.exceptions import NotFoundException, ValidationException
-from core.http import read_json, str_field
+from core.http import bool_field, read_json, str_field
 from core.listing import apply_filters, paginate
 from core.permissions import get_user_roles
 from core.responses import created, error, no_content, paginated, success, validation_error
@@ -87,6 +87,27 @@ def parent_students_view(request: HttpRequest, pk: int) -> HttpResponse:
     if parent is None:
         raise NotFoundException(code="not_found")
     return success(_students_payload(_service().students(parent)))
+
+
+@csrf_exempt
+@require_auth
+def parent_credentials_view(request: HttpRequest, pk: int) -> HttpResponse:
+    """Issue a one-time parent password; the raw value is never stored or repeated."""
+    if request.method != "POST":
+        return error("Method not allowed.", code="method_not_allowed", status=405)
+    check_perm(request, f"{_RESOURCE}:write")
+    parent = _service().get(user=request.user, roles=get_user_roles(request), pk=pk)
+    if parent is None:
+        raise NotFoundException(code="not_found")
+    from apps.users.services import issue_role_credentials
+
+    return success(
+        issue_role_credentials(
+            parent,
+            actor=request.user,
+            resource_type="parents.ParentProfile",
+        )
+    )
 
 
 # --- parent self-service (no parents:read grant; own rows only) ------------
@@ -162,6 +183,7 @@ def _create(request: HttpRequest) -> HttpResponse:
     if not phone and not email:
         return validation_error({"phone": ["Provide a phone or an email."]})
     dto = ParentCreateDTO(
+        username=str_field(body, "username"),
         phone=phone,
         email=email,
         first_name=str_field(body, "first_name"),
@@ -177,6 +199,15 @@ def _create(request: HttpRequest) -> HttpResponse:
 
 def _changes(body: dict[str, Any]) -> dict[str, Any]:
     changes: dict[str, Any] = {}
+    for field in ("first_name", "last_name", "middle_name", "phone", "email"):
+        if field in body:
+            changes[field] = str_field(body, field)
+    if "birthdate" in body:
+        changes["birthdate"] = _date_or_none(body, "birthdate")
+    if "gender" in body:
+        changes["gender"] = _choice(body, "gender", ParentProfile.Gender.values, allow_blank=True)
+    if "is_active" in body:
+        changes["is_active"] = bool_field(body, "is_active")
     if "workplace" in body:
         changes["workplace"] = str_field(body, "workplace")
     if "notes" in body:

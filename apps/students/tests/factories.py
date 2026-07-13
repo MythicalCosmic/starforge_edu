@@ -17,6 +17,8 @@ class StudentProfileFactory(factory.django.DjangoModelFactory[StudentProfile]):
         model = StudentProfile
 
     user = factory.SubFactory(UserFactory)
+    username = factory.LazyAttribute(lambda o: o.user.username)
+    password = factory.LazyAttribute(lambda o: o.user.password)
     # Identity is owned by the student model now; mirror it off the user (as create_student
     # does) so a test that sets user.first_name / user.birthdate flows through.
     first_name = factory.LazyAttribute(lambda o: o.user.first_name)

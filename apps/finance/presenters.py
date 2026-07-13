@@ -80,7 +80,7 @@ def invoice_to_dict(inv: Invoice) -> dict[str, Any]:
         "id": inv.id,
         "number": inv.number,
         "student": inv.student_id,
-        "student_name": inv.student.user.get_full_name() if inv.student_id else "",
+        "student_name": inv.student.get_full_name() if inv.student_id else "",
         "cohort": inv.cohort_id,
         "cohort_name": inv.cohort.name if inv.cohort else None,
         "fee_schedule": inv.fee_schedule_id,
@@ -108,7 +108,7 @@ def discount_to_dict(d: Discount) -> dict[str, Any]:
     return {
         "id": d.id,
         "student": d.student_id,
-        "student_name": d.student.user.get_full_name(),
+        "student_name": d.student.get_full_name(),
         "discount_type": d.discount_type,
         "percent": _money(d.percent),
         "fixed_amount_uzs": _money(d.fixed_amount_uzs),

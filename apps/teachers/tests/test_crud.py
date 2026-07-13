@@ -26,7 +26,8 @@ def test_director_create_list_retrieve_delete(tenant_a, as_role):
     body = resp.json()
     assert body["success"] is True
     tid = body["data"]["id"]
-    assert body["data"]["user"]["first_name"] == "Ann"
+    assert body["data"]["first_name"] == "Ann"
+    assert "user" not in body["data"]
 
     listed = client.get(URL).json()
     assert listed["success"] is True

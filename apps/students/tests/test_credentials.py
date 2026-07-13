@@ -41,7 +41,8 @@ def test_staff_issues_one_time_credentials_and_student_can_authenticate(tenant_a
 
     with schema_context(tenant_a.schema_name):
         sp = StudentProfile.objects.get(pk=sid)
-        assert sp.user.check_password(temp)  # the temp is set on the linked User (role-login store)
+        assert sp.check_password(temp)
+        assert sp.user.has_usable_password() is False
         assert sp.must_change_password is True  # forced to change on first login
 
 
@@ -57,7 +58,8 @@ def test_teacher_cannot_issue_credentials(tenant_a, user_in, as_user):
 def test_username_exposed_in_detail_payload(tenant_a, user_in, as_user):
     _, client, sid = _registrar_and_student(tenant_a, user_in, as_user)
     body = client.get(f"/api/v1/students/{sid}/").json()["data"]
-    assert body["user"]["username"]
+    assert body["username"]
+    assert "user" not in body
 
 
 def test_cannot_issue_credentials_for_staff_account(tenant_a, user_in, as_user):

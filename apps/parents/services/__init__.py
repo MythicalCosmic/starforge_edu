@@ -11,8 +11,10 @@ from django.db import transaction
 from django.utils.translation import gettext_lazy as _
 
 from apps.parents.models import Guardian, ParentProfile
-from apps.users.services import resolve_or_create_user
+from apps.users.models import RoleMembership
+from apps.users.services import create_role_user_bridge, prepare_role_identity
 from core.exceptions import ValidationException
+from core.permissions import Role
 
 
 @transaction.atomic
@@ -27,23 +29,29 @@ def create_parent(
     gender: str = "",
     workplace: str = "",
     notes: str = "",
+    username: str = "",
 ) -> ParentProfile:
-    user = resolve_or_create_user(
+    identity = prepare_role_identity(
         phone=phone, email=email, first_name=first_name, last_name=last_name, middle_name=middle_name
     )
-    if ParentProfile.objects.filter(user=user).exists():
+    if not identity["phone"] and not identity["email"]:
+        raise ValidationException(_("phone or email is required."), code="identifier_required")
+    if (identity["phone"] and ParentProfile.objects.filter(phone=identity["phone"]).exists()) or (
+        identity["email"] and ParentProfile.objects.filter(email__iexact=identity["email"]).exists()
+    ):
         raise ValidationException(_("This person already has a parent profile."), code="duplicate_parent")
+    user, username, identity = create_role_user_bridge(username=username, **identity)
     return ParentProfile.objects.create(
         user=user,
-        # Identity is OWNED by the parent model (role-native auth). name/phone/email
-        # mirror the login account during the transition; birthdate/gender live only here.
-        # username makes the account findable by /role-login/ (password stays on the User).
-        username=user.username,
-        first_name=user.first_name,
-        last_name=user.last_name,
-        middle_name=user.middle_name,
-        phone=user.phone or "",
-        email=user.email or "",
+        # Identity and credentials are owned by the parent account. The linked User is
+        # an internal, password-disabled authorization bridge and is never operator-facing.
+        username=username,
+        password=user.password,
+        first_name=identity["first_name"],
+        last_name=identity["last_name"],
+        middle_name=identity["middle_name"],
+        phone=identity["phone"],
+        email=identity["email"],
         birthdate=birthdate,
         gender=gender,
         workplace=workplace,
@@ -63,10 +71,17 @@ def link_guardian(
         raise ValidationException(
             _("This student already has a primary guardian."), code="primary_guardian_exists"
         )
-    return Guardian.objects.create(
+    guardian = Guardian.objects.create(
         parent=parent,
         student=student,
         relationship=relationship,
         is_primary=is_primary,
         custody_notes=custody_notes,
     )
+    RoleMembership.objects.get_or_create(
+        user=parent.user,
+        branch=student.branch,
+        department=None,
+        role=Role.PARENT,
+    )
+    return guardian

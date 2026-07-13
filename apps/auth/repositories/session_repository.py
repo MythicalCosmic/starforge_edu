@@ -13,11 +13,25 @@ class SessionRepository(BaseRepository[Session], ISessionRepository):
     model = Session
 
     def create_for(
-        self, user: User, *, ip: str = "", user_agent: str = "", device_id: str = ""
+        self,
+        user: User,
+        *,
+        ip: str = "",
+        user_agent: str = "",
+        device_id: str = "",
+        principal_kind: str = "",
+        principal_id: int | None = None,
     ) -> Session:
         from core.session_auth import create_session
 
-        return create_session(user, ip=ip, user_agent=user_agent, device_id=device_id)
+        return create_session(
+            user,
+            ip=ip,
+            user_agent=user_agent,
+            device_id=device_id,
+            principal_kind=principal_kind,
+            principal_id=principal_id,
+        )
 
     def revoke_all_for_user(self, user_id: int) -> int:
         from core.session_auth import revoke_all_for_user

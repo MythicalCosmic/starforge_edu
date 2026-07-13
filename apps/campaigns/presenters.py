@@ -37,7 +37,7 @@ def recipient_to_dict(r: CampaignRecipient) -> dict[str, Any]:
         "id": r.id,
         "student": r.student_id,
         # Denormalized from select_related("student__user") on the recipients queryset.
-        "student_name": r.student.user.get_full_name() if r.student_id else None,
+        "student_name": r.student.get_full_name() if r.student_id else None,
         "phone": r.phone,
         "status": r.status,
         "error": r.error,
