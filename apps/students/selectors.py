@@ -41,7 +41,7 @@ def scoped_students(*, user, roles: set[str] | None = None) -> QuerySet[StudentP
 def students_with_upcoming_birthdays(
     *, base: QuerySet[StudentProfile] | None = None, days: int = 7, branch=None, cohort=None
 ) -> QuerySet[StudentProfile]:
-    today = timezone.now().date()
+    today = timezone.localdate()
     # Clamp defensively: the (month, day) set is exhaustive at 366 days anyway,
     # so capping is semantically lossless and protects future callers.
     month_days = {

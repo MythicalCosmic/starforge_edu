@@ -38,6 +38,25 @@ def test_set_department_head_requires_teacher_profile(tenant_a):
         assert dept.head is None
 
 
+def test_department_head_must_belong_to_the_same_branch(tenant_a):
+    with schema_context(tenant_a.schema_name):
+        department_branch = BranchFactory.create()
+        other_branch = BranchFactory.create()
+        dept = DepartmentFactory.create(branch=department_branch)
+        foreign_teacher = create_teacher(
+            branch=other_branch,
+            phone="+998905559003",
+            first_name="Foreign Head",
+        )
+
+        with pytest.raises(ValidationException) as exc:
+            set_department_head(dept, foreign_teacher.user)
+
+        assert exc.value.code == "head_branch_mismatch"
+        dept.refresh_from_db()
+        assert dept.head_id is None
+
+
 def test_patch_department_head_validated_at_api(as_role, tenant_a):
     client, _ = as_role(Role.DIRECTOR)
     with schema_context(tenant_a.schema_name):
@@ -54,3 +73,25 @@ def test_patch_department_head_validated_at_api(as_role, tenant_a):
     resp = client.patch(url, {"head": teacher.user_id}, format="json")
     assert resp.status_code == 200
     assert resp.json()["data"]["head"] == teacher.user_id
+
+
+def test_patch_department_rejects_foreign_branch_head(as_role, tenant_a):
+    client, _ = as_role(Role.DIRECTOR)
+    with schema_context(tenant_a.schema_name):
+        department_branch = BranchFactory.create()
+        other_branch = BranchFactory.create()
+        dept = DepartmentFactory.create(branch=department_branch)
+        foreign_teacher = create_teacher(
+            branch=other_branch,
+            phone="+998905559004",
+            first_name="Foreign Head",
+        )
+
+    response = client.patch(
+        f"/api/v1/org/departments/{dept.id}/",
+        {"head": foreign_teacher.user_id},
+        format="json",
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "head_branch_mismatch"

@@ -359,6 +359,31 @@ def test_transcript_post_returns_202_pending(tenant_a, user_in, as_user):
         assert Transcript.objects.filter(pk=body["id"], status="pending").exists()
 
 
+def test_transcript_request_hides_student_existence_from_unauthorized_reader(
+    tenant_a, user_in, as_user
+):
+    viewer = user_in(tenant_a, roles=["student"])
+    with schema_context(tenant_a.schema_name):
+        target: Any = StudentProfileFactory()
+        existing_id = target.pk
+        missing_id = target.pk + 100_000
+
+    client = as_user(tenant_a, viewer)
+    existing = client.post(
+        "/api/v1/academics/transcripts/",
+        {"student": existing_id},
+        format="json",
+    )
+    missing = client.post(
+        "/api/v1/academics/transcripts/",
+        {"student": missing_id},
+        format="json",
+    )
+
+    assert existing.status_code == missing.status_code == 404
+    assert existing.json()["code"] == missing.json()["code"] == "not_found"
+
+
 # weasyprint needs GTK native libs (cairo/pango) absent on the Windows dev box;
 # this runs the REAL renderer on CI/Linux and skips locally.
 try:  # pragma: no cover - import probe

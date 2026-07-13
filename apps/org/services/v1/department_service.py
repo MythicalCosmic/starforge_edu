@@ -28,22 +28,28 @@ class DepartmentService(IDepartmentService):
         return self._departments.get_by_id(department_id)
 
     def create(self, data: DepartmentCreateDTO) -> Department:
+        branch = self._resolve_branch(data.branch_id)
         dept = Department(
-            branch=self._resolve_branch(data.branch_id),
+            branch=branch,
             name=data.name,
             slug=data.slug,
             description=data.description,
             is_active=data.is_active,
-            head=self._resolve_head(data.head_id),
+            head=self._resolve_head(data.head_id, branch_id=branch.pk),
             budget=data.budget,
         )
         return self._save(dept)
 
     def update(self, department: Department, changes: dict[str, Any]) -> Department:
-        if "branch" in changes:
-            department.branch = self._resolve_branch(changes["branch"])
-        if "head" in changes:
-            department.head = self._resolve_head(changes["head"])
+        if "branch" in changes or "head" in changes:
+            branch = (
+                self._resolve_branch(changes["branch"])
+                if "branch" in changes
+                else department.branch
+            )
+            head_id = changes.get("head", department.head_id)
+            department.branch = branch
+            department.head = self._resolve_head(head_id, branch_id=branch.pk)
         for field in _SCALARS:
             if field in changes:
                 setattr(department, field, changes[field])
@@ -54,7 +60,7 @@ class DepartmentService(IDepartmentService):
 
     # --- helpers -----------------------------------------------------------
     @staticmethod
-    def _resolve_head(head_id: int | None):
+    def _resolve_head(head_id: int | None, *, branch_id: int):
         from apps.org.services import validate_department_head
 
         if head_id is None:
@@ -67,7 +73,7 @@ class DepartmentService(IDepartmentService):
             raise ValidationException(
                 _("Invalid head."), code="invalid_head", fields={"head": ["Not found."]}
             )
-        validate_department_head(user)  # 400 head_not_teacher if not a teacher
+        validate_department_head(user, branch_id=branch_id)
         return user
 
     @staticmethod

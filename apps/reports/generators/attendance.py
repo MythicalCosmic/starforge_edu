@@ -9,6 +9,8 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
+from django.utils import timezone
+
 from apps.attendance.models import AttendanceRecord
 from apps.reports.generators.base import (
     ReportGenerator,
@@ -56,7 +58,7 @@ class AttendanceGenerator(ReportGenerator):
             by_status[status] = by_status.get(status, 0) + 1
             rows.append(
                 {
-                    "date": rec.lesson.starts_at.date().isoformat() if rec.lesson_id else "",
+                    "date": timezone.localdate(rec.lesson.starts_at).isoformat() if rec.lesson_id else "",
                     "lesson": rec.lesson.title if rec.lesson_id else "",
                     "cohort": rec.lesson.cohort.name if rec.lesson_id and rec.lesson.cohort_id else "",
                     "student": rec.student.user.get_full_name() or rec.student.user.username,

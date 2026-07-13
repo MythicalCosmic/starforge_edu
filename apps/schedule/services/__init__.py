@@ -395,7 +395,7 @@ def emit_due_reminders() -> int:
 
 def archive_ended_term_lessons() -> int:
     """Archive scheduled lessons whose term has ended (idempotent filter-update)."""
-    today = timezone.now().date()
+    today = timezone.localdate()
     return Lesson.objects.filter(status=Lesson.Status.SCHEDULED, term__end_date__lt=today).update(
         status=Lesson.Status.ARCHIVED
     )

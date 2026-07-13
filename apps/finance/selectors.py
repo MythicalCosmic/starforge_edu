@@ -88,7 +88,7 @@ def statement_context(*, student) -> dict:
         "student": student,
         "invoices": list(invoices),
         "outstanding_uzs": outstanding_balance(student.pk),
-        "generated_on": timezone.now().date().isoformat(),
+        "generated_on": timezone.localdate().isoformat(),
     }
 
 

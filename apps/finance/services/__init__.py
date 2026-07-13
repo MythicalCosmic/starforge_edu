@@ -248,7 +248,7 @@ def issue_invoice(
     ]
     gross = sum((line["amount_uzs"] for line in charge_lines), _ZERO)
 
-    today = timezone.now().date()
+    today = timezone.localdate()
     discount_lines = (
         _build_discount_lines(student=student, base_uzs=gross, on=today, settings=settings)
         if apply_discounts
@@ -417,7 +417,7 @@ def extend_invoice_due_date(*, invoice_id: int, new_due_date: date, actor=None) 
     # An extension whose new deadline is today-or-later rescues an overdue bill;
     # recompute its status from payments via the single source of truth
     # (_refresh_invoice_status -> issued / partially_paid / paid).
-    if was_overdue and new_due_date >= timezone.now().date():
+    if was_overdue and new_due_date >= timezone.localdate():
         _refresh_invoice_status(invoice)
     return invoice
 
@@ -436,7 +436,7 @@ def restore_invoice_due_date(*, invoice_id: int, due_date: date | None, actor=No
     invoice.due_date = due_date
     invoice.save(update_fields=["due_date", "updated_at"])
     _refresh_invoice_status(invoice)  # issued / partially_paid / paid from allocations
-    if invoice.status == Invoice.Status.ISSUED and due_date is not None and due_date < timezone.now().date():
+    if invoice.status == Invoice.Status.ISSUED and due_date is not None and due_date < timezone.localdate():
         invoice.status = Invoice.Status.OVERDUE
         invoice.save(update_fields=["status", "updated_at"])
     return invoice
@@ -448,7 +448,7 @@ def restore_invoice_due_date(*, invoice_id: int, due_date: date | None, actor=No
 
 
 def _period_key(*, on: date | None = None) -> str:
-    on = on or timezone.now().date()
+    on = on or timezone.localdate()
     return on.strftime("%Y-%m")
 
 
@@ -941,7 +941,7 @@ def emit_payment_reminders(*, today: date | None = None) -> int:
     Returns the count of reminders emitted. Runs in the active tenant schema."""
     from django.core.cache import cache
 
-    today = today or timezone.now().date()
+    today = today or timezone.localdate()
     settings = get_center_settings()
     interval = getattr(settings, "payment_reminder_interval_days", None) or 3
     schema = current_schema()

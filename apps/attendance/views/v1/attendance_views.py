@@ -285,7 +285,7 @@ def _csv_rows(records):
     for record in records.iterator():
         yield writer.writerow(
             [
-                record.lesson.starts_at.date().isoformat(),
+                timezone.localdate(record.lesson.starts_at).isoformat(),
                 record.lesson.title,
                 record.student.user.get_full_name(),
                 record.status,

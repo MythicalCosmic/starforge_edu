@@ -141,7 +141,7 @@ def create_student(
         email=user.email or "",
         birthdate=birthdate,
         gender=gender,
-        enrollment_date=timezone.now().date() if status in _ENROLLED_OR_LATER else None,
+        enrollment_date=timezone.localdate() if status in _ENROLLED_OR_LATER else None,
         academic_level=academic_level,
         location=location,
         previous_school=previous_school,
@@ -182,7 +182,7 @@ def transition_enrollment(
     student.status = to_status
     fields = ["status", "updated_at"]
     if to_status == StudentProfile.Status.ENROLLED and student.enrollment_date is None:
-        student.enrollment_date = timezone.now().date()
+        student.enrollment_date = timezone.localdate()
         fields.append("enrollment_date")
     student.save(update_fields=fields)
     EnrollmentEvent.objects.create(

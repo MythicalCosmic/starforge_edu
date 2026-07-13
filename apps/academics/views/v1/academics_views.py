@@ -599,19 +599,18 @@ def transcripts_collection_view(request: HttpRequest) -> HttpResponse:
         check_perm(request, "academics:read")
         data = read_json(request)
         student = StudentProfile.objects.filter(pk=_int_value(_require(data, "student"), "student")).first()
-        if student is None:
-            raise _reject("student", "Student does not exist.")
+        # Uniform not-found for a missing student and an existing student outside
+        # the caller's authority. A 400-vs-403 split is a tenant-wide ID oracle.
+        if student is None or (
+            not _is_self_or_child(request, student)
+            and not has_permission_code(get_user_roles(request), "academics:write")
+        ):
+            raise NotFoundException(code="not_found")
         term = None
         if data.get("term") is not None:
             term = Term.objects.filter(pk=_int_value(data["term"], "term")).first()
             if term is None:
                 raise _reject("term", "Term does not exist.")
-        if not _is_self_or_child(request, student) and not has_permission_code(
-            get_user_roles(request), "academics:write"
-        ):
-            raise PermissionException(
-                "Requesting another student's transcript requires write access.", code="forbidden"
-            )
         transcript = _transcript_service().request(student=student, term=term, requested_by=request.user)
         return success({"id": transcript.id, "status": transcript.status}, status=202)
     return _method_not_allowed()

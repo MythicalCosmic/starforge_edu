@@ -213,7 +213,7 @@ def _validate_payment_delay_payload(payload: dict) -> dict:
         raise ValidationException(
             _("A payment delay can only move the due date later."), code="payment_delay_not_later"
         )
-    if new_due < timezone.now().date():
+    if new_due < timezone.localdate():
         # A delay into the past is meaningless: it would leave the bill overdue with
         # no observable grace. Require it to land today or later.
         raise ValidationException(

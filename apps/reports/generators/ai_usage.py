@@ -14,6 +14,8 @@ import logging
 from datetime import date
 from typing import Any
 
+from django.utils import timezone
+
 from apps.reports.generators.base import ReportGenerator
 
 logger = logging.getLogger("starforge.reports")
@@ -22,7 +24,7 @@ logger = logging.getLogger("starforge.reports")
 def _month_bounds(month: str | None) -> tuple[date, date]:
     """Return (first_day, last_day) for a 'YYYY-MM' string (current month if
     unset/invalid)."""
-    today = date.today()
+    today = timezone.localdate()
     year, mon = today.year, today.month
     if month:
         try:

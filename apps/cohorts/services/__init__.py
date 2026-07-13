@@ -45,7 +45,7 @@ def enroll_student_in_cohort(*, cohort: Cohort, student, start_date=None) -> Coh
     try:
         with transaction.atomic():
             membership = CohortMembership.objects.create(
-                cohort=cohort, student=student, start_date=start_date or timezone.now().date()
+                cohort=cohort, student=student, start_date=start_date or timezone.localdate()
             )
     except IntegrityError as exc:
         # Lost the read-then-write race against a concurrent enroll: the partial
@@ -94,7 +94,7 @@ def move_student(*, student, to_cohort: Cohort, reason: str = "", actor=None) ->
             code="student_branch_mismatch",
         )
 
-    today = timezone.now().date()
+    today = timezone.localdate()
     CohortMembership.objects.filter(student=student, end_date__isnull=True).update(
         end_date=today, moved_reason=reason
     )
@@ -139,7 +139,7 @@ def unenroll_student_from_cohort(*, cohort: Cohort, student, reason: str = "") -
         raise ValidationException(
             _("Student is not active in this cohort."), code="not_enrolled"
         )
-    membership.end_date = timezone.now().date()
+    membership.end_date = timezone.localdate()
     if reason:
         membership.moved_reason = reason
     membership.save(update_fields=["end_date", "moved_reason"])

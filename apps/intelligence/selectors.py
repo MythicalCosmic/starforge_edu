@@ -191,10 +191,10 @@ def branch_ranking(branches, *, now=None, include_finance: bool = True) -> list[
     for callers without finance:read.
 
     Privacy: a branch with fewer than MIN_BRANCH_CELL active students has its metrics
-    and score SUPPRESSED (set to None, `suppressed=True`), because at small n a "branch
-    aggregate" would be one identifiable student's attendance/grade/risk. A branch with
-    no academic signal at all (no attendance, no grades) is left unranked (score None)
-    rather than handed a spurious score. Unscored rows sort last."""
+    and score SUPPRESSED. Each academic metric also requires MIN_BRANCH_CELL distinct
+    contributing students; a large branch with one graded student must not reveal that
+    student's exact score as an "aggregate". A branch with no safely reportable academic
+    signal is left unranked (score None). Unscored rows sort last."""
     now = now or timezone.now()
     branch_ids = list(branches.values_list("id", flat=True))
     if not branch_ids:
@@ -219,10 +219,11 @@ def branch_ranking(branches, *, now=None, include_finance: bool = True) -> list[
                 "id",
                 filter=Q(status__in=(AttendanceRecord.Status.PRESENT, AttendanceRecord.Status.LATE)),
             ),
+            contributors=Count("student_id", distinct=True),
         )
     }
     grades = {
-        row["student__branch_id"]: row["avg_pct"]
+        row["student__branch_id"]: row
         for row in ExamResult.objects.filter(
             student__branch_id__in=branch_ids,
             student__status__in=ACTIVE_STUDENT_STATUSES,
@@ -232,7 +233,8 @@ def branch_ranking(branches, *, now=None, include_finance: bool = True) -> list[
         .annotate(
             avg_pct=Avg(
                 ExpressionWrapper(F("score") * 100.0 / F("exam__max_score"), output_field=FloatField())
-            )
+            ),
+            contributors=Count("student_id", distinct=True),
         )
     }
     # At-risk count per branch: compute risk once over all active students, map to branch.
@@ -279,8 +281,11 @@ def branch_ranking(branches, *, now=None, include_finance: bool = True) -> list[
             )
             continue
         att = attendance.get(bid)
+        if att and att["contributors"] < MIN_BRANCH_CELL:
+            att = None
         attendance_rate = (att["attended"] / att["total"]) if att and att["total"] else None
-        avg_grade = grades.get(bid)
+        grade = grades.get(bid)
+        avg_grade = grade["avg_pct"] if grade and grade["contributors"] >= MIN_BRANCH_CELL else None
         at_risk = at_risk_by_branch.get(bid, 0)
         at_risk_rate = (at_risk / active) if active else None
         # Only score a branch that has an academic signal; a no-data branch stays

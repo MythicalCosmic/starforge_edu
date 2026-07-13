@@ -30,7 +30,7 @@ def _student_profile_model():
         return None
 
 
-def validate_department_head(user) -> None:
+def validate_department_head(user, *, branch_id: int | None = None) -> None:
     """Raise unless `user` may head a department (must have a TeacherProfile).
 
     Single source of truth for D1-LF-4 / D1-LD-10 — shared by the service and
@@ -39,13 +39,21 @@ def validate_department_head(user) -> None:
     if user is None:
         return
     TeacherProfile = _teacher_profile_model()
-    if TeacherProfile is not None and not TeacherProfile.objects.filter(user=user).exists():
-        raise ValidationException(_("Department head must be a teacher."), code="head_not_teacher")
+    if TeacherProfile is not None:
+        teacher = TeacherProfile.objects.filter(user=user).first()
+        if teacher is None:
+            raise ValidationException(_("Department head must be a teacher."), code="head_not_teacher")
+        if branch_id is not None and teacher.branch_id != branch_id:
+            raise ValidationException(
+                _("Department head must teach at the department's branch."),
+                code="head_branch_mismatch",
+                fields={"head": ["Teacher belongs to a different branch."]},
+            )
 
 
 def set_department_head(department: Department, user) -> Department:
     """Assign a department head (validated: head must be a teacher)."""
-    validate_department_head(user)
+    validate_department_head(user, branch_id=department.branch_id)
     department.head = user
     department.save(update_fields=["head", "updated_at"])
     return department

@@ -176,7 +176,7 @@ def _ai_tokens(schema_name: str) -> int:
     import calendar
     from datetime import date
 
-    today = date.today()
+    today = timezone.localdate()
     last_day = calendar.monthrange(today.year, today.month)[1]
     start = date(today.year, today.month, 1)
     end = date(today.year, today.month, last_day)

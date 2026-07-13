@@ -664,7 +664,7 @@ def test_attendance_rejects_a_student_who_left_before_the_lesson(tenant_a, user_
         CohortMembershipFactory(
             cohort=lesson.cohort,
             student=student,
-            end_date=lesson.starts_at.date() - timedelta(days=1),  # left the day before
+            end_date=timezone.localdate(lesson.starts_at) - timedelta(days=1),  # left the day before
         )
         with pytest.raises(UnprocessableEntity) as exc:
             mark_attendance(
@@ -688,3 +688,32 @@ def test_auto_mark_absent_includes_a_student_moved_after_the_lesson(tenant_a):
         record = AttendanceRecord.objects.get(lesson=lesson, student=student)
         assert record.status == Status.ABSENT
         assert record.auto_marked is True
+
+
+@time_machine.travel("2026-06-10 20:30:00 +00:00", tick=False)
+def test_attendance_membership_uses_center_local_lesson_date(tenant_a, user_in):
+    """20:30 UTC is already the next calendar day in Asia/Tashkent. Membership
+    dates and lesson-date checks must use that same center-local day."""
+    teacher_user = user_in(tenant_a, roles=["teacher"])
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        teacher = TeacherProfileFactory(user=teacher_user, branch=branch)
+        lesson = _make_lesson(
+            branch=branch,
+            teacher=teacher,
+            starts_at=timezone.now() - timedelta(hours=1),
+        )
+        student: Any = StudentProfileFactory(branch=branch, current_cohort=lesson.cohort)
+        CohortMembershipFactory(
+            cohort=lesson.cohort,
+            student=student,
+            start_date=timezone.localdate(lesson.starts_at),
+        )
+
+        result = mark_attendance(
+            lesson=lesson,
+            entries=[{"student": student, "status": Status.PRESENT}],
+            actor=teacher_user,
+        )
+
+        assert result["created"] == 1

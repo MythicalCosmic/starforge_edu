@@ -174,7 +174,7 @@ def mark_attendance(*, lesson: Lesson, entries: list[dict], actor) -> dict:
     # who was in the cohort when the lesson happened but has since been moved out
     # (move_student end-dates their membership) must still be markable — otherwise a
     # mid-session removal would block the teacher from recording the whole register.
-    lesson_date = lesson.starts_at.date()
+    lesson_date = timezone.localdate(lesson.starts_at)
     member_ids = set(
         CohortMembership.objects.filter(
             cohort_id=lesson.cohort_id, student_id__in=student_ids, start_date__lte=lesson_date
@@ -250,7 +250,7 @@ def auto_mark_absent() -> int:
     for lesson in lessons:
         # F2-6 (symmetric with mark_attendance): roster as of the lesson date, so a
         # no-show who was moved out after the lesson still gets their absent record.
-        lesson_date = lesson.starts_at.date()
+        lesson_date = timezone.localdate(lesson.starts_at)
         member_ids = (
             CohortMembership.objects.filter(cohort_id=lesson.cohort_id, start_date__lte=lesson_date)
             .filter(Q(end_date__isnull=True) | Q(end_date__gte=lesson_date))

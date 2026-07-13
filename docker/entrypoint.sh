@@ -3,7 +3,10 @@ set -euo pipefail
 
 case "${1:-web}" in
   web)
-    exec gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 3 --access-logfile -
+    # iCal feeds carry a signed credential in the URL path. Keep useful request
+    # telemetry without logging request targets/query strings or bearer material.
+    exec gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 3 \
+      --access-logfile - --access-logformat '%(h)s %(m)s %(s)s %(L)s'
     ;;
   daphne)
     exec daphne -b 0.0.0.0 -p 8001 config.asgi:application

@@ -116,6 +116,34 @@ def test_branch_with_no_academic_signal_is_unranked(tenant_a, as_role):
     assert row["rank"] > _row(director, scored.id)["rank"]
 
 
+def test_grade_metric_requires_three_distinct_contributors(tenant_a, as_role):
+    director, _ = as_role(Role.DIRECTOR)
+    branch = _make_branch(
+        tenant_a,
+        [{"grade": 91}, {"grade": None}, {"grade": None}],
+    )
+
+    row = _row(director, branch.id)
+
+    assert row["active_students"] == 3
+    assert row["avg_grade_pct"] is None
+    assert row["score"] is None
+
+
+def test_attendance_metric_requires_three_distinct_contributors(tenant_a, as_role):
+    director, _ = as_role(Role.DIRECTOR)
+    branch = _make_branch(
+        tenant_a,
+        [{"present": 4}, {}, {}],
+    )
+
+    row = _row(director, branch.id)
+
+    assert row["active_students"] == 3
+    assert row["attendance_rate"] is None
+    assert row["score"] is None
+
+
 def test_branch_grade_and_risk_are_averaged_across_students(tenant_a, as_role):
     director, _ = as_role(Role.DIRECTOR)
     # three students all present; grades 90/30/60 -> avg 60; only the 30 is at-risk

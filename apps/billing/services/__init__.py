@@ -275,7 +275,7 @@ def _run_dunning(*, center_id: int, status: str) -> None:
         if status == Subscription.Status.SUSPENDED
         else "billing.subscription_past_due"
     )
-    today = timezone.now().date().isoformat()
+    today = timezone.localdate().isoformat()
     with schema_context(center.schema_name):
         _dispatch_to_directors(center=center, event_type=event_type, status=status, date=today)
     _email_center_contact(center=center, status=status)
