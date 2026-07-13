@@ -12,6 +12,8 @@ from __future__ import annotations
 import pytest
 from django_tenants.utils import schema_context
 
+from core.exceptions import ValidationException
+from core.http import bool_field
 from core.permissions import Role
 
 pytestmark = pytest.mark.django_db
@@ -23,6 +25,29 @@ def director(as_role):
 
 
 # --- core.listing / core.http never-500 -----------------------------------
+@pytest.mark.parametrize("bad", [None, "", "banana", "treu", [], {}])
+def test_bool_field_rejects_ambiguous_values(bad):
+    with pytest.raises(ValidationException):
+        bool_field({"flag": bad}, "flag")
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [(True, True), (False, False), ("on", True), ("yes", True), ("off", False), ("no", False)],
+)
+def test_bool_field_accepts_explicit_boolean_forms(raw, expected):
+    assert bool_field({"flag": raw}, "flag") is expected
+
+
+@pytest.mark.parametrize("bad", [None, "banana"])
+def test_card_type_is_active_rejects_null_and_garbage(director, bad):
+    response = director.post(
+        "/api/v1/cards/types/", {"name": "Strict bool", "is_active": bad}, format="json"
+    )
+    assert response.status_code == 400
+    assert "is_active" in response.json()["errors"]
+
+
 def test_fk_filter_garbage_is_400_not_500(director):
     resp = director.get("/api/v1/teachers/?branch=abc")
     assert resp.status_code == 400

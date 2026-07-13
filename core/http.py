@@ -98,12 +98,23 @@ def decimal_field(
 
 
 def bool_field(data: dict[str, Any], name: str, *, default: bool = False) -> bool:
-    """A bool field (accepts a JSON bool or "true"/"false"/"1"/"0")."""
-    if name not in data or data[name] is None:
+    """A strict bool field with DRF-compatible string forms.
+
+    Missing uses ``default``; an explicit null or an unknown string is invalid.
+    Silently coercing a typo such as ``"treu"`` to ``False`` can invert an
+    activation/publish flag, so both true and false spellings are enumerated.
+    """
+    if name not in data:
         return default
     value = data[name]
+    if value is None:
+        raise _bad(name, "Must be a boolean.")
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
-        return value.strip().lower() in ("true", "1", "yes", "t")
+        normalized = value.strip().lower()
+        if normalized in ("true", "1", "yes", "t", "y", "on"):
+            return True
+        if normalized in ("false", "0", "no", "f", "n", "off"):
+            return False
     raise _bad(name, "Must be a boolean.")

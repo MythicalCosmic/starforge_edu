@@ -8,7 +8,7 @@ defaults on every request (read once per request, no cross-request cache), so
 changes take effect immediately and centrally — no redeploy, no per-view edits.
 
 Anti-fraud invariant: the master wildcard `*:*` cannot be overridden (validated
-in the serializer), so a center can never revoke the director's authority nor
+in the service), so a center can never revoke the director's authority nor
 escalate a role to full power through this mechanism.
 """
 
@@ -41,9 +41,9 @@ class RolePermissionOverride(models.Model):
         constraints = [
             models.UniqueConstraint(fields=("role", "permission"), name="one_override_per_role_permission"),
             # The master wildcard is never overridable, enforced at the DB level so NO
-            # write path (serializer, service, raw ORM) can revoke the director's
+            # write path (HTTP service, programmatic service, raw ORM) can revoke the director's
             # authority or escalate a role to everything. Defense in depth — the
-            # serializer also 400s it for a friendly message.
+            # service also 400s it for a friendly message.
             models.CheckConstraint(condition=~models.Q(permission="*:*"), name="no_master_wildcard_override"),
         ]
 

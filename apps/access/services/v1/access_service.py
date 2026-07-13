@@ -16,51 +16,8 @@ from apps.access.dto.access_dto import OverrideDTO
 from apps.access.interfaces.repositories import IOverrideRepository
 from apps.access.interfaces.services import IAccessService
 from apps.access.models import RolePermissionOverride
+from apps.access.validation import validate_effect, validate_permission, validate_role
 from core.exceptions import ValidationException
-from core.permissions import Role
-
-
-def _validate_role(value: str) -> str:
-    if value not in Role.ALL:
-        raise ValidationException(
-            _("Unknown role."), code="validation_error", fields={"role": ["Unknown role."]}
-        )
-    return value
-
-
-def _validate_permission(value: str) -> str:
-    value = (value or "").strip()
-    if value == "*:*":
-        raise ValidationException(
-            _("The master wildcard '*:*' cannot be overridden."),
-            code="validation_error",
-            fields={"permission": ["The master wildcard '*:*' cannot be overridden."]},
-        )
-    resource, sep, verb = value.partition(":")
-    if not sep or not resource or not verb:
-        raise ValidationException(
-            _("Permission must look like 'resource:verb' (e.g. students:write or students:*)."),
-            code="validation_error",
-            fields={"permission": ["Must look like 'resource:verb'."]},
-        )
-    if resource == "access":
-        # Managing permissions is not delegable — stays director-only (*:*).
-        raise ValidationException(
-            _("The 'access' resource cannot be overridden (permission management stays director-only)."),
-            code="validation_error",
-            fields={"permission": ["The 'access' resource cannot be overridden."]},
-        )
-    return value
-
-
-def _validate_effect(value: str) -> str:
-    if value not in RolePermissionOverride.Effect.values:
-        raise ValidationException(
-            _("Invalid effect."),
-            code="validation_error",
-            fields={"effect": [f"Must be one of {', '.join(RolePermissionOverride.Effect.values)}."]},
-        )
-    return value
 
 
 class AccessService(IAccessService):
@@ -74,9 +31,9 @@ class AccessService(IAccessService):
         return self._overrides.get_by_id(pk)
 
     def create_override(self, data: OverrideDTO, *, actor) -> RolePermissionOverride:
-        role = _validate_role(data.role)
-        permission = _validate_permission(data.permission)
-        effect = _validate_effect(data.effect)
+        role = validate_role(data.role)
+        permission = validate_permission(data.permission)
+        effect = validate_effect(data.effect)
         if RolePermissionOverride.objects.filter(role=role, permission=permission).exists():
             # Friendly 400 instead of a unique-constraint 409/500 on duplicate create.
             raise ValidationException(
@@ -91,11 +48,11 @@ class AccessService(IAccessService):
         self, override: RolePermissionOverride, changes: dict[str, Any]
     ) -> RolePermissionOverride:
         if "role" in changes:
-            override.role = _validate_role(changes["role"])
+            override.role = validate_role(changes["role"])
         if "permission" in changes:
-            override.permission = _validate_permission(changes["permission"])
+            override.permission = validate_permission(changes["permission"])
         if "effect" in changes:
-            override.effect = _validate_effect(changes["effect"])
+            override.effect = validate_effect(changes["effect"])
         if "note" in changes:
             override.note = changes["note"]
         override.save()  # a dup (role, permission) surfaces as a 409 via the middleware

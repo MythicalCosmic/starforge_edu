@@ -8,27 +8,17 @@ request (no cross-request cache), so a change takes effect on the very next requ
 
 from __future__ import annotations
 
-from django.utils.translation import gettext_lazy as _
-
 from apps.access.models import RolePermissionOverride
-from core.exceptions import ValidationException
+from apps.access.validation import validate_effect, validate_permission, validate_role
 
 
 def set_override(
     *, role: str, permission: str, effect: str, actor=None, note: str = ""
 ) -> RolePermissionOverride:
     """Create or update the override for (role, permission)."""
-    if permission == "*:*":
-        # Mirror the serializer + DB CheckConstraint at the service layer so every
-        # programmatic caller is covered (the wildcard protects director authority).
-        raise ValidationException(
-            _("The master wildcard '*:*' cannot be overridden."), code="wildcard_not_overridable"
-        )
-    if permission.partition(":")[0] == "access":
-        # Permission management is not delegable — keeps it director-only (*:*).
-        raise ValidationException(
-            _("The 'access' resource cannot be overridden."), code="access_not_overridable"
-        )
+    role = validate_role(role)
+    permission = validate_permission(permission)
+    effect = validate_effect(effect)
     obj, _created = RolePermissionOverride.objects.update_or_create(
         role=role,
         permission=permission,

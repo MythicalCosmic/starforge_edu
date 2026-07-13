@@ -17,17 +17,13 @@ from django.views.decorators.csrf import csrf_exempt
 from apps.access.dto.access_dto import OverrideDTO
 from apps.access.interfaces.services import IAccessService
 from apps.access.presenters import override_to_dict
+from apps.access.validation import permission_catalogue
 from core.api_auth import check_perm, require_auth
 from core.container import container
 from core.exceptions import NotFoundException
 from core.http import read_json, str_field
 from core.listing import apply_filters, paginate
-from core.permissions import (
-    ROLE_PERMISSION_MATRIX,
-    Role,
-    _request_overrides,
-    role_effective_permissions,
-)
+from core.permissions import Role, _request_overrides, role_effective_permissions
 from core.responses import created, error, no_content, paginated, success
 
 _RESOURCE = "access"
@@ -118,7 +114,4 @@ def access_permissions_view(request: HttpRequest) -> HttpResponse:
     if request.method != "GET":
         return error("Method not allowed.", code="method_not_allowed", status=405)
     check_perm(request, f"{_RESOURCE}:read")
-    codes: set[str] = set()
-    for perms in ROLE_PERMISSION_MATRIX.values():
-        codes |= perms
-    return success({"permissions": sorted(codes)})
+    return success({"permissions": sorted(permission_catalogue())})

@@ -123,6 +123,20 @@ def test_permission_catalog(tenant_a, as_role):
     body = director.get("/api/v1/access/permissions/").json()["data"]
     assert "students:read" in body["permissions"]
     assert "approvals:disburse" in body["permissions"]
+    assert "notifications:write" in body["permissions"]  # implicit under director *:*
+    assert "*:*" not in body["permissions"]
+
+
+@pytest.mark.parametrize("permission", ["finance:Read", "student:read", "unknown:*", "finance:unknown"])
+def test_http_rejects_unknown_permission_codes(tenant_a, as_role, permission):
+    director, _ = as_role(Role.DIRECTOR)
+    response = director.post(
+        OVERRIDES,
+        {"role": Role.TEACHER, "permission": permission, "effect": "grant"},
+        format="json",
+    )
+    assert response.status_code == 400
+    assert "permission" in response.json()["errors"]
 
 
 def test_service_rejects_master_wildcard_and_access(tenant_a):
@@ -133,6 +147,21 @@ def test_service_rejects_master_wildcard_and_access(tenant_a):
             set_override(role=Role.TEACHER, permission="*:*", effect="grant")
         with pytest.raises(ValidationException):
             set_override(role=Role.TEACHER, permission="access:write", effect="grant")
+
+
+@pytest.mark.parametrize(
+    ("role", "permission", "effect"),
+    [
+        ("Teacher", "finance:read", "grant"),
+        (Role.TEACHER, "finance:Read", "grant"),
+        (Role.TEACHER, "finance:read", "allow"),
+    ],
+)
+def test_programmatic_service_rejects_invalid_override_values(tenant_a, role, permission, effect):
+    from core.exceptions import ValidationException
+
+    with schema_context(tenant_a.schema_name), pytest.raises(ValidationException):
+        set_override(role=role, permission=permission, effect=effect)
 
 
 def test_overrides_flow_into_recipient_routing(tenant_a):
