@@ -62,6 +62,25 @@ def staff_client(staff_admin):
     return client
 
 
+def test_platform_admin_can_obtain_api_session_from_public_login(platform_admin, tenant_a):
+    client = APIClient()
+
+    login = client.post(
+        "/api/v1/auth/login/",
+        {"username": platform_admin.username, "password": PASSWORD},
+        format="json",
+    )
+
+    assert login.status_code == 200, login.content
+    client.credentials(HTTP_AUTHORIZATION=f"Bearer {login.json()['data']['access']}")
+    assert client.get("/api/v1/platform/centers/").status_code == 200
+    assert client.post(
+        "/api/v1/auth/role-login/",
+        {"username": platform_admin.username, "password": PASSWORD},
+        format="json",
+    ).status_code == 404
+
+
 def _ensure_plan(max_students=1000):
     return Plan.objects.get_or_create(
         code="starter",

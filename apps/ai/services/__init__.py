@@ -198,6 +198,7 @@ def check_and_reserve_budget(
         budget = _get_budget_locked()
         existing = AIRequest.objects.filter(idempotency_key=key).first()
         if existing is not None and existing.status not in _RE_DRIVABLE_STATUSES:
+            existing._should_enqueue = False
             return existing  # in-flight or already succeeded — idempotent no-op
         disabled = not budget.is_enabled
         over_daily = budget.tokens_used_today + requested > budget.daily_token_limit
@@ -224,6 +225,9 @@ def check_and_reserve_budget(
                     tokens_used_month=F("tokens_used_month") + requested,
                     updated_at=timezone.now(),
                 )
+            # Callers enqueue only when this invocation created or deliberately
+            # re-drove the request. Returning an existing QUEUED row is a no-op.
+            obj._should_enqueue = created
             return obj
 
     # Over budget / disabled: the lock is released; record (or keep) the denial in
@@ -357,7 +361,7 @@ def request_exam_generation(
         params={"exam_type": exam_type, "question_count": question_count, "difficulty": difficulty},
     )
 
-    if ai_request.status == AIRequest.Status.QUEUED:
+    if getattr(ai_request, "_should_enqueue", False):
         from core.utils import current_schema
 
         schema = current_schema()

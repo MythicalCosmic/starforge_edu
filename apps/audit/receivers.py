@@ -49,6 +49,8 @@ AUDITED_MODELS: tuple[tuple[str, str], ...] = (
     ("academics", "Grade"),
     ("academics", "ExamResult"),
     ("payments", "ProviderConfig"),
+    # A-2 changes live server-side authorization and require an append-only trail.
+    ("access", "RolePermissionOverride"),
 )
 
 # Stable dispatch_uids so re-imports (and the test suite's repeated ready())

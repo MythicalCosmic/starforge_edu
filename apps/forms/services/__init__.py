@@ -296,7 +296,7 @@ def request_form_analysis(*, form: Form, requested_by=None):
         source_app="forms",
         source_id=form.id,
     )
-    if ai_request.status == ai_request.Status.QUEUED:
+    if getattr(ai_request, "_should_enqueue", False):
         schema = current_schema()
         transaction.on_commit(lambda: _enqueue_form_analysis(ai_request.pk, form.id, schema))
     return ai_request

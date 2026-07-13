@@ -377,6 +377,23 @@ def request_password_reset(*, identifier: str, ip: str = "", user_agent: str = "
     per-IP distinct-identifier cap is enforced BEFORE the existence check so
     probing sweeps still get throttled."""
     identifier = _normalize(identifier)
+    # Distributed SMS-cost protection. Run before account lookup so known and
+    # unknown identifiers remain indistinguishable, and hash PII in cache keys.
+    from core.ratelimit import check_rate
+    from core.utils import stable_hash
+
+    check_rate(
+        scope="otp_identifier",
+        key=stable_hash(identifier),
+        limit=settings.OTP_IDENTIFIER_RATE_LIMIT,
+        window=settings.OTP_IDENTIFIER_RATE_WINDOW_SECONDS,
+    )
+    check_rate(
+        scope="otp_global",
+        key="platform",
+        limit=settings.OTP_GLOBAL_RATE_LIMIT,
+        window=settings.OTP_GLOBAL_RATE_WINDOW_SECONDS,
+    )
     _enforce_ip_cap(ip, identifier)
     if _find_by_identifier(identifier) is None:
         return

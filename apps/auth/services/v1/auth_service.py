@@ -82,10 +82,11 @@ class AuthService(IAuthService):
         )
 
     def logout(self, user: User) -> None:
-        self._sessions.revoke_all_for_user(user.pk)
-        from apps.audit.services import audit_log
+        # Revoke the signed iCal credential (token_version) together with every
+        # opaque session, using the domain's single logout path.
+        from apps.auth.services import logout_everywhere
 
-        audit_log(actor=user, action="logout", resource_type="users.User", resource_id=str(user.pk))
+        logout_everywhere(user)
 
     def change_password(self, user: User, data: ChangePasswordDTO) -> dict[str, str]:
         from apps.auth.services import _validate_new_password

@@ -96,6 +96,35 @@ class TestModelReceivers:
             )
             assert rows.count() == 1
 
+    def test_permission_override_create_and_update_are_audited(
+        self, tenant_a, django_capture_on_commit_callbacks
+    ):
+        from apps.access.models import RolePermissionOverride
+
+        with schema_context(tenant_a.schema_name):
+            with django_capture_on_commit_callbacks(execute=True):
+                override = RolePermissionOverride.objects.create(
+                    role=Role.TEACHER,
+                    permission="students:write",
+                    effect=RolePermissionOverride.Effect.GRANT,
+                )
+            assert AuditLog.objects.filter(
+                resource_type="access.RolePermissionOverride",
+                resource_id=str(override.pk),
+                action=Action.CREATE,
+            ).count() == 1
+
+            with django_capture_on_commit_callbacks(execute=True):
+                override.effect = RolePermissionOverride.Effect.REVOKE
+                override.save(update_fields=["effect"])
+            row = AuditLog.objects.get(
+                resource_type="access.RolePermissionOverride",
+                resource_id=str(override.pk),
+                action=Action.UPDATE,
+            )
+            assert row.before["effect"] == RolePermissionOverride.Effect.GRANT
+            assert row.after["effect"] == RolePermissionOverride.Effect.REVOKE
+
     def test_providerconfig_masks_credentials(self, tenant_a, django_capture_on_commit_callbacks):
         from apps.payments.models import ProviderConfig
 

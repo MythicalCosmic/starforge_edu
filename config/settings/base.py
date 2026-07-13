@@ -613,6 +613,10 @@ OTP_MAX_ATTEMPTS = 5
 # cooldown per tenant — these are the platform fallbacks).
 OTP_COOLDOWN_SECONDS = 60
 OTP_IP_DISTINCT_IDENTIFIER_CAP = 5
+OTP_IDENTIFIER_RATE_LIMIT = env.int("OTP_IDENTIFIER_RATE_LIMIT", default=3)
+OTP_IDENTIFIER_RATE_WINDOW_SECONDS = env.int("OTP_IDENTIFIER_RATE_WINDOW_SECONDS", default=60)
+OTP_GLOBAL_RATE_LIMIT = env.int("OTP_GLOBAL_RATE_LIMIT", default=1000)
+OTP_GLOBAL_RATE_WINDOW_SECONDS = env.int("OTP_GLOBAL_RATE_WINDOW_SECONDS", default=60 * 60)
 
 # ---------------------------------------------------------------------------
 # Day 3: payment providers, fiscalization, push, billing (all mock-first, TD-2)

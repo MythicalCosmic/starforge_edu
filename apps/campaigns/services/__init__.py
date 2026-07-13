@@ -258,7 +258,7 @@ def request_template_generation(*, template: MessageTemplate, requested_by=None)
         source_app="campaigns",
         source_id=template.id,
     )
-    if ai_request.status == ai_request.Status.QUEUED:
+    if getattr(ai_request, "_should_enqueue", False):
         schema = current_schema()
         params = {"template_id": template.id, "name": template.name, "purpose": template.purpose}
         transaction.on_commit(lambda: _enqueue_template_generation(ai_request.pk, params, schema))

@@ -7,6 +7,7 @@ import re
 import pytest
 from django.conf import settings
 from django.core.cache import cache
+from django.test import override_settings
 from django_tenants.utils import schema_context
 
 pytestmark = pytest.mark.django_db
@@ -258,6 +259,39 @@ def test_password_reset_unknown_identifier_silent_202(tenant_a, client_for, sms_
     assert len(sms_outbox) == 0
 
 
+@override_settings(OTP_IDENTIFIER_RATE_LIMIT=2, OTP_IDENTIFIER_RATE_WINDOW_SECONDS=60)
+def test_password_reset_identifier_rate_limit_is_distributed(tenant_a, client_for):
+    client = client_for(tenant_a)
+    body = {"identifier": "+998905550001"}
+
+    assert client.post(RESET_REQUEST_URL, body, format="json").status_code == 202
+    assert client.post(RESET_REQUEST_URL, body, format="json").status_code == 202
+    assert client.post(RESET_REQUEST_URL, body, format="json").status_code == 429
+
+
+@override_settings(OTP_GLOBAL_RATE_LIMIT=2, OTP_GLOBAL_RATE_WINDOW_SECONDS=60)
+def test_password_reset_global_rate_limit_spans_tenants(tenant_a, tenant_b, client_for):
+    first = client_for(tenant_a).post(
+        RESET_REQUEST_URL,
+        {"identifier": "+998905550001"},
+        format="json",
+    )
+    second = client_for(tenant_b).post(
+        RESET_REQUEST_URL,
+        {"identifier": "+998905550002"},
+        format="json",
+    )
+    blocked = client_for(tenant_a).post(
+        RESET_REQUEST_URL,
+        {"identifier": "+998905550003"},
+        format="json",
+    )
+
+    assert first.status_code == 202
+    assert second.status_code == 202
+    assert blocked.status_code == 429
+
+
 def test_password_reset_wrong_code_400(tenant_a, client_for, user_in, sms_outbox):
     user = _password_user(tenant_a, user_in)
     client = client_for(tenant_a)
@@ -348,6 +382,7 @@ def test_logout_revokes_the_session(tenant_a, user_in, as_user):
     """Logout revokes the caller's session row, so the same Bearer key is rejected
     (authentication_failed) on the very next request — instant server-side revocation."""
     user = user_in(tenant_a, roles=["teacher"])
+    previous_token_version = user.token_version
     client = as_user(tenant_a, user)
     assert client.get(ME_URL).status_code == 200
 
@@ -356,6 +391,9 @@ def test_logout_revokes_the_session(tenant_a, user_in, as_user):
     resp = client.get(ME_URL)  # same key, now revoked (/me/ is a layered endpoint)
     assert resp.status_code == 401
     assert resp.json()["code"] == "authentication_failed"
+    with schema_context(tenant_a.schema_name):
+        user.refresh_from_db()
+        assert user.token_version == previous_token_version + 1
 
 
 def test_throttle_survives_non_string_identifier(tenant_a, client_for):

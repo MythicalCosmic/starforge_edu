@@ -151,6 +151,44 @@ def test_exam_generation_idempotency_keys_on_params(tenant_a):
         assert again.pk == easy.pk  # identical params -> idempotent
 
 
+def test_duplicate_queued_exam_request_is_not_enqueued_twice(
+    tenant_a, django_capture_on_commit_callbacks, monkeypatch
+):
+    """A retry/double-click that finds the existing QUEUED row must not publish
+    another Celery message for the same idempotency key."""
+    from django.core.cache import cache
+
+    from apps.ai import services
+    from apps.org.models import CenterSettings
+
+    _seed_ai(tenant_a, daily=1_000_000)
+    enqueued: list[int] = []
+    monkeypatch.setattr(
+        services,
+        "_enqueue_exam_generation",
+        lambda request_id, params, schema: enqueued.append(request_id),
+    )
+
+    with schema_context(tenant_a.schema_name):
+        center_settings = CenterSettings.load()
+        center_settings.ai_exam_generation_enabled = True
+        center_settings.save(update_fields=["ai_exam_generation_enabled"])
+        cache.clear()
+        params = {
+            "subject_id": 42,
+            "exam_type": "quiz",
+            "question_count": 10,
+            "difficulty": "easy",
+        }
+        with django_capture_on_commit_callbacks(execute=True):
+            first = services.request_exam_generation(**params)
+        with django_capture_on_commit_callbacks(execute=True):
+            again = services.request_exam_generation(**params)
+
+        assert again.pk == first.pk
+        assert enqueued == [first.pk]
+
+
 def test_redaction_applied_before_complete(tenant_a, monkeypatch):
     _seed_ai(tenant_a)
     from celery_tasks import ai_tasks
@@ -438,6 +476,46 @@ def test_requests_log_lists_for_teacher(tenant_a, as_role):
     resp = client.get("/api/v1/ai/requests/")
     assert resp.status_code == 200
     assert resp.json()["pagination"]["total"] == 3
+
+
+def test_requests_list_never_exposes_output_text(tenant_a, as_role):
+    _seed_ai(tenant_a)
+    client, user = as_role("teacher", tenant_a)
+    with schema_context(tenant_a.schema_name):
+        AIRequestFactory(requested_by=user, output_text="private generated feedback")
+
+    resp = client.get("/api/v1/ai/requests/")
+
+    assert resp.status_code == 200
+    assert "output_text" not in resp.json()["data"][0]
+
+
+def test_requester_can_read_own_ai_output(tenant_a, as_role):
+    _seed_ai(tenant_a)
+    client, user = as_role("teacher", tenant_a)
+    with schema_context(tenant_a.schema_name):
+        ai_request = AIRequestFactory(requested_by=user, output_text="private generated feedback")
+
+    resp = client.get(f"/api/v1/ai/requests/{ai_request.pk}/")
+
+    assert resp.status_code == 200
+    assert resp.json()["data"]["output_text"] == "private generated feedback"
+
+
+def test_other_reader_cannot_read_ai_output(tenant_a, as_role):
+    _seed_ai(tenant_a)
+    _, requester = as_role("teacher", tenant_a)
+    reader, _ = as_role("teacher", tenant_a)
+    with schema_context(tenant_a.schema_name):
+        ai_request = AIRequestFactory(
+            requested_by=requester,
+            output_text="private generated feedback",
+        )
+
+    resp = reader.get(f"/api/v1/ai/requests/{ai_request.pk}/")
+
+    assert resp.status_code == 200
+    assert "output_text" not in resp.json()["data"]
 
 
 def test_requests_log_cross_tenant_isolation(tenant_a, tenant_b, as_role):

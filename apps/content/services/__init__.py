@@ -435,7 +435,7 @@ def request_material_generation(*, material: LibraryMaterial, requested_by=None)
         source_app="content",
         source_id=material.id,
     )
-    if ai_request.status == ai_request.Status.QUEUED:
+    if getattr(ai_request, "_should_enqueue", False):
         schema = current_schema()
         params = {"material_id": material.id, "title": material.title, "topic": material.topic}
         transaction.on_commit(lambda: _enqueue_material_generation(ai_request.pk, params, schema))

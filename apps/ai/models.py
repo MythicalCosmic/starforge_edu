@@ -111,6 +111,10 @@ class AIRequest(models.Model):
     Token/cost columns are reconciled post-completion via ``record_usage``.
     """
 
+    # Transient service-layer signal; never persisted. It tells request entrypoints
+    # whether this invocation created/re-drove the row and therefore owns enqueueing.
+    _should_enqueue: bool
+
     class Status(models.TextChoices):
         QUEUED = "queued", _("Queued")
         RUNNING = "running", _("Running")

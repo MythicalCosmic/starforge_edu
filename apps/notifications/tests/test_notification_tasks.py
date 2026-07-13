@@ -260,3 +260,127 @@ def test_deliver_single_channel_second_run_is_noop(tenant_a, sms_outbox, django_
     assert r1 == "sent"
     assert r2 == "already_delivered"
     assert len(sms_outbox) == 1  # exactly one SMS, never two
+
+
+@time_machine.travel("2026-06-16 12:00:00 +05:00", tick=False)
+def test_provider_exception_does_not_abort_later_channels_and_is_retried(
+    tenant_a,
+    sms_outbox,
+    monkeypatch,
+    django_capture_on_commit_callbacks,
+):
+    import celery_tasks.notification_tasks as nt
+    from apps.notifications.models import Channel, EventType, Notification, NotificationDelivery
+    from infrastructure.email import email_client
+
+    user = _user_with_phone(tenant_a)
+    retry_calls: list[dict] = []
+    monkeypatch.setattr(nt.deliver_single_channel, "apply_async", lambda **kwargs: retry_calls.append(kwargs))
+
+    def unavailable_email(**kwargs):
+        raise ConnectionError("provider detail that must not be persisted")
+
+    monkeypatch.setattr(email_client, "send_email", unavailable_email)
+    with schema_context(tenant_a.schema_name):
+        notification = Notification.objects.create(
+            user=user,
+            event_type=EventType.FINANCE_INVOICE_ISSUED,
+            title="Invoice",
+            body="An invoice is ready.",
+        )
+        with django_capture_on_commit_callbacks(execute=True):
+            result = nt.dispatch_notification(
+                notification.pk,
+                channels=[Channel.EMAIL, Channel.SMS],
+            )
+
+        failed_email = NotificationDelivery.objects.get(
+            notification=notification,
+            channel=Channel.EMAIL,
+            status=NotificationDelivery.Status.FAILED,
+        )
+        assert failed_email.provider_response == {
+            "error": "ConnectionError",
+            "retryable": True,
+        }
+        assert NotificationDelivery.objects.filter(
+            notification=notification,
+            channel=Channel.SMS,
+            status=NotificationDelivery.Status.SENT,
+        ).exists()
+        assert result["results"][Channel.EMAIL] == "failed_retrying"
+        assert result["results"][Channel.SMS] == "sent"
+        assert retry_calls[0]["kwargs"]["attempt"] == 1
+
+        # The retry sends only the unfinished channel; the successful SMS stays
+        # terminal and cannot be duplicated by the fan-out retry path.
+        monkeypatch.setattr(email_client, "send_email", lambda **kwargs: None)
+        assert nt.deliver_single_channel(notification.pk, Channel.EMAIL, attempt=1) == "sent"
+        assert NotificationDelivery.objects.filter(
+            notification=notification,
+            channel=Channel.EMAIL,
+            status=NotificationDelivery.Status.SENT,
+        ).exists()
+
+    assert len(sms_outbox) == 1
+
+
+@time_machine.travel("2026-06-16 12:00:00 +05:00", tick=False)
+def test_push_retry_targets_only_the_failed_device(
+    tenant_a,
+    monkeypatch,
+    django_capture_on_commit_callbacks,
+):
+    import celery_tasks.notification_tasks as nt
+    from apps.notifications.models import Channel, EventType, Notification, NotificationDelivery
+    from apps.users.models import Device
+    from infrastructure.push import fcm_client
+
+    user = _user_with_phone(tenant_a)
+    retry_calls: list[dict] = []
+    monkeypatch.setattr(nt.deliver_single_channel, "apply_async", lambda **kwargs: retry_calls.append(kwargs))
+
+    class PartlyUnavailablePush:
+        def __init__(self):
+            self.calls: list[str] = []
+
+        def send(self, *, token, **kwargs):
+            self.calls.append(token)
+            if token == "fails-once":
+                raise ConnectionError("temporary push outage")
+            return {"success": True, "message_id": f"sent-{token}"}
+
+    first_client = PartlyUnavailablePush()
+    monkeypatch.setattr(fcm_client, "get_push_client", lambda: first_client)
+
+    with schema_context(tenant_a.schema_name):
+        Device.objects.create(user=user, device_id="device-1", platform="android", push_token="fails-once")
+        Device.objects.create(user=user, device_id="device-2", platform="ios", push_token="already-sent")
+        notification = Notification.objects.create(
+            user=user,
+            event_type=EventType.ASSIGNMENTS_CREATED,
+            title="Assignment",
+            body="A new assignment is ready.",
+        )
+        with django_capture_on_commit_callbacks(execute=True):
+            result = nt.dispatch_notification(notification.pk, channels=[Channel.PUSH])
+
+        assert result["results"][Channel.PUSH] == "failed_retrying"
+        assert retry_calls[0]["kwargs"]["attempt"] == 1
+        assert NotificationDelivery.objects.filter(
+            notification=notification,
+            channel=Channel.PUSH,
+            status=NotificationDelivery.Status.SENT,
+            provider_response__device_id="device-2",
+        ).exists()
+
+        retried_tokens: list[str] = []
+
+        class RecoveredPush:
+            def send(self, *, token, **kwargs):
+                retried_tokens.append(token)
+                return {"success": True, "message_id": f"retry-{token}"}
+
+        monkeypatch.setattr(fcm_client, "get_push_client", lambda: RecoveredPush())
+        assert nt.deliver_single_channel(notification.pk, Channel.PUSH, attempt=1) == "sent"
+        assert retried_tokens == ["fails-once"]

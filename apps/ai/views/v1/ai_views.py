@@ -25,6 +25,7 @@ from core.container import container
 from core.exceptions import NotFoundException, ValidationException
 from core.http import read_json
 from core.listing import apply_filters, paginate
+from core.permissions import _request_overrides, get_user_roles, has_permission_code
 from core.ratelimit import check_rate
 from core.responses import error, paginated, success
 from core.utils import current_schema
@@ -185,7 +186,13 @@ def ai_request_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
     req = _service().get_request(pk=pk)
     if req is None:
         raise NotFoundException(code="not_found")
-    return success(ai_request_to_dict(req))
+    roles = get_user_roles(request)
+    can_view_output = (
+        req.requested_by_id == request.user.id
+        or request.user.is_superuser
+        or has_permission_code(roles, "ai:manage", _request_overrides(request))
+    )
+    return success(ai_request_to_dict(req, include_output=can_view_output))
 
 
 # --- budget ----------------------------------------------------------------

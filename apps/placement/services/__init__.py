@@ -587,7 +587,7 @@ def request_placement_generation(
         source_app="placement",
         source_id=test.id,
     )
-    if ai_request.status == ai_request.Status.QUEUED:
+    if getattr(ai_request, "_should_enqueue", False):
         schema = current_schema()
         params = {
             "test_id": test.id,
@@ -726,7 +726,7 @@ def request_writing_marking(*, attempt: PlacementAttempt, requested_by=None):
         source_app="placement",
         source_id=attempt.id,
     )
-    if ai_request.status == ai_request.Status.QUEUED:
+    if getattr(ai_request, "_should_enqueue", False):
         schema = current_schema()
         transaction.on_commit(lambda: _enqueue_writing_marking(ai_request.pk, attempt.id, schema))
     return ai_request

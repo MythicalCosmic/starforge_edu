@@ -13,6 +13,9 @@ from core.openapi import openapi_schema_view
 
 urlpatterns = [
     path("admin/", admin.site.urls),
+    # Platform staff need an API session before they can call /platform/*.
+    # Role-native accounts remain tenant-only.
+    path("api/v1/auth/", include("apps.auth.urls_public")),
     # OpenAPI schema + Swagger/Redoc for the PUBLIC (platform/billing/webhooks) API. The same
     # view serves the platform schema here because django-tenants points request.urlconf at
     # config.urls_public on the public host.

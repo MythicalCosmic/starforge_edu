@@ -5,8 +5,8 @@ from __future__ import annotations
 from apps.ai.models import AIRequest, TenantAIBudget
 
 
-def ai_request_to_dict(req: AIRequest) -> dict:
-    return {
+def ai_request_to_dict(req: AIRequest, *, include_output: bool = False) -> dict:
+    data = {
         "id": req.id,
         "feature": req.feature,
         "status": req.status,
@@ -16,6 +16,12 @@ def ai_request_to_dict(req: AIRequest) -> dict:
         "created_at": req.created_at.isoformat(),
         "finished_at": req.finished_at.isoformat() if req.finished_at else None,
     }
+    # Restored model output can contain source-row content/PII. Collection views
+    # never expose it; the detail view opts in only for the original requester or
+    # an ai:manage holder.
+    if include_output:
+        data["output_text"] = req.output_text
+    return data
 
 
 def budget_to_dict(budget: TenantAIBudget) -> dict:

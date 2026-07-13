@@ -417,13 +417,13 @@ def _load_tenant_overrides() -> dict[str, dict[str, str]]:
     return out
 
 
-def _request_overrides(request: Request) -> dict[str, dict[str, str]]:
+def _request_overrides(request: AnyRequest) -> dict[str, dict[str, str]]:
     """The override map, fetched once per request and memoized (mirrors
     get_role_memberships) so multiple permission checks share a single query."""
     cached = getattr(request, "_perm_overrides_cache", None)
     if cached is None:
         cached = _load_tenant_overrides()
-        request._perm_overrides_cache = cached  # type: ignore[attr-defined]
+        request._perm_overrides_cache = cached  # type: ignore[union-attr]
     return cached
 
 

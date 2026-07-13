@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from django.db import transaction
 from django.utils import timezone
 
 from config.celery import app
@@ -27,8 +28,9 @@ logger = logging.getLogger("starforge.notifications")
 PUSH_DEAD_TOKEN_THRESHOLD = 3
 
 
-@app.task(bind=True, max_retries=5, default_retry_delay=60)
-def dispatch_notification(self, notification_id: int, *, channels: list[str] | None = None) -> dict[str, Any]:
+@app.task
+@transaction.atomic
+def dispatch_notification(notification_id: int, *, channels: list[str] | None = None) -> dict[str, Any]:
     """Resolve preferences + quiet hours and fan out to channels."""
     from apps.notifications.models import (
         Channel,
@@ -45,7 +47,9 @@ def dispatch_notification(self, notification_id: int, *, channels: list[str] | N
     from apps.org.selectors import get_center_settings
 
     try:
-        notification = Notification.objects.select_related("user").get(pk=notification_id)
+        notification = (
+            Notification.objects.select_for_update().select_related("user").get(pk=notification_id)
+        )
     except Notification.DoesNotExist:
         logger.warning("dispatch_notification: notification %s gone", notification_id)
         return {"notification_id": notification_id, "status": "missing"}
@@ -64,10 +68,7 @@ def dispatch_notification(self, notification_id: int, *, channels: list[str] | N
     for channel in target_channels:
         # Idempotent: an existing non-skip delivery means we already handled this
         # (notification, channel) — never double-send on a Celery retry.
-        existing = NotificationDelivery.objects.filter(notification=notification, channel=channel).exclude(
-            status=NotificationDelivery.Status.SKIPPED_QUIET_HOURS
-        )
-        if existing.exists():
+        if _channel_is_complete(notification, channel):
             results[channel] = "already_handled"
             continue
 
@@ -116,13 +117,39 @@ def dispatch_notification(self, notification_id: int, *, channels: list[str] | N
             results[channel] = "deferred_quiet_hours"
             continue
 
-        results[channel] = _deliver(notification, channel, context, render_template)
+        try:
+            results[channel] = _deliver(notification, channel, context, render_template)
+        except RetryableDeliveryError as exc:
+            logger.warning(
+                "notification %s channel %s needs retry (%s)",
+                notification_id,
+                channel,
+                type(exc.__cause__ or exc).__name__,
+            )
+            results[channel] = _schedule_channel_retry(notification.pk, channel, attempt=1)
+        except Exception as exc:
+            # Persist a sanitized attempt record and continue the fan-out. A broken
+            # provider must not suppress every later channel in ALL_CHANNELS.
+            logger.warning(
+                "notification %s channel %s failed (%s)",
+                notification_id,
+                channel,
+                type(exc).__name__,
+            )
+            _record_retryable_failure(notification, channel, exc)
+            results[channel] = _schedule_channel_retry(notification.pk, channel, attempt=1)
 
     return {"notification_id": notification_id, "results": results}
 
 
-@app.task(bind=True, max_retries=5, default_retry_delay=60)
-def deliver_single_channel(self, notification_id: int, channel: str, deferred_to: str | None = None) -> str:
+@app.task
+@transaction.atomic
+def deliver_single_channel(
+    notification_id: int,
+    channel: str,
+    deferred_to: str | None = None,
+    attempt: int = 0,
+) -> str:
     """Deliver one channel for one notification (used for quiet-hours deferral).
 
     Clears the prior SKIPPED_QUIET_HOURS marker so the idempotency guard in
@@ -147,7 +174,9 @@ def deliver_single_channel(self, notification_id: int, channel: str, deferred_to
             return "still_deferred"
 
     try:
-        notification = Notification.objects.select_related("user").get(pk=notification_id)
+        notification = (
+            Notification.objects.select_for_update().select_related("user").get(pk=notification_id)
+        )
     except Notification.DoesNotExist:
         return "missing"
 
@@ -156,12 +185,7 @@ def deliver_single_channel(self, notification_id: int, channel: str, deferred_to
     # already exists for (notification, channel), the window-end send already ran
     # — no-op. This complements the dispatch-side guard so the at-least-once
     # quiet-hours path never double-sends a paid SMS / push.
-    already_delivered = (
-        NotificationDelivery.objects.filter(notification=notification, channel=channel)
-        .exclude(status=NotificationDelivery.Status.SKIPPED_QUIET_HOURS)
-        .exists()
-    )
-    if already_delivered:
+    if _channel_is_complete(notification, channel):
         return "already_delivered"
 
     NotificationDelivery.objects.filter(
@@ -170,7 +194,26 @@ def deliver_single_channel(self, notification_id: int, channel: str, deferred_to
         status=NotificationDelivery.Status.SKIPPED_QUIET_HOURS,
     ).delete()
     context = dict(notification.data or {})
-    return _deliver(notification, channel, context, render_template)
+    try:
+        return _deliver(notification, channel, context, render_template)
+    except RetryableDeliveryError as exc:
+        logger.warning(
+            "notification %s channel %s retry %s failed (%s)",
+            notification_id,
+            channel,
+            attempt,
+            type(exc.__cause__ or exc).__name__,
+        )
+    except Exception as exc:
+        logger.warning(
+            "notification %s channel %s retry %s failed (%s)",
+            notification_id,
+            channel,
+            attempt,
+            type(exc).__name__,
+        )
+        _record_retryable_failure(notification, channel, exc)
+    return _schedule_channel_retry(notification.pk, channel, attempt=attempt + 1)
 
 
 def _deliver(notification, channel, context, render_template) -> str:
@@ -198,6 +241,102 @@ def _deliver(notification, channel, context, render_template) -> str:
     if channel == Channel.PUSH:
         return _deliver_push(notification, user, title, body, context)
     return "unknown_channel"
+
+
+class RetryableDeliveryError(RuntimeError):
+    """A provider attempt failed after its per-recipient outcome was recorded."""
+
+
+def _schedule_channel_retry(notification_id: int, channel: str, *, attempt: int) -> str:
+    """Queue a committed retry without rolling back the failure attempt row."""
+    if attempt > 5:
+        return "failed"
+
+    transaction.on_commit(
+        lambda: deliver_single_channel.apply_async(
+            kwargs={
+                "notification_id": notification_id,
+                "channel": channel,
+                "attempt": attempt,
+            },
+            countdown=60,
+        )
+    )
+    return "failed_retrying"
+
+
+def _channel_is_complete(notification, channel: str) -> bool:
+    """Return whether a retry has no unfinished destination for this channel.
+
+    Push legitimately has multiple delivery rows (one per device), so a blanket
+    unique constraint on ``(notification, channel)`` would corrupt its contract.
+    The notification row lock serializes workers while this guard checks every
+    active device independently.
+    """
+    from apps.notifications.models import Channel, NotificationDelivery
+
+    rows = list(
+        NotificationDelivery.objects.filter(notification=notification, channel=channel).values(
+            "status", "provider_response"
+        )
+    )
+    terminal = {
+        NotificationDelivery.Status.SENT,
+        NotificationDelivery.Status.SKIPPED_PREF,
+        NotificationDelivery.Status.DEAD_TOKEN,
+    }
+    if channel != Channel.PUSH:
+        return any(
+            row["status"] in terminal
+            or (
+                row["status"] == NotificationDelivery.Status.FAILED
+                and not (row["provider_response"] or {}).get("retryable", False)
+            )
+            for row in rows
+        )
+
+    if any(row["status"] == NotificationDelivery.Status.SKIPPED_PREF for row in rows):
+        return True
+
+    from apps.users.models import Device
+
+    active_device_ids = set(
+        Device.objects.filter(user=notification.user, revoked_at__isnull=True)
+        .exclude(push_token="")
+        .values_list("device_id", flat=True)
+    )
+    if not active_device_ids:
+        return bool(rows)
+
+    complete_device_ids = {
+        response.get("device_id")
+        for row in rows
+        if (response := row["provider_response"] or {}).get("device_id")
+        and (
+            row["status"] in terminal
+            or (
+                row["status"] == NotificationDelivery.Status.FAILED
+                and not response.get("retryable", False)
+            )
+        )
+    }
+    return active_device_ids.issubset(complete_device_ids)
+
+
+def _record_retryable_failure(notification, channel: str, exc: Exception, **extra):
+    """Persist only an exception class; provider messages may contain PII."""
+    from apps.notifications.models import NotificationDelivery
+
+    return _record(
+        notification,
+        channel,
+        NotificationDelivery.Status.FAILED,
+        provider_response={
+            **extra,
+            "error": type(exc).__name__,
+            "retryable": True,
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -275,10 +414,46 @@ def _deliver_push(notification, user, title, body, context) -> str:
     client = get_push_client()
     any_sent = False
     any_dead = False
+    retry_error: Exception | None = None
     for device in devices:
-        response = client.send(
-            token=device.push_token, title=title, body=body, data={k: str(v) for k, v in context.items()}
-        )
+        if _push_device_is_complete(notification, device.device_id):
+            continue
+        try:
+            response = client.send(
+                token=device.push_token,
+                title=title,
+                body=body,
+                data={k: str(v) for k, v in context.items()},
+            )
+        except Exception as exc:
+            failure_status = NotificationDelivery.Status.FAILED
+            if (
+                _consecutive_push_failures(user_id=user.pk, device_id=device.device_id) + 1
+                >= PUSH_DEAD_TOKEN_THRESHOLD
+            ):
+                Device.objects.filter(pk=device.pk).update(push_token="")
+                failure_status = NotificationDelivery.Status.DEAD_TOKEN
+                any_dead = True
+            if failure_status == NotificationDelivery.Status.FAILED:
+                _record_retryable_failure(
+                    notification,
+                    Channel.PUSH,
+                    exc,
+                    device_id=device.device_id,
+                )
+                retry_error = exc
+            else:
+                _record(
+                    notification,
+                    Channel.PUSH,
+                    failure_status,
+                    provider_response={
+                        "device_id": device.device_id,
+                        "error": type(exc).__name__,
+                        "retryable": False,
+                    },
+                )
+            continue
         if response.get("success"):
             any_sent = True
             _record(
@@ -303,9 +478,33 @@ def _deliver_push(notification, user, title, body, context) -> str:
                 failure_status,
                 provider_response={"device_id": device.device_id, **response},
             )
+    if retry_error is not None:
+        raise RetryableDeliveryError("push notification delivery failed") from retry_error
     if any_sent:
         return "sent"
     return "dead_token" if any_dead else "failed"
+
+
+def _push_device_is_complete(notification, device_id: str) -> bool:
+    from apps.notifications.models import Channel, NotificationDelivery
+
+    rows = NotificationDelivery.objects.filter(
+        notification=notification,
+        channel=Channel.PUSH,
+        provider_response__device_id=device_id,
+    ).values("status", "provider_response")
+    terminal = {
+        NotificationDelivery.Status.SENT,
+        NotificationDelivery.Status.DEAD_TOKEN,
+    }
+    return any(
+        row["status"] in terminal
+        or (
+            row["status"] == NotificationDelivery.Status.FAILED
+            and not (row["provider_response"] or {}).get("retryable", False)
+        )
+        for row in rows
+    )
 
 
 def _consecutive_push_failures(*, user_id: int, device_id: str) -> int:
