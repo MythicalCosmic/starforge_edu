@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+umask 077
+
 revision="${1:-}"
 [[ -n "$revision" ]] || { echo "usage: $0 <commit-or-ref>" >&2; exit 2; }
 
@@ -15,6 +17,15 @@ HEALTH_URL="${STARFORGE_HEALTH_URL:-https://starforge.78.111.91.113.nip.io/healt
   echo "Repository or compose environment is unavailable" >&2
   exit 1
 }
+
+# Compose needs a persistent source for the optional Firebase secret even when
+# push is disabled. Keep the inert sentinel outside the disposable worktree;
+# production settings reject it if push is ever enabled by mistake.
+disabled_firebase="${DEPLOY_DIR}/firebase.disabled.json"
+if [[ ! -e "$disabled_firebase" ]]; then
+  printf '{}\n' >"$disabled_firebase"
+  chmod 0600 "$disabled_firebase"
+fi
 
 exec 9>"$LOCK_FILE"
 flock -n 9 || { echo "Another deployment is already running" >&2; exit 1; }
@@ -79,6 +90,7 @@ echo "Running production configuration checks..."
 
 if [[ "${SKIP_BACKUP:-0}" != "1" ]]; then
   STARFORGE_REPO_DIR="$release_dir" "$release_dir/scripts/backup_production.sh"
+  STARFORGE_REPO_DIR="$release_dir" "$release_dir/scripts/verify_restore.sh"
 else
   echo "WARNING: pre-deploy backup was explicitly skipped" >&2
 fi

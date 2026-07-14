@@ -26,7 +26,9 @@ class AccountTypePermissionAdminForm(forms.ModelForm):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields["permission"].choices = _permission_choices()
+        permission_field = self.fields["permission"]
+        if isinstance(permission_field, forms.ChoiceField):
+            permission_field.choices = _permission_choices()
 
 
 class AccountTypePermissionInline(admin.TabularInline):

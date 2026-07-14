@@ -13,6 +13,7 @@ from datetime import time
 
 import pytest
 import time_machine
+from django.test import override_settings
 from django_tenants.utils import schema_context
 
 pytestmark = pytest.mark.django_db
@@ -42,6 +43,112 @@ def _set_quiet_hours(tenant, *, start, end):
         cs.quiet_hours_start = start
         cs.quiet_hours_end = end
         cs.save(update_fields=["quiet_hours_start", "quiet_hours_end"])
+
+
+@pytest.mark.parametrize(
+    ("channel", "setting_name"),
+    [
+        ("sms", "SMS_ENABLED"),
+        ("email", "EMAIL_ENABLED"),
+        ("push", "PUSH_NOTIFICATIONS_ENABLED"),
+    ],
+)
+def test_operator_disabled_channel_is_truthfully_skipped_and_idempotent(
+    tenant_a, monkeypatch, channel, setting_name
+):
+    import celery_tasks.notification_tasks as nt
+    from apps.notifications.models import Notification, NotificationDelivery
+
+    monkeypatch.setattr(
+        nt,
+        "_deliver",
+        lambda *_args, **_kwargs: pytest.fail("an operator-disabled channel reached its adapter"),
+    )
+    user = _user_with_phone(tenant_a)
+    with schema_context(tenant_a.schema_name):
+        notification = Notification.objects.create(
+            user=user,
+            event_type="attendance.absent",
+            title="Absent",
+            body="A learner is absent.",
+        )
+        with override_settings(**{setting_name: False}):
+            first = nt.dispatch_notification(notification.pk, channels=[channel])
+            second = nt.dispatch_notification(notification.pk, channels=[channel])
+
+        assert first["results"][channel] == "skipped_disabled"
+        assert second["results"][channel] == "already_handled"
+        delivery = NotificationDelivery.objects.get(notification=notification, channel=channel)
+        assert delivery.status == NotificationDelivery.Status.SKIPPED_DISABLED
+        assert delivery.provider_response == {"reason": "operator_disabled"}
+
+
+@override_settings(SMS_ENABLED=False, EMAIL_ENABLED=False, PUSH_NOTIFICATIONS_ENABLED=False)
+def test_all_external_channels_disabled_preserves_in_app_delivery(tenant_a, monkeypatch):
+    import celery_tasks.notification_tasks as nt
+    from apps.notifications.models import Channel, Notification, NotificationDelivery
+
+    pushed: list[int] = []
+    monkeypatch.setattr(
+        "apps.notifications.services.push_in_app",
+        lambda notification, _title, _body: pushed.append(notification.pk),
+    )
+    user = _user_with_phone(tenant_a)
+    with schema_context(tenant_a.schema_name):
+        notification = Notification.objects.create(
+            user=user,
+            event_type="attendance.absent",
+            title="Absent",
+            body="A learner is absent.",
+        )
+        result = nt.dispatch_notification(notification.pk, channels=[Channel.IN_APP])
+
+        assert result["results"][Channel.IN_APP] == "sent"
+        assert (
+            NotificationDelivery.objects.get(notification=notification, channel=Channel.IN_APP).status
+            == NotificationDelivery.Status.SENT
+        )
+        assert pushed == [notification.pk]
+
+
+@override_settings(SMS_ENABLED=False)
+def test_deferred_delivery_rechecks_operator_channel_switch(tenant_a, monkeypatch):
+    import celery_tasks.notification_tasks as nt
+    from apps.notifications.models import Channel, Notification, NotificationDelivery
+
+    monkeypatch.setattr(
+        nt,
+        "_deliver",
+        lambda *_args, **_kwargs: pytest.fail("a stale deferred task reached its adapter"),
+    )
+    user = _user_with_phone(tenant_a)
+    with schema_context(tenant_a.schema_name):
+        notification = Notification.objects.create(
+            user=user,
+            event_type="attendance.absent",
+            title="Absent",
+            body="A learner is absent.",
+        )
+        NotificationDelivery.objects.create(
+            notification=notification,
+            channel=Channel.SMS,
+            status=NotificationDelivery.Status.SKIPPED_QUIET_HOURS,
+        )
+
+        assert nt.deliver_single_channel(notification.pk, Channel.SMS) == "skipped_disabled"
+        assert not NotificationDelivery.objects.filter(
+            notification=notification,
+            channel=Channel.SMS,
+            status=NotificationDelivery.Status.SKIPPED_QUIET_HOURS,
+        ).exists()
+        assert (
+            NotificationDelivery.objects.filter(
+                notification=notification,
+                channel=Channel.SMS,
+                status=NotificationDelivery.Status.SKIPPED_DISABLED,
+            ).count()
+            == 1
+        )
 
 
 # --------------------------------------------------------------------------- #

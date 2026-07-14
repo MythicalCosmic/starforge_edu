@@ -192,8 +192,11 @@ networks:
     driver: bridge
 
 secrets:
+  # The deployment default is an inert persistent placeholder so a release with push
+  # explicitly disabled does not need fake credentials. When push is enabled,
+  # point this at the real service-account JSON; production settings validate it.
   firebase_credentials:
-    file: ${STARFORGE_FIREBASE_CREDENTIALS_FILE:-/root/starforge-deploy/secrets/firebase.json}
+    file: ${STARFORGE_FIREBASE_CREDENTIALS_FILE:-/root/starforge-deploy/firebase.disabled.json}
 
 volumes:
   sf_pg: {}

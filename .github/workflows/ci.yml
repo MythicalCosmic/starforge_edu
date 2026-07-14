@@ -79,6 +79,7 @@ jobs:
             -e ANTHROPIC_API_KEY='ci-only' \
             -e SOLIQ_API_URL='https://soliq.example.invalid' \
             -e SOLIQ_API_TOKEN='ci-only' \
+            -e PUSH_NOTIFICATIONS_ENABLED='False' \
             -e FCM_CREDENTIALS_FILE='/run/secrets/firebase.json' \
             starforge-ci:${{ github.sha }} manage.py check --deploy --fail-level WARNING
 

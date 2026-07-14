@@ -108,6 +108,7 @@ class NotificationDelivery(models.Model):
         SENT = "sent", _("Sent")
         FAILED = "failed", _("Failed")
         SKIPPED_PREF = "skipped_pref", _("Skipped (preference off)")
+        SKIPPED_DISABLED = "skipped_disabled", _("Skipped (channel disabled by operator)")
         SKIPPED_QUIET_HOURS = "skipped_quiet_hours", _("Skipped (quiet hours)")
         DEAD_TOKEN = "dead_token", _("Dead push token")
 

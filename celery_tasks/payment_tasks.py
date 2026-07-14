@@ -15,8 +15,13 @@ No weasyprint/Soliq call ever happens in a request handler (DoD #9).
 from __future__ import annotations
 
 import requests
+from django.conf import settings
 
 from config.celery import app
+
+
+def _fiscalization_enabled() -> bool:
+    return bool(getattr(settings, "FISCALIZATION_ENABLED", True))
 
 
 @app.task(
@@ -30,6 +35,9 @@ from config.celery import app
     retry_jitter=True,
 )
 def fiscalize_payment(self, payment_id: int) -> str | None:
+    if not _fiscalization_enabled():
+        return None
+
     from apps.payments.services import fiscalize_payment_body, mark_fiscal_failed
 
     try:
@@ -48,6 +56,9 @@ def fiscalize_payment(self, payment_id: int) -> str | None:
 @app.task
 def reconcile_fiscal_receipts() -> int:
     """Fan out durable fiscal-outbox recovery to every active tenant."""
+    if not _fiscalization_enabled():
+        return 0
+
     from django_tenants.utils import get_public_schema_name
 
     from apps.tenancy.models import Center
@@ -70,6 +81,9 @@ def reconcile_fiscal_receipts_for_schema() -> int:
     for completed rows predating that invariant as well, so a deployment upgrade
     cannot strand historical receipts merely because no outbox row existed yet.
     """
+    if not _fiscalization_enabled():
+        return 0
+
     from datetime import timedelta
 
     from django.db.models import Q

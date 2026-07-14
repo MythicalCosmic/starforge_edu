@@ -21,6 +21,9 @@ from typing import Any, ClassVar
 
 import requests
 from django.conf import settings
+from django.utils.translation import gettext_lazy as _
+
+from core.exceptions import ServiceUnavailableException
 
 logger = logging.getLogger("starforge.sms")
 
@@ -92,6 +95,11 @@ class EskizClient(SMSClient):
 
 
 def get_sms_client() -> SMSClient:
+    if not getattr(settings, "SMS_ENABLED", True):
+        raise ServiceUnavailableException(
+            _("SMS delivery is temporarily unavailable."),
+            code="sms_unavailable",
+        )
     if settings.ESKIZ_USE_MOCK:
         return MockEskizClient()
     return _real_sms_client(

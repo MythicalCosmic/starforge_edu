@@ -20,6 +20,50 @@ set +a
 : "${RESTIC_IMAGE:?RESTIC_IMAGE must be pinned}"
 : "${POSTGRES_IMAGE:?POSTGRES_IMAGE must be pinned}"
 
+BACKUP_MODE="${BACKUP_MODE:-offsite}"
+RESTIC_HOST="${RESTIC_HOST:-starforge-production}"
+restic_repository_args=()
+case "$BACKUP_MODE" in
+  offsite)
+    ;;
+  local)
+    : "${LOCAL_BACKUP_ROOT:?LOCAL_BACKUP_ROOT is required for local backups}"
+    [[ "$LOCAL_BACKUP_ROOT" == /* && "$LOCAL_BACKUP_ROOT" != "/" ]] || {
+      echo "LOCAL_BACKUP_ROOT must be an absolute non-root path" >&2
+      exit 1
+    }
+    local_backup_root="$(realpath -e -- "$LOCAL_BACKUP_ROOT")"
+    [[ "$local_backup_root" == "${LOCAL_BACKUP_ROOT%/}" ]] || {
+      echo "LOCAL_BACKUP_ROOT must not traverse symbolic links" >&2
+      exit 1
+    }
+    [[ "$(stat -c '%u:%g:%a' "$local_backup_root")" == "0:0:700" ]] || {
+      echo "LOCAL_BACKUP_ROOT must be owned by root:root with mode 0700" >&2
+      exit 1
+    }
+    case "${RESTIC_REPOSITORY:-}" in
+      /repository|/repository/*) ;;
+      *)
+        echo "Local RESTIC_REPOSITORY must be /repository or a child of it" >&2
+        exit 1
+        ;;
+    esac
+    restic_repository_args+=(
+      --network none
+      --mount "type=bind,src=${local_backup_root},dst=/repository"
+    )
+    ;;
+  *)
+    echo "BACKUP_MODE must be either local or offsite" >&2
+    exit 1
+    ;;
+esac
+
+restic_run() {
+  docker run --rm --env-file "$BACKUP_ENV" \
+    "${restic_repository_args[@]}" "$RESTIC_IMAGE" "$@"
+}
+
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/starforge-restore.XXXXXX")"
 container="starforge-restore-verify-$$"
 volume="starforge_restore_verify_$$"
@@ -35,10 +79,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "Restoring the latest encrypted PostgreSQL snapshot into an isolated directory..."
+snapshot="${STARFORGE_RESTORE_SNAPSHOT:-}"
+if [[ -z "$snapshot" && -r "${DEPLOY_DIR}/last_verified_backup" ]]; then
+  snapshot="$(<"${DEPLOY_DIR}/last_verified_backup")"
+fi
+snapshot="${snapshot:-latest}"
+
+echo "Restoring atomic snapshot $snapshot into an isolated directory..."
 docker run --rm --env-file "$BACKUP_ENV" \
+  "${restic_repository_args[@]}" \
   -v "$tmp_dir:/restore" "$RESTIC_IMAGE" \
-  restore latest --tag postgres --target /restore
+  restore "$snapshot" --host "$RESTIC_HOST" --tag starforge --target /restore
 
 dump_path="$(find "$tmp_dir" -type f -name postgres.dump -print -quit)"
 [[ -n "$dump_path" && -s "$dump_path" ]] || { echo "Restored dump is missing" >&2; exit 1; }
@@ -50,6 +101,7 @@ docker run --rm -v "$(dirname "$dump_path"):/restore:ro" "$POSTGRES_IMAGE" \
 
 docker volume create "$volume" >/dev/null
 docker run -d --name "$container" \
+  --memory=384m --cpus=0.5 --pids-limit=100 \
   -e POSTGRES_PASSWORD="$password" -e POSTGRES_DB=restore \
   -v "$volume:/var/lib/postgresql/data" "$POSTGRES_IMAGE" >/dev/null
 
@@ -61,7 +113,8 @@ for _ in $(seq 1 60); do
 done
 docker exec "$container" pg_isready -U postgres -d restore >/dev/null
 
-docker exec -i "$container" pg_restore -U postgres -d restore --exit-on-error <"$dump_path"
+docker exec -i "$container" pg_restore -U postgres -d restore \
+  --exit-on-error --no-owner --no-acl <"$dump_path"
 migration_count="$(docker exec "$container" psql -U postgres -d restore -v ON_ERROR_STOP=1 -Atc \
   "SELECT count(*) FROM django_migrations;")"
 schema_count="$(docker exec "$container" psql -U postgres -d restore -v ON_ERROR_STOP=1 -Atc \
@@ -69,16 +122,14 @@ schema_count="$(docker exec "$container" psql -U postgres -d restore -v ON_ERROR
 [[ "$migration_count" =~ ^[0-9]+$ && "$migration_count" -gt 0 ]]
 [[ "$schema_count" =~ ^[0-9]+$ && "$schema_count" -gt 0 ]]
 
-echo "Restoring object and deployment snapshots for structural verification..."
-docker run --rm --env-file "$BACKUP_ENV" \
-  -v "$tmp_dir:/restore" "$RESTIC_IMAGE" \
-  restore latest --tag minio --target /restore/minio
-test -d "$tmp_dir/minio"
-docker run --rm --env-file "$BACKUP_ENV" \
-  -v "$tmp_dir:/restore" "$RESTIC_IMAGE" \
-  restore latest --tag configuration --target /restore/configuration
-find "$tmp_dir/configuration" -type f -name app.env -print -quit | grep -q .
+echo "Checking restored object and deployment snapshots..."
+find "$tmp_dir" -type d -name minio -print -quit | grep -q .
+find "$tmp_dir" -type f -path '*/deployment/app.env' -print -quit | grep -q .
 
-docker run --rm --env-file "$BACKUP_ENV" "$RESTIC_IMAGE" check --read-data-subset=5%
+if [[ "$BACKUP_MODE" == "local" ]]; then
+  restic_run check --read-data
+else
+  restic_run check --read-data-subset=5%
+fi
 
 echo "Restore verification completed successfully."

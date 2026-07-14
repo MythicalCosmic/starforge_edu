@@ -30,8 +30,8 @@ def _code_from(sms_text: str) -> str:
     return match.group(1)
 
 
-def _password_user(tenant, user_in, *, roles=("teacher",), password=PASSWORD):
-    user = user_in(tenant, roles=list(roles))
+def _password_user(tenant, user_in, *, roles=("teacher",), password=PASSWORD, **kwargs):
+    user = user_in(tenant, roles=list(roles), **kwargs)
     with schema_context(tenant.schema_name):
         user.set_password(password)
         user.save(update_fields=["password"])
@@ -258,6 +258,79 @@ def test_password_reset_unknown_identifier_silent_202(tenant_a, client_for, sms_
     resp = client_for(tenant_a).post(RESET_REQUEST_URL, {"identifier": "+998905550001"}, format="json")
     assert resp.status_code == 202
     assert len(sms_outbox) == 0
+
+
+@override_settings(SMS_ENABLED=False)
+def test_password_reset_disabled_sms_is_uniform_and_never_dispatches(
+    tenant_a,
+    client_for,
+    user_in,
+    sms_outbox,
+):
+    """A disabled transport is reported before account lookup, with no OTP side effect."""
+    from apps.users.models import OTP
+
+    user = _password_user(tenant_a, user_in)
+    client = client_for(tenant_a)
+    known = client.post(RESET_REQUEST_URL, {"identifier": user.phone}, format="json")
+    unknown = client.post(RESET_REQUEST_URL, {"identifier": "+998905550099"}, format="json")
+
+    assert known.status_code == unknown.status_code == 503
+    assert known.json() == unknown.json()
+    assert known.json()["code"] == "password_reset_unavailable"
+    assert sms_outbox == []
+    with schema_context(tenant_a.schema_name):
+        assert not OTP.objects.exists()
+
+
+@override_settings(EMAIL_ENABLED=False)
+def test_password_reset_disabled_email_is_uniform_and_never_dispatches(
+    tenant_a,
+    client_for,
+    user_in,
+    monkeypatch,
+):
+    from apps.users.models import OTP
+
+    user = _password_user(tenant_a, user_in, email="known@example.com")
+    monkeypatch.setattr(
+        "apps.auth.services.send_email",
+        lambda **kwargs: pytest.fail("disabled email transport was called"),
+    )
+    client = client_for(tenant_a)
+    known = client.post(RESET_REQUEST_URL, {"identifier": user.email}, format="json")
+    unknown = client.post(RESET_REQUEST_URL, {"identifier": "unknown@example.com"}, format="json")
+
+    assert known.status_code == unknown.status_code == 503
+    assert known.json() == unknown.json()
+    assert known.json()["code"] == "password_reset_unavailable"
+    with schema_context(tenant_a.schema_name):
+        assert not OTP.objects.exists()
+
+
+def test_disabling_sms_rejects_an_already_issued_reset_capability(
+    tenant_a,
+    client_for,
+    user_in,
+    sms_outbox,
+):
+    user = _password_user(tenant_a, user_in)
+    client = client_for(tenant_a)
+    assert client.post(RESET_REQUEST_URL, {"identifier": user.phone}, format="json").status_code == 202
+    code = _code_from(sms_outbox[-1]["text"])
+
+    with override_settings(SMS_ENABLED=False):
+        disabled = client.post(
+            RESET_CONFIRM_URL,
+            {"identifier": user.phone, "code": code, "new_password": NEW_PASSWORD},
+            format="json",
+        )
+
+    assert disabled.status_code == 503
+    assert disabled.json()["code"] == "password_reset_unavailable"
+    with schema_context(tenant_a.schema_name):
+        user.refresh_from_db()
+        assert user.check_password(PASSWORD)
 
 
 def test_password_reset_confirm_does_not_reveal_account_existence(

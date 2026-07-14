@@ -119,6 +119,14 @@ class AuthenticationException(StarforgeError):
     default_detail = _("Authentication failed.")
 
 
+class ServiceUnavailableException(StarforgeError):
+    """503 for an intentionally disabled or temporarily unavailable capability."""
+
+    code = "service_unavailable"
+    status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    default_detail = _("Service unavailable.")
+
+
 class TenantContextMissing(StarforgeError):
     """Raised when tenant-scoped code runs without an active schema."""
 

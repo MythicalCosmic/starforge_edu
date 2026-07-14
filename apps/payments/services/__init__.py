@@ -16,6 +16,7 @@ from datetime import timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
@@ -148,11 +149,12 @@ def mark_payment_completed(
     # Post-payment fiscalization (D3-B-9) — Celery, idempotent.
     # Write the durable work marker before touching the broker. If Redis is
     # unavailable after commit, reconciliation can still discover this receipt.
-    FiscalReceipt.objects.get_or_create(payment=payment)
-    transaction.on_commit(
-        lambda: _enqueue_fiscalization(payment.pk, schema),
-        robust=True,
-    )
+    if _fiscalization_enabled():
+        FiscalReceipt.objects.get_or_create(payment=payment)
+        transaction.on_commit(
+            lambda: _enqueue_fiscalization(payment.pk, schema),
+            robust=True,
+        )
     return payment
 
 
@@ -189,9 +191,20 @@ def mark_payment_failed(*, payment_id: int, cancel_reason: int | None = None) ->
 
 
 def _enqueue_fiscalization(payment_id: int, schema: str) -> None:
+    if not _fiscalization_enabled():
+        return
     from celery_tasks.payment_tasks import fiscalize_payment
 
     fiscalize_payment.delay(payment_id, _schema_name=schema)
+
+
+def _fiscalization_enabled() -> bool:
+    """Whether the operator permits external fiscalization traffic.
+
+    This switch deliberately leaves finance and payment accounting available;
+    it suppresses only the Soliq outbox and provider call.
+    """
+    return bool(getattr(settings, "FISCALIZATION_ENABLED", True))
 
 
 # ---------------------------------------------------------------------------
@@ -825,6 +838,9 @@ def process_uzum_payment(*, payload: dict, invoice) -> Payment:
 def fiscalize_payment_body(payment_id: int) -> str | None:
     """Idempotent: an existing CONFIRMED FiscalReceipt short-circuits. Returns
     the fiscal sign. Stores the marker on the receipt row so a retry no-ops."""
+    if not _fiscalization_enabled():
+        return None
+
     # Claim under a row lock, then release the transaction before calling Soliq.
     # A slow external request must not pin the payment row or a DB connection.
     with transaction.atomic():

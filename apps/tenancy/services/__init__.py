@@ -296,6 +296,7 @@ def verify_domain(center: Center, *, claim_id, actor=None) -> Domain:
     if claim is None:
         raise NotFoundException(_("Domain claim does not belong to this center."))
     if claim.domain_record_id is not None:
+        assert claim.domain_record is not None
         return claim.domain_record
     if not verify_domain_txt(claim.domain, claim.verification_token):
         raise ValidationException(
@@ -308,6 +309,7 @@ def verify_domain(center: Center, *, claim_id, actor=None) -> Domain:
         # outer join cannot be locked).
         claim = DomainClaim.objects.select_for_update().get(tenant=center, pk=claim.pk)
         if claim.domain_record_id is not None:
+            assert claim.domain_record is not None
             return claim.domain_record
         existing = Domain.objects.select_for_update().filter(domain=claim.domain).first()
         if existing is not None and existing.tenant_id != center.pk:

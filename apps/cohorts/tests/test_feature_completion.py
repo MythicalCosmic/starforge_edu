@@ -42,11 +42,11 @@ def test_remove_student_ends_membership_and_clears_primary(director, tenant_a):
         format="json",
     )
     assert resp.status_code == 200, resp.content
-    assert resp.json()["data"]["end_date"] == timezone.now().date().isoformat()
+    assert resp.json()["data"]["end_date"] == timezone.localdate().isoformat()
 
     with schema_context(tenant_a.schema_name):
         membership.refresh_from_db()
-        assert membership.end_date == timezone.now().date()  # end-dated, not deleted
+        assert membership.end_date == timezone.localdate()  # end-dated, not deleted
         assert membership.moved_reason == "left_group"
         assert CohortMembership.objects.filter(student=student).count() == 1  # history kept
         student.refresh_from_db()

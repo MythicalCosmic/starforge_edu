@@ -6,6 +6,7 @@ from threading import Barrier
 
 import pytest
 from django.db import close_old_connections
+from django.test import override_settings
 from django_tenants.utils import schema_context
 
 from apps.payments.models import Payment
@@ -219,6 +220,65 @@ def test_provider_confirmed_payme_cancel_records_unallocated_refund(tenant_a):
         entry = LedgerEntry.objects.get(pk=refund.ledger_entry_id)
         assert entry.direction == LedgerEntry.Direction.OUT
         assert entry.amount_uzs == payment.amount_uzs
+
+
+@override_settings(FISCALIZATION_ENABLED=False)
+def test_payment_completion_skips_fiscal_outbox_when_operator_disabled(tenant_a, monkeypatch):
+    from apps.payments import services
+    from apps.payments.models import FiscalReceipt
+
+    enqueued: list[tuple[int, str]] = []
+    monkeypatch.setattr(
+        services,
+        "_enqueue_fiscalization",
+        lambda payment_id, schema: enqueued.append((payment_id, schema)),
+    )
+
+    with schema_context(tenant_a.schema_name):
+        payment = Payment.objects.create(
+            provider=Payment.Method.CASH,
+            amount_uzs=Decimal("10.00"),
+            status=Payment.Status.PENDING,
+            idempotency_key="fiscalization-operator-disabled",
+        )
+        completed = services.mark_payment_completed(payment_id=payment.pk, auto_allocate=False)
+
+        assert completed.status == Payment.Status.COMPLETED
+        assert not FiscalReceipt.objects.filter(payment=payment).exists()
+        assert enqueued == []
+
+
+@override_settings(FISCALIZATION_ENABLED=False)
+def test_disabled_fiscalization_tasks_do_not_seed_or_call_provider(tenant_a, monkeypatch):
+    from apps.payments import services
+    from apps.payments.models import FiscalReceipt
+    from celery_tasks import payment_tasks
+
+    monkeypatch.setattr(
+        "infrastructure.fiscal.get_fiscal_client",
+        lambda: pytest.fail("disabled fiscalization must not construct a provider client"),
+    )
+    enqueued: list[int] = []
+    monkeypatch.setattr(
+        payment_tasks.fiscalize_payment,
+        "delay",
+        lambda payment_id, **_kwargs: enqueued.append(payment_id),
+    )
+
+    with schema_context(tenant_a.schema_name):
+        payment = Payment.objects.create(
+            provider=Payment.Method.CASH,
+            amount_uzs=Decimal("10.00"),
+            status=Payment.Status.COMPLETED,
+            idempotency_key="disabled-fiscal-task-guard",
+        )
+        assert services.fiscalize_payment_body(payment.pk) is None
+        assert payment_tasks.fiscalize_payment.run(payment.pk) is None
+        assert payment_tasks.reconcile_fiscal_receipts_for_schema.run() == 0
+        assert not FiscalReceipt.objects.filter(payment=payment).exists()
+
+    assert payment_tasks.reconcile_fiscal_receipts.run() == 0
+    assert enqueued == []
 
 
 def test_fiscalization_task_acknowledges_only_after_success():

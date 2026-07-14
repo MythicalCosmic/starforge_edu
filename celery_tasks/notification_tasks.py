@@ -41,6 +41,7 @@ def dispatch_notification(notification_id: int, *, channels: list[str] | None = 
         ALL_CHANNELS,
         channel_enabled_for_user,
         in_quiet_hours,
+        operator_channel_enabled,
         quiet_hours_eta,
         render_template,
     )
@@ -68,6 +69,16 @@ def dispatch_notification(notification_id: int, *, channels: list[str] | None = 
         # (notification, channel) — never double-send on a Celery retry.
         if _channel_is_complete(notification, channel):
             results[channel] = "already_handled"
+            continue
+
+        if not operator_channel_enabled(channel):
+            _record(
+                notification,
+                channel,
+                NotificationDelivery.Status.SKIPPED_DISABLED,
+                provider_response={"reason": "operator_disabled"},
+            )
+            results[channel] = "skipped_disabled"
             continue
 
         if not channel_enabled_for_user(user_id=user.pk, event_type=event_type, channel=channel):
@@ -162,7 +173,7 @@ def deliver_single_channel(
     from datetime import datetime
 
     from apps.notifications.models import Notification, NotificationDelivery
-    from apps.notifications.services import render_template
+    from apps.notifications.services import operator_channel_enabled, render_template
 
     if deferred_to:
         scheduled = datetime.fromisoformat(deferred_to)
@@ -183,6 +194,20 @@ def deliver_single_channel(
     # quiet-hours path never double-sends a paid SMS / push.
     if _channel_is_complete(notification, channel):
         return "already_delivered"
+
+    if not operator_channel_enabled(channel):
+        NotificationDelivery.objects.filter(
+            notification=notification,
+            channel=channel,
+            status=NotificationDelivery.Status.SKIPPED_QUIET_HOURS,
+        ).delete()
+        _record(
+            notification,
+            channel,
+            NotificationDelivery.Status.SKIPPED_DISABLED,
+            provider_response={"reason": "operator_disabled"},
+        )
+        return "skipped_disabled"
 
     NotificationDelivery.objects.filter(
         notification=notification,
@@ -279,6 +304,7 @@ def _channel_is_complete(notification, channel: str) -> bool:
     terminal = {
         NotificationDelivery.Status.SENT,
         NotificationDelivery.Status.SKIPPED_PREF,
+        NotificationDelivery.Status.SKIPPED_DISABLED,
         NotificationDelivery.Status.DEAD_TOKEN,
     }
     if channel != Channel.PUSH:
@@ -291,7 +317,11 @@ def _channel_is_complete(notification, channel: str) -> bool:
             for row in rows
         )
 
-    if any(row["status"] == NotificationDelivery.Status.SKIPPED_PREF for row in rows):
+    if any(
+        row["status"]
+        in (NotificationDelivery.Status.SKIPPED_PREF, NotificationDelivery.Status.SKIPPED_DISABLED)
+        for row in rows
+    ):
         return True
 
     from apps.users.models import Device

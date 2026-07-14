@@ -14,6 +14,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import timedelta
 
+from django.conf import settings
 from django.db import connection, transaction
 from django.db.models import Count, Q
 from django.utils import timezone
@@ -21,7 +22,12 @@ from django.utils.translation import gettext_lazy as _
 
 from apps.campaigns.models import Campaign, CampaignRecipient, DoNotContact, MessageTemplate
 from apps.students.models import StudentProfile
-from core.exceptions import NotFoundException, UnprocessableEntity, ValidationException
+from core.exceptions import (
+    NotFoundException,
+    ServiceUnavailableException,
+    UnprocessableEntity,
+    ValidationException,
+)
 from core.utils import current_schema
 from infrastructure.sms.eskiz_client import get_sms_client
 
@@ -30,6 +36,14 @@ logger = logging.getLogger(__name__)
 _CAMPAIGN_SEND_LEASE = timedelta(minutes=15)
 _CAMPAIGN_DISPATCH_BATCH_SIZE = 100
 _CAMPAIGN_HEARTBEAT_EVERY = 25
+
+
+def _ensure_sms_enabled() -> None:
+    if not getattr(settings, "SMS_ENABLED", True):
+        raise ServiceUnavailableException(
+            _("SMS campaigns are temporarily unavailable."),
+            code="sms_unavailable",
+        )
 
 
 def _resolve_phone(student: StudentProfile) -> str:
@@ -128,6 +142,7 @@ def send_campaign(*, campaign_id: int, actor=None) -> Campaign:
     lease is replaced and resumed from the durable recipient rows. The provider loop is
     never executed in the HTTP request in production.
     """
+    _ensure_sms_enabled()
     now = timezone.now()
     stale_before = now - _CAMPAIGN_SEND_LEASE
     claimed = False
@@ -212,6 +227,7 @@ def process_campaign_delivery(*, campaign_id: int, claim_token: str) -> str | No
     after an ambiguous worker crash we may under-deliver, but never knowingly
     double-charge/double-text a family.
     """
+    _ensure_sms_enabled()
     with _campaign_delivery_mutex(campaign_id=campaign_id) as acquired:
         if not acquired:
             # A redelivered copy of this task is already running. The live worker owns

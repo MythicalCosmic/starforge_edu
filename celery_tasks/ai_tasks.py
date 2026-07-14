@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 
+from django.conf import settings
 from django.utils import timezone
 
 from config.celery import app
@@ -28,6 +29,10 @@ from config.celery import app
 from infrastructure.ai.anthropic_client import complete
 
 logger = logging.getLogger("starforge.ai")
+
+
+def _ai_enabled() -> bool:
+    return bool(getattr(settings, "AI_ENABLED", True))
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +55,9 @@ def _run_request(ai_request_id: int, *, build_prompt) -> str:
     if request.status not in (AIRequest.Status.QUEUED, AIRequest.Status.RUNNING):
         # Already terminal (succeeded / failed / denied) — idempotent no-op.
         return request.status
+
+    if not _ai_enabled():
+        return _mark_operator_disabled(request.pk)
 
     request.status = AIRequest.Status.RUNNING
     request.started_at = request.started_at or timezone.now()
@@ -115,6 +123,27 @@ def _mark_failed(ai_request_id: int, exc: Exception) -> None:
     request.save(update_fields=["status", "error_detail", "finished_at"])
 
 
+def _mark_operator_disabled(ai_request_id: int) -> str:
+    """Terminalize stale queued work and release its token reservation.
+
+    A job may already be in Redis when operations disable AI. Marking it failed
+    makes the state truthful and re-drivable after AI is enabled again, while a
+    plain no-op would strand both the request and its reserved budget forever.
+    """
+    from apps.ai.models import AIRequest
+    from apps.ai.services import release_reservation
+
+    request = AIRequest.objects.get(pk=ai_request_id)
+    if request.status not in (AIRequest.Status.QUEUED, AIRequest.Status.RUNNING):
+        return request.status
+    release_reservation(ai_request_id=ai_request_id)
+    request.status = AIRequest.Status.FAILED
+    request.error_detail = "AI is disabled by the operator."
+    request.finished_at = timezone.now()
+    request.save(update_fields=["status", "error_detail", "finished_at"])
+    return request.status
+
+
 def _run_with_retry(task, ai_request_id: int, *, build_prompt) -> str | None:
     """Run a request, retrying transient failures with backoff.
 
@@ -142,6 +171,9 @@ def _run_with_retry(task, ai_request_id: int, *, build_prompt) -> str | None:
 def run_assignment_feedback(self, submission_id: int, *, requested_by: int | None = None) -> str | None:
     """Generate AI feedback for one submission and store it on its
     ``SubmissionGrade.ai_feedback`` (the reserved Day-2 field)."""
+    if not _ai_enabled():
+        return None
+
     from apps.ai.models import AIFeature
     from apps.ai.services import AIBudgetExceeded, check_and_reserve_budget
     from apps.assignments.models import Submission, SubmissionGrade
@@ -248,6 +280,9 @@ def run_exam_generation(self, ai_request_id: int, *, params: dict | None = None)
 def run_content_summary(self, lesson_file_id: int, *, requested_by: int | None = None) -> str | None:
     """Summarize a confirmed content file; the summary is stored on the
     ``AIRequest`` output (a future content field can read it)."""
+    if not _ai_enabled():
+        return None
+
     from apps.ai.models import AIFeature
     from apps.ai.services import AIBudgetExceeded, check_and_reserve_budget
     from apps.content.models import LessonFile

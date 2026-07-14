@@ -37,10 +37,12 @@ env = environ.Env(
     ESKIZ_PASSWORD=(str, ""),
     ESKIZ_FROM=(str, "4546"),  # TD-17: approved sender nick; 4546 is Eskiz's test sender
     ESKIZ_USE_MOCK=(bool, True),
+    SMS_ENABLED=(bool, True),
     NUM_PROXIES=(int, 0),  # trusted reverse-proxy hops for X-Forwarded-For (0 = trust REMOTE_ADDR only)
     SESSION_TTL_DAYS=(int, 7),
     ANTHROPIC_API_KEY=(str, ""),
     ANTHROPIC_USE_MOCK=(bool, True),  # D4-LA-2 (TD-2): mock-first; production.py sets False
+    AI_ENABLED=(bool, True),
     FIELD_ENCRYPTION_KEY=(str, ""),  # TD-11 Fernet key (O-11); dev/test override locally
     DEFAULT_FROM_EMAIL=(str, "noreply@starforge.uz"),
     EMAIL_HOST=(str, "localhost"),
@@ -48,6 +50,7 @@ env = environ.Env(
     EMAIL_HOST_USER=(str, ""),
     EMAIL_HOST_PASSWORD=(str, ""),
     EMAIL_USE_TLS=(bool, False),
+    EMAIL_ENABLED=(bool, True),
     # --- Day 3: payment providers (TD-6), mock-first (TD-2). Per-tenant merchant
     # credentials live encrypted in payments.ProviderConfig; these are toggles +
     # redirect bases only. ---
@@ -62,9 +65,11 @@ env = environ.Env(
     SOLIQ_API_URL=(str, ""),
     SOLIQ_API_TOKEN=(str, ""),
     SOLIQ_QR_BASE_URL=(str, "https://ofd.soliq.uz/check"),
+    FISCALIZATION_ENABLED=(bool, True),
     # --- FCM push (TD-15), mock-first [OWNER:O-7] ---
     FCM_USE_MOCK=(bool, True),
     FCM_CREDENTIALS_FILE=(str, ""),
+    PUSH_NOTIFICATIONS_ENABLED=(bool, True),
     # --- Billing / paywall (TD-8) ---
     BILLING_TRIAL_GRACE_DAYS=(int, 3),
     BILLING_DUNNING_DAYS=(int, 7),
@@ -584,6 +589,7 @@ EMAIL_PORT = env("EMAIL_PORT")
 EMAIL_HOST_USER = env("EMAIL_HOST_USER")
 EMAIL_HOST_PASSWORD = env("EMAIL_HOST_PASSWORD")
 EMAIL_USE_TLS = env("EMAIL_USE_TLS")
+EMAIL_ENABLED = env("EMAIL_ENABLED")
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -627,6 +633,7 @@ ESKIZ_EMAIL = env("ESKIZ_EMAIL")
 ESKIZ_PASSWORD = env("ESKIZ_PASSWORD")
 ESKIZ_FROM = env("ESKIZ_FROM")  # TD-17: sender ID (was hardcoded "4546")
 ESKIZ_USE_MOCK = env("ESKIZ_USE_MOCK")
+SMS_ENABLED = env("SMS_ENABLED")
 
 ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY")
 ANTHROPIC_DEFAULT_MODEL = "claude-sonnet-4-6"
@@ -634,6 +641,7 @@ ANTHROPIC_DEFAULT_MODEL = "claude-sonnet-4-6"
 # a deterministic mock + fake usage with ZERO HTTP. Default True outside
 # production; production.py forces it False (real key required, [OWNER:O-2]).
 ANTHROPIC_USE_MOCK = env("ANTHROPIC_USE_MOCK")
+AI_ENABLED = env("AI_ENABLED")
 
 # TD-11 field encryption (O-11). Empty by default; dev/test set a deterministic
 # throwaway key, prod REQUIRES a real one (core.fields raises without it).
@@ -686,10 +694,12 @@ SOLIQ_USE_MOCK = env("SOLIQ_USE_MOCK")
 SOLIQ_API_URL = env("SOLIQ_API_URL")
 SOLIQ_API_TOKEN = env("SOLIQ_API_TOKEN")
 SOLIQ_QR_BASE_URL = env("SOLIQ_QR_BASE_URL")
+FISCALIZATION_ENABLED = env("FISCALIZATION_ENABLED")
 
 # FCM push (TD-15) [OWNER:O-7]
 FCM_USE_MOCK = env("FCM_USE_MOCK")
 FCM_CREDENTIALS_FILE = env("FCM_CREDENTIALS_FILE")
+PUSH_NOTIFICATIONS_ENABLED = env("PUSH_NOTIFICATIONS_ENABLED")
 
 # Billing / paywall (TD-8)
 BILLING_TRIAL_GRACE_DAYS = env("BILLING_TRIAL_GRACE_DAYS")

@@ -1,12 +1,24 @@
 """Production settings."""
 
+import json
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from django.core.exceptions import ImproperlyConfigured
 from django.utils.csp import CSP
 
 from .base import *  # noqa: F403
-from .base import CORS_ALLOWED_ORIGINS, CSRF_TRUSTED_ORIGINS, FIELD_ENCRYPTION_KEY, env
+from .base import (
+    AI_ENABLED,
+    CORS_ALLOWED_ORIGINS,
+    CSRF_TRUSTED_ORIGINS,
+    EMAIL_ENABLED,
+    FIELD_ENCRYPTION_KEY,
+    FISCALIZATION_ENABLED,
+    PUSH_NOTIFICATIONS_ENABLED,
+    SMS_ENABLED,
+    env,
+)
 
 DEBUG = False
 
@@ -71,7 +83,7 @@ def _require_service_url(name: str, *, schemes: tuple[str, ...]) -> str:
 # an unrelated localhost database/cache.
 _require_service_url("DATABASE_URL", schemes=("postgres", "postgresql"))
 _require_service_url("REDIS_URL", schemes=("redis", "rediss"))
-if env("EMAIL_HOST").strip().lower() in {"", "localhost", "127.0.0.1", "::1"}:
+if EMAIL_ENABLED and env("EMAIL_HOST").strip().lower() in {"", "localhost", "127.0.0.1", "::1"}:
     raise ImproperlyConfigured("EMAIL_HOST must be configured explicitly in production.")
 
 SECURE_SSL_REDIRECT = True
@@ -141,14 +153,28 @@ def _require_credentials(integration: str, *names: str) -> None:
         )
 
 
-_disabled_apps = set(env.list("DISABLED_APPS", default=[]))
-_require_credentials("Eskiz SMS", "ESKIZ_EMAIL", "ESKIZ_PASSWORD", "ESKIZ_FROM")
-if "ai" not in _disabled_apps:
+def _validate_firebase_credentials() -> None:
+    path = Path(env("FCM_CREDENTIALS_FILE"))
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ImproperlyConfigured(
+            "Firebase push is enabled but FCM_CREDENTIALS_FILE is not readable service-account JSON."
+        ) from exc
+    required = {"type", "project_id", "private_key", "client_email"}
+    if payload.get("type") != "service_account" or not all(payload.get(key) for key in required):
+        raise ImproperlyConfigured("Firebase push is enabled but its service-account JSON is incomplete.")
+
+
+if SMS_ENABLED:
+    _require_credentials("Eskiz SMS", "ESKIZ_EMAIL", "ESKIZ_PASSWORD", "ESKIZ_FROM")
+if AI_ENABLED:
     _require_credentials("Anthropic AI", "ANTHROPIC_API_KEY")
-if not {"finance", "payments"}.issubset(_disabled_apps):
+if FISCALIZATION_ENABLED:
     _require_credentials("Soliq fiscalization", "SOLIQ_API_URL", "SOLIQ_API_TOKEN")
-if "notifications" not in _disabled_apps:
+if PUSH_NOTIFICATIONS_ENABLED:
     _require_credentials("Firebase push", "FCM_CREDENTIALS_FILE")
+    _validate_firebase_credentials()
 
 # Structured JSON logging in production only (D1-LA-10) — dev/test stay human.
 LOGGING["formatters"]["json"] = {  # type: ignore[index]  # noqa: F405

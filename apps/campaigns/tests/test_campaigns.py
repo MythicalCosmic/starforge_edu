@@ -4,6 +4,7 @@ phones), send once via the Eskiz client, and record who was contacted / who land
 from __future__ import annotations
 
 import pytest
+from django.test import override_settings
 from django_tenants.utils import schema_context
 
 from core.permissions import Role
@@ -75,6 +76,29 @@ def test_create_and_send_campaign_texts_recipients(tenant_a, user_in, as_user, s
     assert len(sms_outbox) == 3
     assert all(m["text"] == "Class resumes Monday" for m in sms_outbox)
     assert {r["status"] for r in _recipients(client, cid)} == {"sent"}
+
+
+@override_settings(SMS_ENABLED=False)
+def test_operator_disabled_sms_rejects_campaign_without_claiming_or_sending(
+    tenant_a, user_in, as_user, sms_outbox
+):
+    from apps.campaigns.models import Campaign
+
+    branch = _branch(tenant_a)
+    with schema_context(tenant_a.schema_name):
+        _student(branch)
+    client = as_user(tenant_a, user_in(tenant_a, roles=[Role.REGISTRAR], branch=branch))
+    campaign_id = _create(client, branch=branch.id)["id"]
+
+    response = _send(client, campaign_id)
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "sms_unavailable"
+    assert sms_outbox == []
+    with schema_context(tenant_a.schema_name):
+        campaign = Campaign.objects.get(pk=campaign_id)
+        assert campaign.status == Campaign.Status.DRAFT
+        assert campaign.send_claim_token is None
 
 
 def test_send_is_idempotent(tenant_a, user_in, as_user, sms_outbox):

@@ -35,6 +35,7 @@ from datetime import datetime, time, timedelta
 from string import Template
 from typing import Any
 
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
@@ -62,6 +63,22 @@ _SMS_DEFAULT_ON = {
     EventType.FINANCE_PAYMENT_REMINDER,
 }
 _EMAIL_DEFAULT_ON_PREFIXES = ("finance.", "billing.")
+
+_OPERATOR_CHANNEL_FLAGS: dict[str, str] = {
+    Channel.SMS: "SMS_ENABLED",
+    Channel.EMAIL: "EMAIL_ENABLED",
+    Channel.PUSH: "PUSH_NOTIFICATIONS_ENABLED",
+}
+
+
+def operator_channel_enabled(channel: str) -> bool:
+    """Whether operations permit this outbound notification channel.
+
+    In-app delivery is intentionally always available here: it is the durable
+    feed and realtime websocket path, not an external provider.
+    """
+    flag = _OPERATOR_CHANNEL_FLAGS.get(channel)
+    return True if flag is None else bool(getattr(settings, flag, True))
 
 
 def default_channel_enabled(event_type: str, channel: str) -> bool:

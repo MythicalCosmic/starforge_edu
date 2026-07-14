@@ -28,6 +28,7 @@ from apps.users.models import OTP
 from apps.users.services import bump_token_version, set_user_password
 from core.exceptions import (
     AuthenticationException,
+    ServiceUnavailableException,
     StarforgeError,
     StrOrPromise,
     ThrottledException,
@@ -261,6 +262,24 @@ def _channel_for(identifier: str) -> str:
     return OTP.CHANNEL_EMAIL if "@" in identifier else OTP.CHANNEL_SMS
 
 
+def _ensure_password_reset_channel_enabled(identifier: str) -> None:
+    """Fail uniformly before account lookup when the requested transport is off.
+
+    A provider guard inside ``send_otp`` alone would make a known identifier return
+    503 while an unknown identifier still returned the anti-enumeration 202.  Keep
+    this check independent of account existence and reuse it on confirmation so a
+    previously issued capability cannot be consumed while recovery is disabled.
+    """
+
+    channel = _channel_for(identifier)
+    setting_name = "EMAIL_ENABLED" if channel == OTP.CHANNEL_EMAIL else "SMS_ENABLED"
+    if not getattr(settings, setting_name, True):
+        raise ServiceUnavailableException(
+            _("Password reset is temporarily unavailable."),
+            code="password_reset_unavailable",
+        )
+
+
 def _normalize(identifier: str) -> str:
     if "@" in identifier:
         return identifier.lower().strip()
@@ -320,6 +339,7 @@ def send_otp(
 
     identifier = _normalize(identifier)
     channel = _channel_for(identifier)
+    _ensure_password_reset_channel_enabled(identifier)
 
     _enforce_cooldown(
         identifier,
@@ -452,6 +472,9 @@ def request_password_reset(
     per-IP distinct-identifier cap is enforced BEFORE the existence check so
     probing sweeps still get throttled."""
     identifier = _normalize(identifier)
+    # This must precede `_resettable_account`: disabled recovery must answer
+    # identically for known and unknown identifiers (no status/timing oracle).
+    _ensure_password_reset_channel_enabled(identifier)
     # Distributed SMS-cost protection. Run before account lookup so known and
     # unknown identifiers remain indistinguishable, and hash PII in cache keys.
     from core.ratelimit import check_rate
@@ -505,6 +528,7 @@ def reset_password(
     """Complete a password reset: verify the OTP, set the password, end all
     sessions. The user logs in fresh with the new password afterwards."""
     identifier = _normalize(identifier)
+    _ensure_password_reset_channel_enabled(identifier)
     user = _resettable_account(identifier, account_type=account_type)
     # Apply account-independent password policy first so universally weak input
     # behaves identically for known and unknown identifiers. Account-specific

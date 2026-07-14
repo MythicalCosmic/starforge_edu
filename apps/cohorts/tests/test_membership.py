@@ -80,7 +80,7 @@ def test_cohort_move_keeps_history(director, tenant_a):
 
     with schema_context(tenant_a.schema_name):
         old.refresh_from_db()  # end-dated, never deleted
-        assert old.end_date == timezone.now().date()
+        assert old.end_date == timezone.localdate()
         assert old.moved_reason == "schedule_conflict"
         active = CohortMembership.objects.get(student=student, end_date__isnull=True)
         assert active.cohort_id == cohort_b.id
