@@ -24,6 +24,8 @@ def test_storage_bootstrap_keeps_media_private_and_static_read_only():
     assert '"Action": ["s3:GetObject"]' in CONFIGURE
     assert "s3:ListBucket" not in CONFIGURE
     assert "STORAGE_CORS_ALLOWED_ORIGINS" in CONFIGURE
+    assert "MINIO_API_CORS_ALLOW_ORIGIN" in CONFIGURE
+    assert "mc cors set" not in CONFIGURE
     assert 'or "*" in origin' in CONFIGURE
 
 

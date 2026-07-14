@@ -41,6 +41,7 @@ STORAGE_CORS_ALLOWED_ORIGINS="$(app_env_value STORAGE_CORS_ALLOWED_ORIGINS)"
 : "${AWS_STATIC_BUCKET_NAME:?AWS_STATIC_BUCKET_NAME is required}"
 : "${AWS_S3_PUBLIC_ENDPOINT_URL:?AWS_S3_PUBLIC_ENDPOINT_URL is required}"
 : "${STORAGE_CORS_ALLOWED_ORIGINS:?STORAGE_CORS_ALLOWED_ORIGINS is required}"
+: "${MINIO_API_CORS_ALLOW_ORIGIN:?MINIO_API_CORS_ALLOW_ORIGIN is required}"
 
 media_bucket="$AWS_STORAGE_BUCKET_NAME"
 static_bucket="$AWS_STATIC_BUCKET_NAME"
@@ -64,54 +65,41 @@ cleanup() {
 }
 trap cleanup EXIT
 
-STORAGE_CORS_ALLOWED_ORIGINS="$STORAGE_CORS_ALLOWED_ORIGINS" STATIC_BUCKET="$static_bucket" \
-  python3 - "$tmp_dir/media-cors.xml" "$tmp_dir/static-cors.xml" \
-    "$tmp_dir/static-policy.json" <<'PY'
+STORAGE_CORS_ALLOWED_ORIGINS="$STORAGE_CORS_ALLOWED_ORIGINS" \
+  MINIO_API_CORS_ALLOW_ORIGIN="$MINIO_API_CORS_ALLOW_ORIGIN" \
+  STATIC_BUCKET="$static_bucket" \
+  python3 - "$tmp_dir/static-policy.json" <<'PY'
 import json
 import os
 import sys
 from urllib.parse import urlsplit
-from xml.sax.saxutils import escape
 
-origins = [value.strip() for value in os.environ["STORAGE_CORS_ALLOWED_ORIGINS"].split(",") if value.strip()]
-if not origins:
-    raise SystemExit("At least one storage CORS origin is required")
-for origin in origins:
-    parsed = urlsplit(origin)
-    if (
-        parsed.scheme != "https"
-        or not parsed.hostname
-        or parsed.username
-        or parsed.password
-        or parsed.path not in {"", "/"}
-        or parsed.query
-        or parsed.fragment
-        or "*" in origin
-    ):
-        raise SystemExit(f"Invalid storage CORS origin: {origin}")
-
-allowed_origins = "\n".join(f"    <AllowedOrigin>{escape(origin)}</AllowedOrigin>" for origin in origins)
-
-
-def cors_xml(methods: tuple[str, ...]) -> str:
-    allowed_methods = "\n".join(f"    <AllowedMethod>{method}</AllowedMethod>" for method in methods)
-    return f"""<CORSConfiguration>
-  <CORSRule>
-{allowed_origins}
-{allowed_methods}
-    <AllowedHeader>*</AllowedHeader>
-    <ExposeHeader>ETag</ExposeHeader>
-    <MaxAgeSeconds>3600</MaxAgeSeconds>
-  </CORSRule>
-</CORSConfiguration>
-"""
+def parse_origins(name: str) -> list[str]:
+    origins = [value.strip() for value in os.environ[name].split(",") if value.strip()]
+    if not origins:
+        raise SystemExit(f"{name} must contain at least one exact HTTPS origin")
+    for origin in origins:
+        parsed = urlsplit(origin)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+            or "*" in origin
+        ):
+            raise SystemExit(f"Invalid storage CORS origin: {origin}")
+    return origins
 
 
-with open(sys.argv[1], "w", encoding="utf-8") as media:
-    media.write(cors_xml(("GET", "PUT", "POST", "HEAD")))
-with open(sys.argv[2], "w", encoding="utf-8") as static:
-    static.write(cors_xml(("GET", "HEAD")))
-with open(sys.argv[3], "w", encoding="utf-8") as policy:
+app_origins = parse_origins("STORAGE_CORS_ALLOWED_ORIGINS")
+minio_origins = parse_origins("MINIO_API_CORS_ALLOW_ORIGIN")
+if set(app_origins) != set(minio_origins):
+    raise SystemExit("Application and MinIO storage CORS origins must match exactly")
+
+with open(sys.argv[1], "w", encoding="utf-8") as policy:
     json.dump(
         {
             "Version": "2012-10-17",
@@ -142,8 +130,6 @@ docker run --rm --network "container:${minio_container}" \
     mc mb --ignore-existing "source/$MEDIA_BUCKET" "source/$STATIC_BUCKET" >/dev/null
     mc anonymous set none "source/$MEDIA_BUCKET" >/dev/null
     mc anonymous set-json /config/static-policy.json "source/$STATIC_BUCKET" >/dev/null
-    mc cors set "source/$MEDIA_BUCKET" /config/media-cors.xml >/dev/null
-    mc cors set "source/$STATIC_BUCKET" /config/static-cors.xml >/dev/null
   '
 
 curl -fsS --max-time 15 "${AWS_S3_PUBLIC_ENDPOINT_URL%/}/minio/health/live" >/dev/null
