@@ -29,6 +29,7 @@ env = environ.Env(
     CSRF_TRUSTED_ORIGINS=(list, []),
     AWS_STORAGE_BUCKET_NAME=(str, "starforge-media"),
     AWS_S3_ENDPOINT_URL=(str, ""),
+    AWS_S3_PUBLIC_ENDPOINT_URL=(str, ""),
     AWS_S3_ACCESS_KEY_ID=(str, ""),
     AWS_S3_SECRET_ACCESS_KEY=(str, ""),
     AWS_S3_REGION_NAME=(str, "us-east-1"),
@@ -90,6 +91,7 @@ SECRET_KEY = env("SECRET_KEY")
 DEBUG = env("DEBUG")
 ALLOWED_HOSTS = env("ALLOWED_HOSTS")
 SESSION_TTL_DAYS = env("SESSION_TTL_DAYS")
+AWS_S3_PUBLIC_ENDPOINT_URL = env("AWS_S3_PUBLIC_ENDPOINT_URL")
 HEALTH_READY_RATELIMIT = env("HEALTH_READY_RATELIMIT", default="30/min")
 HEALTH_READY_CACHE_SECONDS = env.float("HEALTH_READY_CACHE_SECONDS", default=0.0)
 HEALTH_REQUIRE_CELERY_HEARTBEAT = env.bool("HEALTH_REQUIRE_CELERY_HEARTBEAT", default=False)
@@ -532,7 +534,7 @@ CACHES = {
 # ---------------------------------------------------------------------------
 STORAGES = {
     "default": {
-        "BACKEND": "storages.backends.s3.S3Storage",
+        "BACKEND": "infrastructure.storage.backends.DualEndpointS3Storage",
         "OPTIONS": {
             "bucket_name": env("AWS_STORAGE_BUCKET_NAME"),
             "endpoint_url": env("AWS_S3_ENDPOINT_URL") or None,

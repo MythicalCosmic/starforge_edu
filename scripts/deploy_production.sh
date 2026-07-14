@@ -88,6 +88,9 @@ compose=(docker compose --env-file "$COMPOSE_ENV" -f "$release_dir/docker/docker
 echo "Running production configuration checks..."
 "${compose[@]}" run --rm --no-deps web python manage.py check --deploy --fail-level WARNING
 
+echo "Configuring private media and public static storage..."
+STARFORGE_REPO_DIR="$release_dir" "$release_dir/scripts/configure_production_storage.sh"
+
 if [[ "${SKIP_BACKUP:-0}" != "1" ]]; then
   STARFORGE_REPO_DIR="$release_dir" "$release_dir/scripts/backup_production.sh"
   STARFORGE_REPO_DIR="$release_dir" "$release_dir/scripts/verify_restore.sh"

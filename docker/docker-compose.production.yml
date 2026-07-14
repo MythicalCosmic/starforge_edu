@@ -73,7 +73,9 @@ services:
     volumes:
       - sf_minio:/data
     networks:
-      - internal
+      internal: {}
+      edge:
+        aliases: [starforge-minio]
     mem_limit: 256m
     cpus: 0.30
     pids_limit: 100

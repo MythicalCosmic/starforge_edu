@@ -83,6 +83,28 @@ def _require_service_url(name: str, *, schemes: tuple[str, ...]) -> str:
 # an unrelated localhost database/cache.
 _require_service_url("DATABASE_URL", schemes=("postgres", "postgresql"))
 _require_service_url("REDIS_URL", schemes=("redis", "rediss"))
+_media_bucket_name = env("AWS_STORAGE_BUCKET_NAME")
+_static_bucket_name = env("AWS_STATIC_BUCKET_NAME")
+if not _media_bucket_name or not _static_bucket_name or _media_bucket_name == _static_bucket_name:
+    raise ImproperlyConfigured(
+        "AWS_STORAGE_BUCKET_NAME and AWS_STATIC_BUCKET_NAME must name distinct production buckets."
+    )
+AWS_S3_PUBLIC_ENDPOINT_URL = _require_service_url("AWS_S3_PUBLIC_ENDPOINT_URL", schemes=("https",)).rstrip(
+    "/"
+)
+_storage_public_url = urlsplit(AWS_S3_PUBLIC_ENDPOINT_URL)
+if (
+    _storage_public_url.username
+    or _storage_public_url.password
+    or _storage_public_url.path not in {"", "/"}
+    or _storage_public_url.query
+    or _storage_public_url.fragment
+    or "*" in _storage_public_url.netloc
+    or _storage_public_url.hostname in {"localhost", "minio", "127.0.0.1", "::1"}
+):
+    raise ImproperlyConfigured(
+        "AWS_S3_PUBLIC_ENDPOINT_URL must be a browser-reachable HTTPS origin without credentials."
+    )
 if EMAIL_ENABLED and env("EMAIL_HOST").strip().lower() in {"", "localhost", "127.0.0.1", "::1"}:
     raise ImproperlyConfigured("EMAIL_HOST must be configured explicitly in production.")
 
@@ -113,17 +135,18 @@ MIDDLEWARE.insert(  # noqa: F405
     MIDDLEWARE.index("django.middleware.security.SecurityMiddleware") + 1,  # noqa: F405
     "django.middleware.csp.ContentSecurityPolicyMiddleware",
 )
+_storage_public_origin = f"{_storage_public_url.scheme}://{_storage_public_url.netloc}"
 SECURE_CSP = {
     "default-src": [CSP.SELF],
     "base-uri": [CSP.SELF],
     "object-src": [CSP.NONE],
     "frame-ancestors": [CSP.NONE],
     "form-action": [CSP.SELF],
-    "script-src": [CSP.SELF],
-    "style-src": [CSP.SELF, CSP.UNSAFE_INLINE],
-    "img-src": [CSP.SELF, "data:"],
-    "font-src": [CSP.SELF, "data:"],
-    "connect-src": [CSP.SELF, "wss:"],
+    "script-src": [CSP.SELF, _storage_public_origin],
+    "style-src": [CSP.SELF, CSP.UNSAFE_INLINE, _storage_public_origin],
+    "img-src": [CSP.SELF, "data:", _storage_public_origin],
+    "font-src": [CSP.SELF, "data:", _storage_public_origin],
+    "connect-src": [CSP.SELF, "wss:", _storage_public_origin],
 }
 
 # Never mock real SMS in prod.
@@ -199,14 +222,15 @@ if SENTRY_DSN:
 
 # Static files served via S3 in prod.
 STORAGES["staticfiles"] = {  # noqa: F405
-    "BACKEND": "storages.backends.s3.S3Storage",
+    "BACKEND": "infrastructure.storage.backends.DualEndpointS3Storage",
     "OPTIONS": {
-        "bucket_name": env("AWS_STATIC_BUCKET_NAME", default=env("AWS_STORAGE_BUCKET_NAME")),
+        "bucket_name": _static_bucket_name,
         "endpoint_url": env("AWS_S3_ENDPOINT_URL") or None,
         "access_key": env("AWS_S3_ACCESS_KEY_ID"),
         "secret_key": env("AWS_S3_SECRET_ACCESS_KEY"),
         "region_name": env("AWS_S3_REGION_NAME"),
         "addressing_style": "path",
         "signature_version": "s3v4",
+        "querystring_auth": False,
     },
 }

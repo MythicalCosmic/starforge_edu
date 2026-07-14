@@ -1,0 +1,15 @@
+starforge.example.com {
+	handle /ws/* {
+		reverse_proxy starforge-daphne:8001
+	}
+	handle {
+		reverse_proxy starforge-web:8000
+	}
+}
+
+# S3 API only. The MinIO console on port 9001 must remain private.
+# Preserve the Host header, path, and query string because SigV4 signs them.
+# Do not enable access logging here: presigned credentials are in the query string.
+storage.example.com {
+	reverse_proxy starforge-minio:9000
+}
