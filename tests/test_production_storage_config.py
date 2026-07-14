@@ -37,3 +37,9 @@ def test_storage_is_configured_and_publicly_checked_before_backup_and_migrations
     assert 'curl -fsS --max-time 15 "${AWS_S3_PUBLIC_ENDPOINT_URL%/}/minio/health/live"' in CONFIGURE
     assert 'client.put_object(Bucket=bucket, Key=key, Body=b"ok"' in CONFIGURE
     assert "client.delete_object(Bucket=bucket, Key=key)" in CONFIGURE
+
+
+def test_storage_bootstrap_cannot_replace_the_candidate_image_from_compose_env():
+    assert 'candidate_image="$APP_IMAGE"' in CONFIGURE
+    assert 'export APP_IMAGE="$candidate_image"' in CONFIGURE
+    assert 'source "$COMPOSE_ENV"' not in CONFIGURE

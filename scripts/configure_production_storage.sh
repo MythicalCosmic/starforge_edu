@@ -16,12 +16,15 @@ for required in "$COMPOSE_FILE" "$COMPOSE_ENV" "$APP_ENV" "$MINIO_ENV" "$BACKUP_
   [[ -r "$required" ]] || { echo "Required storage input is unreadable: $required" >&2; exit 1; }
 done
 
+: "${APP_IMAGE:?APP_IMAGE must name the candidate image}"
+candidate_image="$APP_IMAGE"
+
 set -a
 # Trusted root-owned deployment files. Values must use shell-compatible KEY=VALUE syntax.
-source "$COMPOSE_ENV"
 source "$MINIO_ENV"
 source "$BACKUP_ENV"
 set +a
+export APP_IMAGE="$candidate_image"
 
 app_env_value() {
   local key="$1" line
