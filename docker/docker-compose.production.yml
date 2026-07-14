@@ -162,7 +162,13 @@ services:
     cpus: 0.15
     pids_limit: 80
     healthcheck:
-      test: ["CMD-SHELL", "ps -o args= 1 | grep -q '[c]elery.*beat'"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import os; from pathlib import Path; pids = ['1', *Path('/proc/1/task/1/children').read_text().split()]; commands = [(Path('/proc') / pid / 'cmdline').read_bytes() for pid in pids if pid != str(os.getpid())]; raise SystemExit(0 if any(b'celery' in command and b'beat' in command for command in commands) else 1)",
+        ]
       interval: 30s
       timeout: 5s
       retries: 5

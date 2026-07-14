@@ -15,3 +15,15 @@ def test_gunicorn_access_log_omits_credential_bearing_request_target():
         assert "%(r)s" not in config  # full request line
         assert "%(U)s" not in config  # URL path (contains the signed iCal token)
         assert "%(q)s" not in config  # query string (legacy token fallback)
+
+
+def test_production_beat_healthcheck_uses_runtime_available_in_slim_image():
+    compose = (Path(__file__).resolve().parents[1] / "docker" / "docker-compose.production.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "ps -o args=" not in compose
+    assert "['1', *Path('/proc/1/task/1/children').read_text().split()]" in compose
+    assert "(Path('/proc') / pid / 'cmdline').read_bytes()" in compose
+    assert "pid != str(os.getpid())" in compose
+    assert '"CMD",' in compose
