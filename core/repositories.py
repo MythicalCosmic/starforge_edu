@@ -45,8 +45,20 @@ class BaseRepository[T: models.Model](IBaseRepository[T]):
     def update(self, instance: T, **kwargs: Any) -> T:
         for field, value in kwargs.items():
             setattr(instance, field, value)
-        # Persist only the touched fields (cheaper write, no lost-update of others).
-        instance.save(update_fields=list(kwargs.keys()) or None)
+        # Persist only the touched fields (cheaper write, no lost-update of
+        # others), but include ``auto_now`` fields. Django only runs a field's
+        # ``pre_save`` when it appears in update_fields; omitting updated_at made
+        # every layered PATCH look stale to caches, sync clients, and operators.
+        update_fields = list(kwargs)
+        if update_fields:
+            update_fields.extend(
+                field.name
+                for field in instance._meta.concrete_fields
+                if getattr(field, "auto_now", False) and field.name not in update_fields
+            )
+            instance.save(update_fields=update_fields)
+        else:
+            instance.save()
         return instance
 
     def delete(self, instance: T) -> None:

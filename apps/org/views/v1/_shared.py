@@ -13,9 +13,7 @@ def require_present(values: dict[str, str]) -> None:
     """400 if any of ``values`` is empty (a create-required field missing/blank)."""
     missing = {name: ["This field is required."] for name, val in values.items() if not val}
     if missing:
-        raise ValidationException(
-            "Missing required field(s).", code="validation_error", fields=missing
-        )
+        raise ValidationException("Missing required field(s).", code="validation_error", fields=missing)
 
 
 def require_slug(field: str, value: str) -> None:

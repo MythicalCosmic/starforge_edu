@@ -141,3 +141,63 @@ def test_comparison_joined_and_left(tenant_a, user_in, as_user):
 
     # bad enum -> 400
     assert client.get("/api/v1/students/comparison/?unit=decade").status_code == 400
+
+
+def test_hod_student_surfaces_are_consistently_branch_scoped(tenant_a, user_in, as_user):
+    """List and every aggregate must derive from the same scoped queryset."""
+    from django.utils import timezone
+
+    with schema_context(tenant_a.schema_name):
+        own = BranchFactory.create(name="Own")
+        foreign = BranchFactory.create(name="Foreign")
+        own_student = create_student(
+            branch=own,
+            phone="+998905557050",
+            birthdate=timezone.localdate().replace(year=2010),
+        )
+        create_student(
+            branch=foreign,
+            phone="+998905557051",
+            birthdate=timezone.localdate().replace(year=2011),
+        )
+    hod = user_in(tenant_a, roles=[Role.HEAD_OF_DEPT], branch=own)
+    client = as_user(tenant_a, hod)
+
+    listed = client.get("/api/v1/students/").json()
+    assert [row["id"] for row in listed["data"]] == [own_student.id]
+    assert client.get("/api/v1/students/stats/").json()["data"]["total"] == 1
+    comparison = client.get("/api/v1/students/comparison/?metric=joined&unit=year").json()["data"]
+    assert comparison["current"] == 1
+    birthdays = client.get("/api/v1/students/birthdays/?days=0").json()["data"]
+    assert [row["id"] for row in birthdays] == [own_student.id]
+
+
+def test_department_hod_student_surfaces_exclude_sibling_department(tenant_a, user_in, as_user):
+    from apps.cohorts.tests.factories import CohortFactory
+    from apps.org.tests.factories import DepartmentFactory
+    from apps.students.tests.factories import StudentProfileFactory
+    from apps.users.models import RoleMembership
+
+    hod = user_in(tenant_a)
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        own_department = DepartmentFactory(branch=branch)
+        sibling_department = DepartmentFactory(branch=branch)
+        own_cohort = CohortFactory(branch=branch, department=own_department)
+        sibling_cohort = CohortFactory(branch=branch, department=sibling_department)
+        own_student = StudentProfileFactory(branch=branch, current_cohort=own_cohort)
+        sibling_student = StudentProfileFactory(branch=branch, current_cohort=sibling_cohort)
+        RoleMembership.objects.create(
+            user=hod,
+            branch=branch,
+            department=own_department,
+            role=Role.HEAD_OF_DEPT,
+        )
+        hod.refresh_from_db()
+
+    client = as_user(tenant_a, hod)
+    listing = client.get("/api/v1/students/")
+    assert listing.status_code == 200
+    assert {row["id"] for row in listing.json()["data"]} == {own_student.id}
+    assert client.get(f"/api/v1/students/{sibling_student.id}/").status_code == 404
+    assert client.get("/api/v1/students/stats/").json()["data"]["total"] == 1

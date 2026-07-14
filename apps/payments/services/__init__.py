@@ -12,6 +12,7 @@ before B but is built in parallel) — never at module top.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
@@ -32,6 +33,8 @@ from core.exceptions import NotFoundException, UnprocessableEntity, ValidationEx
 from core.utils import current_schema, stable_hash
 from infrastructure.payments.payme import (
     ERR_ACCOUNT_NOT_FOUND,
+    ERR_CANNOT_CANCEL,
+    ERR_CANNOT_PERFORM,
     STATE_CANCELLED,
     STATE_CANCELLED_AFTER_PERFORM,
     STATE_CREATED,
@@ -115,6 +118,11 @@ def mark_payment_completed(
     payment = Payment.objects.select_for_update().get(pk=payment_id)
     if payment.status == Payment.Status.COMPLETED:
         return payment
+    if payment.status not in (Payment.Status.PENDING, Payment.Status.PROCESSING):
+        raise UnprocessableEntity(
+            _("A terminal payment cannot be completed."),
+            code="illegal_payment_transition",
+        )
     payment.status = Payment.Status.COMPLETED
     payment.paid_at = timezone.now()
     if provider_txn_id:
@@ -138,7 +146,13 @@ def mark_payment_completed(
         )
     )
     # Post-payment fiscalization (D3-B-9) — Celery, idempotent.
-    transaction.on_commit(lambda: _enqueue_fiscalization(payment.pk, schema))
+    # Write the durable work marker before touching the broker. If Redis is
+    # unavailable after commit, reconciliation can still discover this receipt.
+    FiscalReceipt.objects.get_or_create(payment=payment)
+    transaction.on_commit(
+        lambda: _enqueue_fiscalization(payment.pk, schema),
+        robust=True,
+    )
     return payment
 
 
@@ -148,6 +162,11 @@ def mark_payment_failed(*, payment_id: int, cancel_reason: int | None = None) ->
     payment = Payment.objects.select_for_update().get(pk=payment_id)
     if payment.status in (Payment.Status.FAILED, Payment.Status.CANCELLED):
         return payment
+    if payment.status in (Payment.Status.COMPLETED, Payment.Status.REFUNDED):
+        raise UnprocessableEntity(
+            _("A completed payment cannot be failed."),
+            code="illegal_payment_transition",
+        )
     payment.status = Payment.Status.FAILED
     if cancel_reason is not None:
         payment.cancel_reason = cancel_reason
@@ -230,24 +249,15 @@ def allocate_manual(*, payment_id: int, allocations: list[dict[str, Any]]) -> Pa
     if payment.status != Payment.Status.COMPLETED:
         raise UnprocessableEntity(_("Only completed payments can be allocated."))
     if not allocations:
-        raise ValidationException(
-            _("At least one allocation line is required."), code="no_allocations"
-        )
-    total = sum(
-        (Decimal(str(a["amount"])) for a in allocations), Decimal("0")
-    ).quantize(Decimal("0.01"))
+        raise ValidationException(_("At least one allocation line is required."), code="no_allocations")
+    total = sum((Decimal(str(a["amount"])) for a in allocations), Decimal("0")).quantize(Decimal("0.01"))
     if total > payment.amount_uzs:
-        raise UnprocessableEntity(
-            _("Allocations exceed the payment amount."), code="over_allocation"
-        )
+        raise UnprocessableEntity(_("Allocations exceed the payment amount."), code="over_allocation")
     from apps.finance.services import allocate_payment_lines
 
     allocate_payment_lines(
         payment_id=payment.pk,
-        lines=[
-            {"invoice": int(a["invoice"]), "amount": Decimal(str(a["amount"]))}
-            for a in allocations
-        ],
+        lines=[{"invoice": int(a["invoice"]), "amount": Decimal(str(a["amount"]))} for a in allocations],
     )
     payment.allocation_status = Payment.Allocation.ALLOCATED
     payment.save(update_fields=["allocation_status", "updated_at"])
@@ -277,18 +287,24 @@ def create_cash_payment(
     invoice, shift) key so a double-submit at the drawer does not double-charge)."""
     from apps.finance.models import CashierShift, Invoice
 
-    invoice = Invoice.objects.filter(pk=invoice_id).first()
+    invoice = Invoice.objects.select_related("student").filter(pk=invoice_id).first()
     if invoice is None:
         raise UnprocessableEntity(_("Invoice not found."), fields={"invoice": ["not_found"]})
 
     shift = (
-        CashierShift.objects.filter(cashier=cashier, status=CashierShift.Status.OPEN)
+        CashierShift.objects.select_for_update()
+        .filter(cashier=cashier, status=CashierShift.Status.OPEN)
         .order_by("-opened_at")
         .first()
     )
     if shift is None:
         raise UnprocessableEntity(
             _("You must have an open cashier shift to take cash."), code="no_open_shift"
+        )
+    if invoice.student.branch_id != shift.branch_id:
+        raise UnprocessableEntity(
+            _("The invoice belongs to another cashier branch."),
+            code="cashier_branch_mismatch",
         )
 
     amount = Decimal(amount_uzs).quantize(Decimal("0.01")) if amount_uzs is not None else invoice.total_uzs
@@ -371,9 +387,7 @@ def _build_provider_checkout(*, provider: str, payment: Payment, config, account
     if provider == Provider.UZUM:
         from infrastructure.payments.uzum import get_uzum_client
 
-        return get_uzum_client().build_checkout(
-            amount_uzs=amount_uzs, order_id=merchant_ref, config=config
-        )
+        return get_uzum_client().build_checkout(amount_uzs=amount_uzs, order_id=merchant_ref, config=config)
     return {}
 
 
@@ -496,6 +510,13 @@ class PaymeDBStore:
 
     @transaction.atomic
     def create_transaction(self, *, payme_id: str, time_ms: int, amount_tiyin: int, account: dict, invoice):
+        # Serialize creation per invoice. A plain ``conflicting.exists()`` has a
+        # check-then-insert race where two different Payme ids can both observe
+        # no open transaction and charge the same invoice. The invoice is the
+        # stable lock row shared by both contenders.
+        from apps.finance.models import Invoice
+
+        invoice = Invoice.objects.select_for_update().get(pk=invoice.pk)
         field, account_value = _account_field(account)
         # One open transaction per account: another open/performed Payme txn for
         # the same invoice → -31099 (account already paid/locked).
@@ -539,15 +560,26 @@ class PaymeDBStore:
         # failures are absorbed inside mark_payment_completed's _auto_allocate
         # savepoint and surface as allocation_status=MANUAL_REVIEW — they never
         # raise a ValidationException out of here into the JSON-RPC handler.
+        locked = Payment.objects.select_for_update().get(pk=txn.pk)
+        if locked.provider_state == STATE_PERFORMED:
+            return locked
+        if locked.provider_state != STATE_CREATED or locked.status != Payment.Status.PROCESSING:
+            raise PaymeError(ERR_CANNOT_PERFORM, _ml("Cannot perform transaction."))
         now_ms = int(timezone.now().timestamp() * 1000)
-        txn.provider_state = STATE_PERFORMED
-        txn.metadata = {**txn.metadata, "perform_time_ms": now_ms}
-        txn.save(update_fields=["provider_state", "metadata", "updated_at"])
-        mark_payment_completed(payment_id=txn.pk, provider_txn_id=txn.provider_txn_id)
-        txn.refresh_from_db()
-        return txn
+        locked.provider_state = STATE_PERFORMED
+        locked.metadata = {**locked.metadata, "perform_time_ms": now_ms}
+        locked.save(update_fields=["provider_state", "metadata", "updated_at"])
+        mark_payment_completed(payment_id=locked.pk, provider_txn_id=locked.provider_txn_id)
+        locked.refresh_from_db()
+        return locked
 
+    @transaction.atomic
     def cancel_transaction(self, txn: Payment, *, reason: int):
+        txn = Payment.objects.select_for_update().get(pk=txn.pk)
+        if txn.provider_state in (STATE_CANCELLED, STATE_CANCELLED_AFTER_PERFORM):
+            return txn
+        if txn.provider_state not in (STATE_CREATED, STATE_PERFORMED):
+            raise PaymeError(ERR_CANNOT_CANCEL, _ml("Cannot cancel transaction."))
         now_ms = int(timezone.now().timestamp() * 1000)
         was_performed = txn.provider_state == STATE_PERFORMED
         txn.provider_state = STATE_CANCELLED_AFTER_PERFORM if was_performed else STATE_CANCELLED
@@ -598,25 +630,75 @@ def _refund_for_cancelled_payment(payment: Payment, *, reason: int) -> None:
     if not invoice_id:
         return
     try:
-        from apps.finance.models import Invoice
-        from apps.finance.services import register_refund_completion, request_refund
+        from apps.finance.models import Invoice, Refund
+        from apps.finance.services import register_refund_completion
     except Exception:
         return  # finance not present yet — refund recorded only on the payment row
     invoice = Invoice.objects.filter(pk=invoice_id).first()
     if invoice is None:
         return
-    refund = request_refund(
-        invoice=invoice,
-        payment_id=payment.pk,
-        amount_uzs=payment.amount_uzs,
-        reason=f"payme_cancel:{reason}",
+    # A prior operator request is not proof of money movement, but the signed
+    # Payme cancellation is. Confirm any pending slices first and create only the
+    # remainder, so an in-flight request cannot make the real provider callback
+    # fail or produce an over-refund.
+    in_flight = list(
+        Refund.objects.select_for_update()
+        .filter(
+            invoice=invoice,
+            payment_id=payment.pk,
+            state__in=(
+                Refund.State.REQUESTED,
+                Refund.State.APPROVED,
+                Refund.State.SENT_TO_PROVIDER,
+            ),
+        )
+        .order_by("created_at", "id")
     )
-    register_refund_completion(refund_id=refund.pk, payment_id=payment.pk)
+    remaining = payment.amount_uzs
+    confirmation = f"{payment.provider_txn_id}:cancel:{reason}"
+    for refund in in_flight:
+        register_refund_completion(
+            refund_id=refund.pk,
+            payment_id=payment.pk,
+            provider=Provider.PAYME,
+            provider_refund_id=f"{confirmation}:{refund.pk}",
+        )
+        remaining -= refund.amount_uzs
+    if remaining > 0:
+        # A signed provider cancellation is evidence that the money moved even
+        # when local auto-allocation had fallen into MANUAL_REVIEW. Do not reject
+        # the real refund merely because there is no receivable allocation left
+        # to reverse; record the whole provider movement and release whatever
+        # allocation exists. Operator-initiated requests still use the stricter
+        # request_refund ceiling above.
+        refund = Refund.objects.create(
+            invoice=invoice,
+            payment_id=payment.pk,
+            amount_uzs=remaining,
+            reason=f"payme_cancel:{reason}",
+            provider=Provider.PAYME,
+        )
+        register_refund_completion(
+            refund_id=refund.pk,
+            payment_id=payment.pk,
+            provider=Provider.PAYME,
+            provider_refund_id=f"{confirmation}:{refund.pk}",
+        )
 
 
 @transaction.atomic
-def refund_payment(*, payment_id: int, amount_uzs: Decimal | None = None, reason: str = "") -> Payment:
-    """Refund a completed payment — drives Lane A's Refund state machine."""
+def refund_payment(
+    *,
+    payment_id: int,
+    amount_uzs: Decimal | None = None,
+    reason: str = "",
+    requested_by=None,
+) -> tuple[Payment, Any]:
+    """Request a refund without claiming the provider already returned money.
+
+    The request remains REQUESTED until a signed provider event confirms it;
+    local allocations and payment status stay intact in the meantime.
+    """
     payment = Payment.objects.select_for_update().filter(pk=payment_id).first()
     if payment is None:
         raise NotFoundException(_("Payment not found."), code="payment_not_found")
@@ -626,7 +708,7 @@ def refund_payment(*, payment_id: int, amount_uzs: Decimal | None = None, reason
     if not invoice_id:
         raise UnprocessableEntity(_("Payment is not linked to an invoice."))
     from apps.finance.models import Invoice
-    from apps.finance.services import register_refund_completion, request_refund
+    from apps.finance.services import request_refund
 
     invoice = Invoice.objects.filter(pk=invoice_id).first()
     if invoice is None:
@@ -640,18 +722,10 @@ def refund_payment(*, payment_id: int, amount_uzs: Decimal | None = None, reason
         # would turn a "refund nothing" request into a full money-out refund.
         amount_uzs=payment.amount_uzs if amount_uzs is None else amount_uzs,
         reason=reason or "manual_refund",
+        requested_by=requested_by,
+        provider=payment.provider,
     )
-    register_refund_completion(refund_id=refund.pk, payment_id=payment.pk)
-    # Only mark the payment fully REFUNDED once cumulative completed refunds cover
-    # its amount. A PARTIAL refund must leave it COMPLETED so a follow-up partial
-    # refund is still possible (refund_payment requires status==COMPLETED); the
-    # per-payment ceiling in request_refund prevents over-refunding.
-    from apps.finance.services import completed_refund_total_for_payment
-
-    if completed_refund_total_for_payment(payment.pk) >= payment.amount_uzs:
-        payment.status = Payment.Status.REFUNDED
-        payment.save(update_fields=["status", "updated_at"])
-    return payment
+    return payment, refund
 
 
 # ---------------------------------------------------------------------------
@@ -748,38 +822,61 @@ def process_uzum_payment(*, payload: dict, invoice) -> Payment:
 # ---------------------------------------------------------------------------
 # Fiscalization task body (D3-B-9) — idempotent
 # ---------------------------------------------------------------------------
-@transaction.atomic
 def fiscalize_payment_body(payment_id: int) -> str | None:
     """Idempotent: an existing CONFIRMED FiscalReceipt short-circuits. Returns
     the fiscal sign. Stores the marker on the receipt row so a retry no-ops."""
-    payment = Payment.objects.select_for_update().get(pk=payment_id)
-    receipt, _created = FiscalReceipt.objects.get_or_create(payment=payment)
-    if receipt.status == FiscalReceipt.Status.CONFIRMED:
-        return receipt.fiscal_sign
-    if payment.status != Payment.Status.COMPLETED:
-        raise UnprocessableEntity(_("Only completed payments are fiscalized."))
+    # Claim under a row lock, then release the transaction before calling Soliq.
+    # A slow external request must not pin the payment row or a DB connection.
+    with transaction.atomic():
+        payment = Payment.objects.select_for_update().get(pk=payment_id)
+        receipt, _created = FiscalReceipt.objects.select_for_update().get_or_create(payment=payment)
+        if receipt.status == FiscalReceipt.Status.CONFIRMED:
+            return receipt.fiscal_sign
+        if payment.status not in (Payment.Status.COMPLETED, Payment.Status.REFUNDED):
+            raise UnprocessableEntity(_("Only completed payments are fiscalized."))
+        if (
+            receipt.status == FiscalReceipt.Status.SUBMITTED
+            and receipt.submitted_at is not None
+            and receipt.submitted_at > timezone.now() - timedelta(minutes=15)
+        ):
+            return None
+        receipt.status = FiscalReceipt.Status.SUBMITTED
+        receipt.attempts += 1
+        receipt.submitted_at = timezone.now()
+        receipt.save(update_fields=["status", "attempts", "submitted_at", "updated_at"])
+        amount = str(payment.amount_uzs)
+        item_name = payment.account_ref or "payment"
+        key = stable_hash(f"fiscal:{current_schema()}:{payment.pk}")
 
     from infrastructure.fiscal import get_fiscal_client
 
-    key = stable_hash(f"fiscal:{current_schema()}:{payment.pk}")
-    receipt.status = FiscalReceipt.Status.SUBMITTED
-    receipt.attempts = receipt.attempts + 1
-    receipt.submitted_at = timezone.now()
-    receipt.save(update_fields=["status", "attempts", "submitted_at", "updated_at"])
-
     result = get_fiscal_client().fiscalize(
-        payment_id=payment.pk,
-        amount_uzs=str(payment.amount_uzs),
-        items=[{"name": payment.account_ref or "payment", "amount": str(payment.amount_uzs), "qty": 1}],
+        payment_id=payment_id,
+        amount_uzs=amount,
+        items=[{"name": item_name, "amount": amount, "qty": 1}],
         idempotency_key=key,
     )
-    receipt.fiscal_sign = result["fiscal_sign"]
-    receipt.qr_url = result["qr_url"]
-    receipt.payload = result.get("raw", {})
-    receipt.status = FiscalReceipt.Status.CONFIRMED
-    receipt.confirmed_at = timezone.now()
-    receipt.save(update_fields=["fiscal_sign", "qr_url", "payload", "status", "confirmed_at", "updated_at"])
-    return receipt.fiscal_sign
+
+    with transaction.atomic():
+        receipt = FiscalReceipt.objects.select_for_update().get(payment_id=payment_id)
+        if receipt.status == FiscalReceipt.Status.CONFIRMED:
+            return receipt.fiscal_sign
+        receipt.fiscal_sign = result["fiscal_sign"]
+        receipt.qr_url = result["qr_url"]
+        receipt.payload = result.get("raw", {})
+        receipt.status = FiscalReceipt.Status.CONFIRMED
+        receipt.confirmed_at = timezone.now()
+        receipt.save(
+            update_fields=[
+                "fiscal_sign",
+                "qr_url",
+                "payload",
+                "status",
+                "confirmed_at",
+                "updated_at",
+            ]
+        )
+        return receipt.fiscal_sign
 
 
 def enqueue_receipt_pdf(payment_id: int, schema: str) -> None:

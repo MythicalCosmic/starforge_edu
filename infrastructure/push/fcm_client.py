@@ -18,6 +18,7 @@ Return shape (both clients): ``{"success": bool, "message_id": str|None,
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from abc import ABC, abstractmethod
 from typing import Any, ClassVar
@@ -55,9 +56,10 @@ class MockFCMClient(PushClient):
             result = {"success": False, "message_id": None, "error": "unregistered", "mock": True}
         else:
             # Deterministic message id derived from the input — no randomness.
+            digest = hashlib.sha256(f"{token}\0{title}\0{body}".encode()).hexdigest()[:16]
             result = {
                 "success": True,
-                "message_id": f"mock-fcm-{abs(hash((token, title, body))) % 10**12:012d}",
+                "message_id": f"mock-fcm-{digest}",
                 "error": None,
                 "mock": True,
             }

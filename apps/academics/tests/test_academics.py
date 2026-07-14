@@ -10,14 +10,16 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from django.test import override_settings
 from django_tenants.utils import schema_context
 
 from apps.academics import selectors, services
 from apps.academics.grading import display_for
-from apps.academics.models import ExamResult, Transcript
+from apps.academics.models import Exam, ExamResult, Transcript
 from apps.academics.signals import grade_changed
 from apps.academics.tests.factories import (
     ExamFactory,
+    ExamResultFactory,
     ExamTypeFactory,
     GradeFactory,
     SubjectFactory,
@@ -29,7 +31,7 @@ from apps.parents.tests.factories import GuardianFactory, ParentProfileFactory
 from apps.schedule.tests.factories import TermFactory
 from apps.students.tests.factories import StudentProfileFactory
 from apps.teachers.tests.factories import TeacherProfileFactory
-from core.exceptions import UnprocessableEntity
+from core.exceptions import ThrottledException, UnprocessableEntity
 
 pytestmark = pytest.mark.django_db
 
@@ -243,6 +245,62 @@ def test_grade_changed_not_emitted_on_identical_reentry(tenant_a, django_capture
         grade_changed.disconnect(_recv)
 
 
+def test_record_results_rejects_duplicate_student_rows(tenant_a):
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        exam: Any = ExamFactory(max_score=Decimal("100"))
+        student: Any = StudentProfileFactory(branch=branch)
+        CohortMembershipFactory(cohort=exam.cohort, student=student)
+
+        with pytest.raises(UnprocessableEntity) as exc:
+            services.record_results(
+                exam=exam,
+                rows=[
+                    {"student": student, "score": Decimal("70")},
+                    {"student": student, "score": Decimal("80")},
+                ],
+            )
+        assert exc.value.code == "duplicate_student"
+        assert ExamResult.objects.filter(exam=exam).count() == 0
+
+
+def test_record_results_bulk_query_budget(
+    tenant_a,
+    django_assert_max_num_queries,
+    django_capture_on_commit_callbacks,
+):
+    """A mixed create/update batch stays constant-query instead of growing per row."""
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        exam: Any = ExamFactory(max_score=Decimal("100"))
+        students = [StudentProfileFactory(branch=branch) for _ in range(30)]
+        for student in students:
+            CohortMembershipFactory(cohort=exam.cohort, student=student)
+        for student in students[:15]:
+            ExamResultFactory(exam=exam, student=student, score=Decimal("50"))
+
+        rows = [{"student": student, "score": Decimal("75"), "note": "bulk"} for student in students]
+        # SAVEPOINT + locked exam/cohort + membership ids + locked existing rows
+        # + one bulk INSERT + one bulk UPDATE + RELEASE SAVEPOINT.
+        with (
+            django_capture_on_commit_callbacks(execute=True),
+            django_assert_max_num_queries(8),
+        ):
+            result = services.record_results(exam=exam, rows=rows)
+
+        assert result["created"] == 15
+        assert result["updated"] == 15
+        assert [row.student_id for row in result["results"]] == [student.id for student in students]
+        assert ExamResult.objects.filter(exam=exam, score=Decimal("75")).count() == 30
+        from apps.audit.models import AuditLog
+
+        result_audits = AuditLog.objects.filter(
+            resource_type="academics.ExamResult",
+            resource_id__in=[str(row.pk) for row in result["results"]],
+        )
+        assert result_audits.count() == 30
+
+
 # --------------------------------------------------------------------------- #
 # CSV import
 # --------------------------------------------------------------------------- #
@@ -359,9 +417,7 @@ def test_transcript_post_returns_202_pending(tenant_a, user_in, as_user):
         assert Transcript.objects.filter(pk=body["id"], status="pending").exists()
 
 
-def test_transcript_request_hides_student_existence_from_unauthorized_reader(
-    tenant_a, user_in, as_user
-):
+def test_transcript_request_hides_student_existence_from_unauthorized_reader(tenant_a, user_in, as_user):
     viewer = user_in(tenant_a, roles=["student"])
     with schema_context(tenant_a.schema_name):
         target: Any = StudentProfileFactory()
@@ -382,6 +438,114 @@ def test_transcript_request_hides_student_existence_from_unauthorized_reader(
 
     assert existing.status_code == missing.status_code == 404
     assert existing.json()["code"] == missing.json()["code"] == "not_found"
+
+
+def test_hod_transcript_request_and_listing_are_branch_scoped(tenant_a, user_in, as_user):
+    with schema_context(tenant_a.schema_name):
+        own_branch = BranchFactory()
+        foreign_branch = BranchFactory()
+        own_student = StudentProfileFactory(branch=own_branch)
+        foreign_student = StudentProfileFactory(branch=foreign_branch)
+    hod = user_in(tenant_a, roles=["head_of_dept"], branch=own_branch)
+    client = as_user(tenant_a, hod)
+
+    own = client.post("/api/v1/academics/transcripts/", {"student": own_student.pk}, format="json")
+    foreign = client.post("/api/v1/academics/transcripts/", {"student": foreign_student.pk}, format="json")
+    assert own.status_code == 202
+    assert foreign.status_code == 404
+    listed = client.get("/api/v1/academics/transcripts/").json()
+    assert [row["id"] for row in listed["data"]] == [own.json()["data"]["id"]]
+
+
+def test_department_hod_academics_reads_and_exam_writes_exclude_sibling_department(
+    tenant_a, user_in, as_user
+):
+    from apps.org.tests.factories import DepartmentFactory
+    from apps.users.models import RoleMembership
+    from core.permissions import Role
+
+    hod = user_in(tenant_a)
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        own_department = DepartmentFactory(branch=branch)
+        sibling_department = DepartmentFactory(branch=branch)
+        own_cohort = CohortFactory(branch=branch, department=own_department)
+        sibling_cohort = CohortFactory(branch=branch, department=sibling_department)
+        own_student = StudentProfileFactory(branch=branch, current_cohort=own_cohort)
+        sibling_student = StudentProfileFactory(branch=branch, current_cohort=sibling_cohort)
+        subject = SubjectFactory()
+        term = TermFactory()
+        exam_type = ExamTypeFactory()
+        own_grade = GradeFactory(student=own_student, subject=subject, term=term)
+        sibling_grade = GradeFactory(student=sibling_student, subject=subject, term=term)
+        own_exam = ExamFactory(
+            subject=subject,
+            cohort=own_cohort,
+            term=term,
+            exam_type=exam_type,
+        )
+        sibling_exam = ExamFactory(
+            subject=subject,
+            cohort=sibling_cohort,
+            term=term,
+            exam_type=exam_type,
+        )
+        own_transcript = Transcript.objects.create(student=own_student, requested_by=hod)
+        sibling_transcript = Transcript.objects.create(student=sibling_student, requested_by=hod)
+        RoleMembership.objects.create(
+            user=hod,
+            branch=branch,
+            department=own_department,
+            role=Role.HEAD_OF_DEPT,
+        )
+        hod.refresh_from_db()
+
+    client = as_user(tenant_a, hod)
+    assert {row["id"] for row in client.get("/api/v1/academics/grades/").json()["data"]} == {own_grade.id}
+    assert sibling_grade.id != own_grade.id
+    assert {row["id"] for row in client.get("/api/v1/academics/exams/").json()["data"]} == {own_exam.id}
+    assert client.get(f"/api/v1/academics/exams/{sibling_exam.id}/").status_code == 404
+    assert {row["id"] for row in client.get("/api/v1/academics/transcripts/").json()["data"]} == {
+        own_transcript.id
+    }
+    assert sibling_transcript.id != own_transcript.id
+
+    payload = {
+        "subject": subject.id,
+        "term": term.id,
+        "exam_type": exam_type.id,
+        "title": "Scoped exam",
+        "exam_date": date(2026, 4, 1).isoformat(),
+        "max_score": "100",
+        "weight": "1.0",
+    }
+    denied = client.post(
+        "/api/v1/academics/exams/",
+        {**payload, "cohort": sibling_cohort.id},
+        format="json",
+    )
+    assert denied.status_code == 400
+    allowed = client.post(
+        "/api/v1/academics/exams/",
+        {**payload, "cohort": own_cohort.id},
+        format="json",
+    )
+    assert allowed.status_code == 201, allowed.content
+
+
+@override_settings(TRANSCRIPT_MAX_ACTIVE_PER_USER=1)
+def test_transcript_admission_is_idempotent_and_capped(tenant_a, user_in):
+    with schema_context(tenant_a.schema_name):
+        actor = user_in(tenant_a, roles=["director"])
+        branch = BranchFactory()
+        first_student = StudentProfileFactory(branch=branch)
+        second_student = StudentProfileFactory(branch=branch)
+        first = services.request_transcript(student=first_student, requested_by=actor)
+        duplicate = services.request_transcript(student=first_student, requested_by=actor)
+        assert duplicate.pk == first.pk
+        with pytest.raises(ThrottledException) as exc:
+            services.request_transcript(student=second_student, requested_by=actor)
+        assert exc.value.code == "transcript_user_queue_full"
 
 
 # weasyprint needs GTK native libs (cairo/pango) absent on the Windows dev box;
@@ -535,7 +699,9 @@ def test_json_results_array_is_capped(tenant_a, user_in, as_user, monkeypatch):
     with schema_context(tenant_a.schema_name):
         branch = BranchFactory()
         exam: Any = ExamFactory(
-            subject=SubjectFactory(), cohort=CohortFactory(branch=branch), term=TermFactory(),
+            subject=SubjectFactory(),
+            cohort=CohortFactory(branch=branch),
+            term=TermFactory(),
             max_score=Decimal("100"),
         )
         students = [StudentProfileFactory(branch=branch).id for _ in range(3)]
@@ -713,6 +879,62 @@ def test_teacher_cannot_create_exam_in_non_taught_cohort(tenant_a, user_in, as_u
     assert data["exam_type_detail"]["id"] == exam_type_id
 
 
+def test_exam_write_contract_owner_positive_values_and_put_semantics(tenant_a, user_in, as_user):
+    director = user_in(tenant_a, roles=["director"])
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        cohort = CohortFactory(branch=branch)
+        subject = SubjectFactory()
+        term = TermFactory()
+        exam_type = ExamTypeFactory()
+
+    client = as_user(tenant_a, director)
+    payload = {
+        "subject": subject.id,
+        "cohort": cohort.id,
+        "term": term.id,
+        "exam_type": exam_type.id,
+        "title": "Secure bulk grading",
+        "exam_date": date(2026, 5, 2).isoformat(),
+        "max_score": "75",
+        "weight": "0.500",
+    }
+    invalid = client.post(
+        "/api/v1/academics/exams/",
+        {**payload, "max_score": "0"},
+        format="json",
+    )
+    assert invalid.status_code == 400
+
+    response = client.post("/api/v1/academics/exams/", payload, format="json")
+    assert response.status_code == 201, response.content
+    exam_id = response.json()["data"]["id"]
+    with schema_context(tenant_a.schema_name):
+        exam = Exam.objects.get(pk=exam_id)
+        assert exam.created_by_id == director.id
+
+    missing_required = client.put(
+        f"/api/v1/academics/exams/{exam_id}/",
+        {"title": "Incomplete replacement"},
+        format="json",
+    )
+    assert missing_required.status_code == 400
+
+    replacement = {key: value for key, value in payload.items() if key not in {"max_score", "weight"}}
+    replacement["title"] = "Complete replacement"
+    updated = client.put(
+        f"/api/v1/academics/exams/{exam_id}/",
+        replacement,
+        format="json",
+    )
+    assert updated.status_code == 200, updated.content
+    with schema_context(tenant_a.schema_name):
+        exam.refresh_from_db()
+        assert exam.title == "Complete replacement"
+        assert exam.max_score == Decimal("75")
+        assert exam.weight == Decimal("0.500")
+
+
 def test_manager_creates_and_lists_exam_types(as_role):
     """Per-Center configurable exam kinds: a manager creates one (name auto-slugs),
     a duplicate slug is rejected, and it shows up in the list."""
@@ -768,9 +990,7 @@ def test_teacher_cannot_recompute_grades_for_non_taught_cohort(tenant_a, user_in
     assert foreign.status_code == 403
     assert foreign.json()["code"] == "forbidden"
 
-    ok = client.post(
-        "/api/v1/academics/grades/recompute/", {**body, "cohort": own_id}, format="json"
-    )
+    ok = client.post("/api/v1/academics/grades/recompute/", {**body, "cohort": own_id}, format="json")
     assert ok.status_code == 200
 
 

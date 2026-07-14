@@ -30,8 +30,6 @@ from core.utils import user_agent
 _GENDERS = frozenset(g[0] for g in User.Gender.choices)
 _LANGUAGES = frozenset(lang[0] for lang in User.Language.choices)
 _PLATFORMS = frozenset(p[0] for p in Device.PLATFORM_CHOICES)
-_TRUE = frozenset({"true", "1", "yes", "y", "t", "on"})
-_FALSE = frozenset({"false", "0", "no", "n", "f", "off"})
 
 
 def _service() -> IUserService:
@@ -143,9 +141,8 @@ def _me_changes(request: HttpRequest) -> dict[str, Any]:
     # birthdate: nullable date.
     if "birthdate" in data:
         changes["birthdate"] = _date_value(data["birthdate"])
-    # is_active: NOT-NULL bool (strict DRF-parity coercion; reject null/garbage).
     if "is_active" in data:
-        changes["is_active"] = _bool_value(_reject_null(data["is_active"], "is_active"))
+        raise _reject("is_active", "Account activation can only be changed by an administrator.")
     return changes
 
 
@@ -179,18 +176,6 @@ def _date_value(raw: Any) -> Any:
     if parsed is None:
         raise _reject("birthdate", "Enter a valid date (YYYY-MM-DD).")
     return parsed
-
-
-def _bool_value(raw: Any) -> bool:
-    if isinstance(raw, bool):
-        return raw
-    if isinstance(raw, str):
-        low = raw.lower()
-        if low in _TRUE:
-            return True
-        if low in _FALSE:
-            return False
-    raise _reject("is_active", "Must be a boolean.")
 
 
 # --- views ------------------------------------------------------------------
@@ -233,6 +218,11 @@ def me_view(request: HttpRequest) -> HttpResponse:
         deny_read_only_token(request)
         if account is not None:
             body = read_json(request)
+            if "is_active" in body:
+                raise _reject(
+                    "is_active",
+                    "Account activation can only be changed by an administrator.",
+                )
             changes = {
                 field: body[field]
                 for field in ("first_name", "last_name", "middle_name", "phone", "email")

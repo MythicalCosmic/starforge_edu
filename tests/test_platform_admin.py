@@ -74,3 +74,13 @@ def test_set_primary_non_numeric_domain_id_404(platform_admin, tenant_a):
         f"/api/v1/platform/centers/{tenant_a.pk}/domains/abc/set-primary/"
     )
     assert resp.status_code == 404
+
+
+def test_public_center_cannot_be_impersonated(platform_admin, public_tenant):
+    resp = _staff_client(platform_admin).post(
+        f"/api/v1/platform/centers/{public_tenant.pk}/impersonate/",
+        {"user_id": platform_admin.pk},
+        format="json",
+    )
+    assert resp.status_code == 400
+    assert resp.json()["code"] == "public_center"

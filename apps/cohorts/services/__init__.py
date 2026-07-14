@@ -136,9 +136,7 @@ def unenroll_student_from_cohort(*, cohort: Cohort, student, reason: str = "") -
         cohort=cohort, student=student, end_date__isnull=True
     ).first()
     if membership is None:
-        raise ValidationException(
-            _("Student is not active in this cohort."), code="not_enrolled"
-        )
+        raise ValidationException(_("Student is not active in this cohort."), code="not_enrolled")
     membership.end_date = timezone.localdate()
     if reason:
         membership.moved_reason = reason
@@ -156,21 +154,31 @@ def unenroll_student_from_cohort(*, cohort: Cohort, student, reason: str = "") -
     return membership
 
 
-def assign_cohort_teacher(*, cohort: Cohort, teacher, role: str) -> tuple[CohortTeacher, bool]:
+def assign_cohort_teacher(
+    *, cohort: Cohort, teacher, role: str = "co_teacher", teacher_type=None
+) -> tuple[CohortTeacher, bool]:
     """Assign a teacher as a co-teacher/assistant on the cohort (F4 — multiple teachers +
-    assistants per group). Idempotent upsert keyed on the (cohort, teacher) unique pair:
-    re-assigning the same teacher just updates their role, so the frontend never has to
-    reconcile a 409. Returns (row, created)."""
-    if role not in CohortTeacher.TeachRole.values:
+    assistants per group). The enum string is translated to a tenant TeacherType and
+    the canonical uniqueness key is (cohort, teacher, teacher_type)."""
+    from apps.cohorts.teacher_assignments import type_slug_for_legacy_role
+    from apps.teachers.models import TeacherType
+
+    if teacher_type is None:
+        slug = type_slug_for_legacy_role(role)
+        if slug is None:
+            raise ValidationException(
+                _("Invalid teaching role."),
+                code="validation_error",
+                fields={"role": ["Unknown legacy teaching role."]},
+            )
+        teacher_type = TeacherType.objects.filter(slug=slug, is_active=True).first()
+    if teacher_type is None or not teacher_type.is_active:
         raise ValidationException(
-            _("Invalid teaching role."),
-            code="validation_error",
-            fields={"role": [f"Must be one of {list(CohortTeacher.TeachRole.values)}."]},
+            _("Inactive teacher types cannot be assigned."),
+            code="inactive_teacher_type",
+            fields={"teacher_type": ["Choose an active teacher type."]},
         )
-    ct, created = CohortTeacher.objects.update_or_create(
-        cohort=cohort, teacher=teacher, defaults={"role": role}
-    )
-    return ct, created
+    return CohortTeacher.objects.get_or_create(cohort=cohort, teacher=teacher, teacher_type=teacher_type)
 
 
 def remove_cohort_teacher(*, cohort: Cohort, teacher_id: int) -> None:

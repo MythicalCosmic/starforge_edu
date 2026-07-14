@@ -8,7 +8,7 @@ them / created by them / in their department(s), plus (with tasks:write) their b
 
 from __future__ import annotations
 
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
 
 from django.http import HttpRequest, HttpResponse
 from django.utils import timezone
@@ -27,11 +27,14 @@ from core.listing import apply_filters, paginate
 from core.permissions import (
     Role,
     _request_overrides,
-    get_role_memberships,
     get_user_roles,
     has_permission_code,
 )
 from core.responses import created, error, no_content, paginated, success
+from core.scoping import (
+    permission_membership_branch_ids,
+    permission_membership_department_ids,
+)
 
 _RESOURCE = "tasks"
 
@@ -53,18 +56,38 @@ class _Scope(NamedTuple):
     dept_ids: set[int]
 
 
-def _scope(request: HttpRequest) -> _Scope:
+def _scope(request: HttpRequest, *, permission: str = f"{_RESOURCE}:read") -> _Scope:
     req: Any = request  # perm helpers are duck-typed on .user (typed Request upstream)
     roles = get_user_roles(req)
     is_superuser = getattr(req.user, "is_superuser", False)
-    memberships = get_role_memberships(req)
+    branch_scope = permission_membership_branch_ids(
+        roles=roles,
+        permission=permission,
+        account_kinds={"staff", "teacher"},
+    )
+    department_scope = permission_membership_department_ids(
+        roles=roles,
+        permission=permission,
+        account_kinds={"staff", "teacher"},
+    )
+    has_write = has_permission_code(roles, f"{_RESOURCE}:write", _request_overrides(req))
+    if permission == f"{_RESOURCE}:read" and has_write:
+        # Branch-wide task visibility is a write-holder capability. Do not let a
+        # write grant on AccountType B widen a read grant from AccountType A.
+        write_branches = permission_membership_branch_ids(
+            roles=roles,
+            permission=f"{_RESOURCE}:write",
+            account_kinds={"staff", "teacher"},
+        )
+        branch_scope &= write_branches
+        has_write = bool(branch_scope)
     return _Scope(
         is_superuser=is_superuser,
         is_unscoped=is_superuser or Role.DIRECTOR in roles,
-        has_write=has_permission_code(roles, f"{_RESOURCE}:write", _request_overrides(req)),
+        has_write=has_write,
         roles=roles,
-        branch_ids={m.branch_id for m in memberships if m.branch_id},
-        dept_ids={m.department_id for m in memberships if m.department_id},
+        branch_ids=branch_scope,
+        dept_ids=department_scope,
     )
 
 
@@ -72,7 +95,7 @@ def _scope(request: HttpRequest) -> _Scope:
 @csrf_exempt
 @require_auth
 def role_grades_collection_view(request: HttpRequest) -> HttpResponse:
-    if request.method == "GET":
+    if request.method in ("GET", "HEAD"):
         check_perm(request, f"{_RESOURCE}:read")
         # No default_ordering: keep the model's compound Meta.ordering ("-level", "role")
         # when no ?ordering is given, so equal-level grades keep their deterministic
@@ -97,7 +120,16 @@ def role_grade_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
     if read:
         return success(role_grade_to_dict(grade))
     if request.method in ("PUT", "PATCH"):
-        return success(role_grade_to_dict(_grade_service().update(grade, _grade_changes(read_json(request)))))
+        body = read_json(request)
+        if request.method == "PUT":
+            missing = [field for field in ("role", "level") if field not in body]
+            if missing:
+                raise ValidationException(
+                    "role and level are required for a full update.",
+                    code="validation_error",
+                    fields={field: ["Required."] for field in missing},
+                )
+        return success(role_grade_to_dict(_grade_service().update(grade, _grade_changes(body))))
     if request.method == "DELETE":
         _grade_service().delete(grade)
         return no_content()
@@ -110,9 +142,7 @@ def _grade_dto(body: dict[str, Any]) -> RoleGradeDTO:
         raise ValidationException(
             "Role is required.", code="validation_error", fields={"role": ["This field is required."]}
         )
-    return RoleGradeDTO(
-        role=role, level=_level(body, required=True), label=str_field(body, "label", max_length=64)
-    )
+    return RoleGradeDTO(role=role, level=_level(body), label=str_field(body, "label", max_length=64))
 
 
 def _grade_changes(body: dict[str, Any]) -> dict[str, Any]:
@@ -125,16 +155,14 @@ def _grade_changes(body: dict[str, Any]) -> dict[str, Any]:
             )
         changes["role"] = role
     if "level" in body:
-        changes["level"] = _level(body, required=True)
+        changes["level"] = _level(body)
     if "label" in body:
         changes["label"] = str_field(body, "label", max_length=64)
     return changes
 
 
-def _level(body: dict[str, Any], *, required: bool) -> int:
-    value = int_field(body, "level", required=required)
-    if value is None:  # only reachable when required=False
-        return 0
+def _level(body: dict[str, Any]) -> int:
+    value = cast(int, int_field(body, "level", required=True))
     if value < 0:  # PositiveIntegerField — a negative level is a clean 400, not a DB error
         raise ValidationException(
             "Level must be non-negative.", code="validation_error", fields={"level": ["Must be >= 0."]}
@@ -146,7 +174,7 @@ def _level(body: dict[str, Any], *, required: bool) -> int:
 @csrf_exempt
 @require_auth
 def tasks_collection_view(request: HttpRequest) -> HttpResponse:
-    if request.method == "GET":
+    if request.method in ("GET", "HEAD"):
         check_perm(request, f"{_RESOURCE}:read")
         s = _scope(request)
         qs = _task_service().scoped_list(
@@ -175,7 +203,7 @@ def tasks_collection_view(request: HttpRequest) -> HttpResponse:
 @csrf_exempt
 @require_auth
 def tasks_mine_view(request: HttpRequest) -> HttpResponse:
-    if request.method != "GET":
+    if request.method not in ("GET", "HEAD"):
         return error("Method not allowed.", code="method_not_allowed", status=405)
     check_perm(request, f"{_RESOURCE}:read")
     qs = _task_service().mine(request.user)
@@ -198,8 +226,8 @@ def task_assign_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method != "POST":
         return error("Method not allowed.", code="method_not_allowed", status=405)
     check_perm(request, f"{_RESOURCE}:write")
-    s = _scope(request)
-    task = _get_visible(request, pk)
+    s = _scope(request, permission=f"{_RESOURCE}:write")
+    task = _get_visible(request, pk, permission=f"{_RESOURCE}:write")
     body = read_json(request)
     dto = AssignTaskDTO(
         assignee_provided="assignee" in body,
@@ -221,7 +249,22 @@ def task_transition_view(request: HttpRequest, pk: int) -> HttpResponse:
     check_perm(request, f"{_RESOURCE}:read")
     task = _get_visible(request, pk)
     to_status = str_field(read_json(request), "status")
-    return success(task_to_dict(_task_service().transition(task, to_status=to_status, actor=request.user)))
+    s = _scope(request)
+    can_transition_any = (
+        s.is_superuser
+        or has_permission_code(s.roles, f"{_RESOURCE}:transition_any", _request_overrides(request))
+        or has_permission_code(s.roles, f"{_RESOURCE}:assign_any", _request_overrides(request))
+    )
+    return success(
+        task_to_dict(
+            _task_service().transition(
+                task,
+                to_status=to_status,
+                actor=request.user,
+                can_transition_any=can_transition_any,
+            )
+        )
+    )
 
 
 @csrf_exempt
@@ -230,7 +273,7 @@ def task_auto_assign_view(request: HttpRequest) -> HttpResponse:
     if request.method != "POST":
         return error("Method not allowed.", code="method_not_allowed", status=405)
     check_perm(request, f"{_RESOURCE}:write")
-    s = _scope(request)
+    s = _scope(request, permission=f"{_RESOURCE}:write")
     body = read_json(request)
     mode = str_field(body, "mode", default="fair")
     if mode not in ("fair", "free"):
@@ -250,8 +293,8 @@ def task_auto_assign_view(request: HttpRequest) -> HttpResponse:
 
 
 # --- helpers ---------------------------------------------------------------
-def _get_visible(request: HttpRequest, pk: int) -> Task:
-    s = _scope(request)
+def _get_visible(request: HttpRequest, pk: int, *, permission: str = f"{_RESOURCE}:read") -> Task:
+    s = _scope(request, permission=permission)
     task = _task_service().get_visible(
         user=request.user,
         is_unscoped=s.is_unscoped,
@@ -266,7 +309,7 @@ def _get_visible(request: HttpRequest, pk: int) -> Task:
 
 
 def _create_task(request: HttpRequest) -> HttpResponse:
-    s = _scope(request)
+    s = _scope(request, permission=f"{_RESOURCE}:write")
     body = read_json(request)
     title = str_field(body, "title", max_length=200).strip()
     if not title:

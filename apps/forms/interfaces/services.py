@@ -14,12 +14,25 @@ from apps.forms.models import Form, FormField, FormResponse
 class IFormService(ABC):
     @abstractmethod
     def scoped_list(
-        self, *, user, is_unscoped: bool, can_write: bool, branch_ids: set[int]
+        self,
+        *,
+        user,
+        is_unscoped: bool,
+        can_write: bool,
+        read_branch_ids: set[int],
+        write_branch_ids: set[int],
     ) -> QuerySet[Form]: ...
 
     @abstractmethod
     def get_visible(
-        self, *, user, is_unscoped: bool, can_write: bool, branch_ids: set[int], pk: int
+        self,
+        *,
+        user,
+        is_unscoped: bool,
+        can_write: bool,
+        read_branch_ids: set[int],
+        write_branch_ids: set[int],
+        pk: int,
     ) -> Form | None: ...
 
     @abstractmethod

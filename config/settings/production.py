@@ -1,19 +1,29 @@
 """Production settings."""
 
+from urllib.parse import urlsplit
+
 from django.core.exceptions import ImproperlyConfigured
+from django.utils.csp import CSP
 
 from .base import *  # noqa: F403
 from .base import CORS_ALLOWED_ORIGINS, CSRF_TRUSTED_ORIGINS, FIELD_ENCRYPTION_KEY, env
 
 DEBUG = False
 
+# Only platform-owned suffixes may skip customer DNS verification. This is
+# deliberately empty unless the operator names the deployment's own base domain.
+DOMAIN_VERIFICATION_TRUSTED_SUFFIXES = env.list(
+    "DOMAIN_VERIFICATION_TRUSTED_SUFFIXES",
+    default=[],
+)
+
 # Fail fast on insecure defaults — base.py ships dev-friendly fallbacks
 # (`dev-only-CHANGE-ME`, ALLOWED_HOSTS=["*"]) that must NEVER reach production:
-# the default SECRET_KEY would let anyone forge JWTs/sessions, and a wildcard
+# the default SECRET_KEY would let anyone forge signed data/sessions, and a wildcard
 # host disables Host-header validation.
 SECRET_KEY = env("SECRET_KEY")
-# Reject the dev default AND any short/low-entropy key — the JWTs are HS256-signed
-# with this, so a weak key is forgeable (Django's get_random_secret_key() is 50 chars).
+# Reject the dev default AND any short/low-entropy key because Django signs security-
+# sensitive values with it (get_random_secret_key() produces 50-character values).
 if not SECRET_KEY or SECRET_KEY == "dev-only-CHANGE-ME" or len(SECRET_KEY) < 50:
     raise ImproperlyConfigured(
         "SECRET_KEY must be a unique, secret value of at least 50 characters in production."
@@ -47,6 +57,23 @@ if env("NUM_PROXIES") < 1:
         "IP-keyed throttles depend on it."
     )
 
+
+def _require_service_url(name: str, *, schemes: tuple[str, ...]) -> str:
+    value = env(name)
+    parsed = urlsplit(value)
+    if not value or parsed.scheme not in schemes or not parsed.hostname:
+        raise ImproperlyConfigured(f"{name} must be an explicit production service URL.")
+    return value
+
+
+# Never inherit base.py's developer services or published local credentials in
+# production. A misspelled secret must stop the release, not connect the API to
+# an unrelated localhost database/cache.
+_require_service_url("DATABASE_URL", schemes=("postgres", "postgresql"))
+_require_service_url("REDIS_URL", schemes=("redis", "rediss"))
+if env("EMAIL_HOST").strip().lower() in {"", "localhost", "127.0.0.1", "::1"}:
+    raise ImproperlyConfigured("EMAIL_HOST must be configured explicitly in production.")
+
 SECURE_SSL_REDIRECT = True
 SECURE_HSTS_SECONDS = 60 * 60 * 24 * 365
 SECURE_HSTS_INCLUDE_SUBDOMAINS = True
@@ -55,6 +82,37 @@ SESSION_COOKIE_SECURE = True
 CSRF_COOKIE_SECURE = True
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 X_FRAME_OPTIONS = "DENY"
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_REFERRER_POLICY = "same-origin"
+SESSION_COOKIE_SAMESITE = "Lax"
+CSRF_COOKIE_SAMESITE = "Lax"
+
+# Bearer credentials must never appear in URLs, access logs, browser history, or
+# reverse-proxy telemetry. WebSocket clients authenticate with the negotiated
+# ``bearer.<token>`` subprotocol instead.
+WEBSOCKET_ALLOW_QUERY_TOKEN = False
+HEALTH_READY_CACHE_SECONDS = 2.0
+HEALTH_REQUIRE_CELERY_HEARTBEAT = True
+
+# Django 6 ships a native CSP middleware. Keep the API/admin baseline strict;
+# inline styles remain allowed for Django admin compatibility, while scripts,
+# frames, plugins, and form targets stay same-origin/fail-closed.
+MIDDLEWARE.insert(  # noqa: F405
+    MIDDLEWARE.index("django.middleware.security.SecurityMiddleware") + 1,  # noqa: F405
+    "django.middleware.csp.ContentSecurityPolicyMiddleware",
+)
+SECURE_CSP = {
+    "default-src": [CSP.SELF],
+    "base-uri": [CSP.SELF],
+    "object-src": [CSP.NONE],
+    "frame-ancestors": [CSP.NONE],
+    "form-action": [CSP.SELF],
+    "script-src": [CSP.SELF],
+    "style-src": [CSP.SELF, CSP.UNSAFE_INLINE],
+    "img-src": [CSP.SELF, "data:"],
+    "font-src": [CSP.SELF, "data:"],
+    "connect-src": [CSP.SELF, "wss:"],
+}
 
 # Never mock real SMS in prod.
 ESKIZ_USE_MOCK = False
@@ -72,6 +130,25 @@ UZUM_USE_MOCK = False
 SOLIQ_USE_MOCK = False
 FCM_USE_MOCK = False
 PLATFORM_PAYMENTS_USE_MOCK = False
+
+
+def _require_credentials(integration: str, *names: str) -> None:
+    missing = [name for name in names if not str(env(name)).strip()]
+    if missing:
+        raise ImproperlyConfigured(
+            f"{integration} is enabled in production but required credentials are missing: "
+            + ", ".join(missing)
+        )
+
+
+_disabled_apps = set(env.list("DISABLED_APPS", default=[]))
+_require_credentials("Eskiz SMS", "ESKIZ_EMAIL", "ESKIZ_PASSWORD", "ESKIZ_FROM")
+if "ai" not in _disabled_apps:
+    _require_credentials("Anthropic AI", "ANTHROPIC_API_KEY")
+if not {"finance", "payments"}.issubset(_disabled_apps):
+    _require_credentials("Soliq fiscalization", "SOLIQ_API_URL", "SOLIQ_API_TOKEN")
+if "notifications" not in _disabled_apps:
+    _require_credentials("Firebase push", "FCM_CREDENTIALS_FILE")
 
 # Structured JSON logging in production only (D1-LA-10) — dev/test stay human.
 LOGGING["formatters"]["json"] = {  # type: ignore[index]  # noqa: F405

@@ -279,8 +279,11 @@ def test_absence_signal_end_to_end_guardian_gets_sms_and_in_app(
     with schema_context(tenant_a.schema_name):
         student = StudentProfileFactory()
         guardian = GuardianFactory(student=student, is_primary=True)
-        guardian.parent.user.phone = "+998901112233"
+        guardian.parent.phone = "+998901112233"
+        guardian.parent.save(update_fields=["phone"])
+        guardian.parent.user.phone = None
         guardian.parent.user.save(update_fields=["phone"])
+        assert guardian.parent.user.phone is None
 
         with django_capture_on_commit_callbacks(execute=True):
             student_marked_absent.send(

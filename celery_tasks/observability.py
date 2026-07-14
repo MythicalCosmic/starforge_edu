@@ -28,6 +28,7 @@ from typing import Any
 logger = logging.getLogger("starforge.celery")
 
 DLQ_KEY = "starforge:dlq"
+DLQ_MAX_ENTRIES = 1_000
 _START_ATTR = "_starforge_started_monotonic"
 
 
@@ -49,8 +50,10 @@ def push_to_dlq(*, task_name: str, task_id: str | None, args: Any, kwargs: Any, 
     record = {
         "task": task_name,
         "task_id": task_id,
-        "args": _json_safe(args),
-        "kwargs": _json_safe(kwargs),
+        # Keep failure metadata, never raw task payloads: args can contain PII,
+        # provider credentials, or full generated documents.
+        "arg_types": [type(value).__name__ for value in (args or ())],
+        "kwarg_keys": sorted(str(key) for key in (kwargs or {})),
         "exc": f"{type(exc).__name__}: {exc}",
         "schema": _current_schema(),
         "ts": time.time(),
@@ -58,7 +61,9 @@ def push_to_dlq(*, task_name: str, task_id: str | None, args: Any, kwargs: Any, 
     try:
         from infrastructure.cache.redis_client import get_redis
 
-        get_redis().lpush(DLQ_KEY, json.dumps(record, ensure_ascii=False, default=str))
+        redis = get_redis()
+        redis.lpush(DLQ_KEY, json.dumps(record, ensure_ascii=False, default=str))
+        redis.ltrim(DLQ_KEY, 0, DLQ_MAX_ENTRIES - 1)
         return True
     except Exception:  # pragma: no cover - defensive; DLQ must never re-raise
         logger.exception("DLQ push failed for task %s", task_name)
@@ -114,12 +119,3 @@ def connect_celery_observability(app) -> None:
     task_failure.connect(on_task_failure, weak=False, dispatch_uid="starforge.dlq")
     task_prerun.connect(on_task_prerun, weak=False, dispatch_uid="starforge.duration.prerun")
     task_postrun.connect(on_task_postrun, weak=False, dispatch_uid="starforge.duration.postrun")
-
-
-def _json_safe(value: Any) -> Any:
-    """Best-effort JSON-serializable copy (args/kwargs may hold odd objects)."""
-    try:
-        json.dumps(value)
-        return value
-    except (TypeError, ValueError):
-        return str(value)

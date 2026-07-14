@@ -19,6 +19,7 @@ from apps.org.models import (
     Department,
     Room,
 )
+from apps.users.presenters import role_membership_to_dict
 
 
 def _dec(value) -> str | None:
@@ -93,7 +94,11 @@ def branch_to_dict(b: Branch) -> dict[str, Any]:
         "max_students": b.max_students,
         "max_teachers": b.max_teachers,
         "archived_at": b.archived_at.isoformat() if b.archived_at else None,
-        "departments": [department_to_dict(d) for d in b.departments.all()],
+        # Department rows carry budget/head metadata and are branch-scoped. They
+        # must be fetched from /org/departments/, whose selector applies the
+        # caller's exact permission membership. Embedding all of them here made
+        # the intentionally tenant-wide branch directory an object-scope bypass.
+        "departments": [],
         "working_hours": [working_hour_to_dict(w) for w in b.working_hours.all()],
         "created_at": b.created_at.isoformat(),
     }
@@ -157,8 +162,11 @@ _SETTINGS_BOOL_FIELDS = (
     "ai_exam_generation_enabled",
     "show_classroom_rank",
     "placement_test_creation_mobile_only",
+    "absence_deduction_enabled",
+    "absence_deduction_excused_only",
 )
 _SETTINGS_STR_FIELDS = (
+    "default_language",
     "grading_scheme",
     "currency_primary",
     "currency_secondary",
@@ -208,16 +216,7 @@ def staff_to_dict(staff) -> dict[str, Any]:
         "is_active": staff.is_active,
         "must_change_password": staff.must_change_password,
         "last_login_at": staff.last_login_at.isoformat() if staff.last_login_at else None,
-        "role_memberships": [
-            {
-                "id": membership.id,
-                "role": membership.role,
-                "branch": membership.branch_id,
-                "department": membership.department_id,
-                "granted_at": membership.granted_at.isoformat(),
-            }
-            for membership in memberships
-        ],
+        "role_memberships": [role_membership_to_dict(membership) for membership in memberships],
         "created_at": staff.created_at.isoformat(),
         "updated_at": staff.updated_at.isoformat(),
     }

@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import Any
 
 from django.db.models import QuerySet
+from django.utils.translation import gettext_lazy as _
 
 from apps.content import selectors
 from apps.content import services as domain
@@ -32,7 +33,7 @@ from core.exceptions import PermissionException, ValidationException
 
 
 def _reject(field: str, message: str) -> ValidationException:
-    return ValidationException("Invalid input.", code="validation_error", fields={field: [message]})
+    return ValidationException(_("Invalid input."), code="validation_error", fields={field: [message]})
 
 
 def _require_fk(model, value, field: str):
@@ -49,7 +50,7 @@ def _assert_library_writable(library_id, *, actor, roles) -> None:
     if actor is None or library_id is None:
         return
     if not selectors.scoped_libraries(user=actor, roles=roles).filter(pk=library_id).exists():
-        raise PermissionException("You don't have access to that library.", code="library_out_of_scope")
+        raise PermissionException(_("You don't have access to that library."), code="library_out_of_scope")
 
 
 def _course_library_id(course_id) -> int | None:

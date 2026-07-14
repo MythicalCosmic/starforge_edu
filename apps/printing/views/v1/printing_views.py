@@ -34,7 +34,7 @@ from core.http import bool_field, int_field, read_json, str_field
 from core.listing import apply_filters, paginate
 from core.permissions import Role, get_role_memberships
 from core.responses import created, error, no_content, paginated, success
-from core.viewsets import assert_tenant_context
+from core.tenant_context import assert_tenant_context
 from infrastructure.storage.s3_client import presign_download
 
 _SOURCES = set(PrintJob.Source.values)

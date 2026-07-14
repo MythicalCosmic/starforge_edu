@@ -14,10 +14,25 @@ from core.interfaces import IBaseRepository
 
 
 class IFormRepository(IBaseRepository[Form]):
-    def scoped(self, *, user, is_unscoped: bool, can_write: bool, branch_ids: set[int]) -> QuerySet[Form]:
+    def scoped(
+        self,
+        *,
+        user,
+        is_unscoped: bool,
+        can_write: bool,
+        read_branch_ids: set[int],
+        write_branch_ids: set[int],
+    ) -> QuerySet[Form]:
         raise NotImplementedError
 
     def get_scoped(
-        self, *, user, is_unscoped: bool, can_write: bool, branch_ids: set[int], pk: int
+        self,
+        *,
+        user,
+        is_unscoped: bool,
+        can_write: bool,
+        read_branch_ids: set[int],
+        write_branch_ids: set[int],
+        pk: int,
     ) -> Form | None:
         raise NotImplementedError

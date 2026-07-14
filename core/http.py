@@ -53,7 +53,40 @@ def str_field(data: dict[str, Any], name: str, *, default: str = "", max_length:
     return value
 
 
-def int_field(data: dict[str, Any], name: str, *, required: bool = False, default: int | None = None) -> int | None:
+def trimmed_str_field(
+    data: dict[str, Any],
+    name: str,
+    *,
+    default: str = "",
+    max_length: int | None = None,
+    required: bool = False,
+) -> str:
+    """A DRF-style trimmed string.
+
+    Missing optional input uses ``default``; explicit null is rejected rather than
+    silently converted to an empty string. Whitespace is stripped *before* the length
+    check, matching ``CharField(trim_whitespace=True)``.
+    """
+    if name not in data:
+        if required:
+            raise _bad(name, "This field is required.")
+        return default
+    value = data[name]
+    if value is None:
+        raise _bad(name, "May not be null.")
+    if not isinstance(value, str):
+        raise _bad(name, "Must be a string.")
+    if "\x00" in value:
+        raise _bad(name, "Must not contain NUL bytes.")
+    value = value.strip()
+    if max_length is not None and len(value) > max_length:
+        raise _bad(name, f"Must be at most {max_length} characters.")
+    return value
+
+
+def int_field(
+    data: dict[str, Any], name: str, *, required: bool = False, default: int | None = None
+) -> int | None:
     """An int field (accepts an int or a numeric string). Missing -> default / 400 if required."""
     if name not in data or data[name] is None:
         if required:

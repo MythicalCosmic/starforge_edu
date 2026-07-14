@@ -37,17 +37,39 @@ class FormService(IFormService):
         self._forms = forms
 
     def scoped_list(
-        self, *, user, is_unscoped: bool, can_write: bool, branch_ids: set[int]
+        self,
+        *,
+        user,
+        is_unscoped: bool,
+        can_write: bool,
+        read_branch_ids: set[int],
+        write_branch_ids: set[int],
     ) -> QuerySet[Form]:
         return self._forms.scoped(
-            user=user, is_unscoped=is_unscoped, can_write=can_write, branch_ids=branch_ids
+            user=user,
+            is_unscoped=is_unscoped,
+            can_write=can_write,
+            read_branch_ids=read_branch_ids,
+            write_branch_ids=write_branch_ids,
         )
 
     def get_visible(
-        self, *, user, is_unscoped: bool, can_write: bool, branch_ids: set[int], pk: int
+        self,
+        *,
+        user,
+        is_unscoped: bool,
+        can_write: bool,
+        read_branch_ids: set[int],
+        write_branch_ids: set[int],
+        pk: int,
     ) -> Form | None:
         return self._forms.get_scoped(
-            user=user, is_unscoped=is_unscoped, can_write=can_write, branch_ids=branch_ids, pk=pk
+            user=user,
+            is_unscoped=is_unscoped,
+            can_write=can_write,
+            read_branch_ids=read_branch_ids,
+            write_branch_ids=write_branch_ids,
+            pk=pk,
         )
 
     def create(self, data: CreateFormDTO, *, creator, is_unscoped: bool, branch_ids: set[int]) -> Form:
@@ -60,6 +82,12 @@ class FormService(IFormService):
             if branch is None:
                 if len(branch_ids) == 1:
                     branch = self._branch_by_id(next(iter(branch_ids)))
+                    if branch is None:
+                        raise ValidationException(
+                            _("Choose an active branch for this form."),
+                            code="branch_required",
+                            fields={"branch": ["The membership branch is archived."]},
+                        )
                 else:
                     raise ValidationException(_("Choose a branch for this form."), code="branch_required")
             elif branch.id not in branch_ids:
@@ -148,4 +176,4 @@ class FormService(IFormService):
     def _branch_by_id(branch_id: int):
         from apps.org.models import Branch
 
-        return Branch.objects.filter(pk=branch_id).first()
+        return Branch.objects.filter(pk=branch_id, archived_at__isnull=True).first()

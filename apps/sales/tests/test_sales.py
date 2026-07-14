@@ -172,3 +172,37 @@ def test_non_finance_roles_cannot_see_the_till(tenant_a, as_role):
     for role in (Role.TEACHER, Role.STUDENT, Role.PARENT):
         client, _ = as_role(role)
         assert client.get(SALES).status_code == 403
+
+
+def test_sale_detail_filters_head_and_trimmed_text(tenant_a, user_in, as_user):
+    s = _setup(tenant_a, user_in, as_user)
+    created = s["cashier"].post(
+        SALES,
+        _sale_body(s, item="  Course book  ", note="  Gift copy  "),
+        format="json",
+    )
+    sale_id = created.json()["data"]["id"]
+    detail = s["cashier"].get(f"{SALES}{sale_id}/")
+    assert detail.status_code == 200
+    assert detail.json()["data"]["item"] == "Course book"
+    assert detail.json()["data"]["note"] == "Gift copy"
+
+    filtered = s["cashier"].get(
+        f"{SALES}?student={s['student'].id}&payment_method={s['method']}&ordering=-amount_uzs"
+    )
+    assert filtered.status_code == 200
+    assert [row["id"] for row in filtered.json()["data"]] == [sale_id]
+    assert s["cashier"].head(SALES).status_code == 200
+    assert s["cashier"].head(f"{SALES}{sale_id}/").status_code == 200
+
+    refunded = s["cashier"].post(
+        f"{SALES}{sale_id}/refund/", {"reason": "  Returned unopened  "}, format="json"
+    )
+    assert refunded.json()["data"]["refund_reason"] == "Returned unopened"
+
+
+def test_explicit_null_quantity_is_rejected(tenant_a, user_in, as_user):
+    s = _setup(tenant_a, user_in, as_user)
+    response = s["cashier"].post(SALES, _sale_body(s, quantity=None), format="json")
+    assert response.status_code == 400
+    assert "quantity" in response.json()["errors"]

@@ -21,6 +21,7 @@ from apps.finance.models import (
     PaymentMethod,
     PaymentPlan,
     PaymentPlanInstallment,
+    Refund,
 )
 
 _2DP = Decimal("0.01")
@@ -151,8 +152,11 @@ def payment_method_to_dict(pm: PaymentMethod) -> dict[str, Any]:
 def expense_to_dict(e: Expense) -> dict[str, Any]:
     # Each bare FK keeps a readable companion (branch/payment_method names + the
     # three User actors). ExpenseRepository.query select_relateds all five (no N+1).
+    approval = e.approval_request if e.approval_request_id else None
     return {
         "id": e.id,
+        "approval_request": e.approval_request_id,
+        "ledger_entry": approval.ledger_entry_id if approval is not None else None,
         "branch": e.branch_id,
         "branch_name": e.branch.name,
         "category": e.category,
@@ -186,10 +190,30 @@ def cashier_shift_to_dict(s: CashierShift) -> dict[str, Any]:
         "status": s.status,
         "opened_at": _iso(s.opened_at),
         "closed_at": _iso(s.closed_at),
+        "closed_by": s.closed_by_id,
         "opening_cash_uzs": _money(s.opening_cash_uzs),
         "closing_cash_uzs": _money(s.closing_cash_uzs),
         "discrepancy_uzs": _money(s.discrepancy_uzs),
         "notes": s.notes,
+    }
+
+
+def refund_to_dict(refund: Refund) -> dict[str, Any]:
+    return {
+        "id": refund.pk,
+        "invoice": refund.invoice_id,
+        "payment_id": refund.payment_id,
+        "amount_uzs": _money(refund.amount_uzs),
+        "reason": refund.reason,
+        "state": refund.state,
+        "provider": refund.provider,
+        "provider_refund_id": refund.provider_refund_id,
+        "provider_confirmed_at": _iso(refund.provider_confirmed_at),
+        "requested_by": refund.requested_by_id,
+        "approved_by": refund.approved_by_id,
+        "ledger_entry": refund.ledger_entry_id,
+        "created_at": _iso(refund.created_at),
+        "updated_at": _iso(refund.updated_at),
     }
 
 

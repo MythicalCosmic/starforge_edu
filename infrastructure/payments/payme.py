@@ -104,7 +104,11 @@ class PaymeClient(ABC):
         login, _, token = raw.partition(":")
         # Constant-time compare on the secret to avoid leaking the key byte-by-byte
         # via response-timing (the login name is not secret, so a plain == is fine).
-        return login == "Paycom" and bool(key) and hmac.compare_digest(token, key)
+        return (
+            login == "Paycom"
+            and bool(key)
+            and hmac.compare_digest(token.encode("utf-8"), key.encode("utf-8"))
+        )
 
     @abstractmethod
     def handle(

@@ -47,6 +47,33 @@ def presign_upload(key: str, *, expires_in: int = 600, content_type: str = "appl
     )
 
 
+def presign_post_upload(
+    key: str,
+    *,
+    size_bytes: int,
+    expires_in: int = 600,
+    content_type: str = "application/octet-stream",
+) -> dict[str, Any]:
+    """Presign a POST whose policy enforces type and exact content length.
+
+    Unlike a presigned PUT, an S3 POST policy can carry a
+    ``content-length-range`` condition which MinIO/S3 verifies before storing the
+    body.  The returned ``url`` and ``fields`` are submitted as multipart form
+    data by the client.
+    """
+
+    return get_s3_client().generate_presigned_post(
+        Bucket=_storage_options()["bucket_name"],
+        Key=key,
+        Fields={"Content-Type": content_type},
+        Conditions=[
+            {"Content-Type": content_type},
+            ["content-length-range", size_bytes, size_bytes],
+        ],
+        ExpiresIn=expires_in,
+    )
+
+
 def presign_download(key: str, *, expires_in: int = 600) -> str:
     return get_s3_client().generate_presigned_url(
         "get_object",

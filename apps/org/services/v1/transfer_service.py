@@ -1,4 +1,4 @@
-"""BranchTransferService — read-only audit list."""
+"""BranchTransferService — scoped audit reads + transactional student moves."""
 
 from __future__ import annotations
 
@@ -18,3 +18,22 @@ class BranchTransferService(IBranchTransferService):
 
     def get(self, transfer_id: int) -> BranchTransfer | None:
         return self._transfers.get_by_id(transfer_id)
+
+    def transfer_student(
+        self,
+        *,
+        student_id: int,
+        to_branch_id: int,
+        reason: str,
+        actor,
+        allowed_branch_ids: set[int] | None,
+    ) -> BranchTransfer:
+        from apps.org.services import transfer_student
+
+        return transfer_student(
+            student_id=student_id,
+            to_branch_id=to_branch_id,
+            reason=reason,
+            actor=actor,
+            allowed_branch_ids=allowed_branch_ids,
+        )

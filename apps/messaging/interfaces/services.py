@@ -31,3 +31,11 @@ class IThreadService(ABC):
 
     @abstractmethod
     def mark_read(self, *, thread: Thread, user) -> None: ...
+
+    @abstractmethod
+    def presign_attachment(
+        self, *, filename: str, content_type: str, size_bytes: int, requested_by
+    ) -> dict: ...
+
+    @abstractmethod
+    def attachment_download_url(self, *, thread: Thread, key: str) -> str: ...

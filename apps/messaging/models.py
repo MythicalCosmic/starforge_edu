@@ -11,6 +11,22 @@ from __future__ import annotations
 from django.db import models
 
 
+class MessageAttachmentUploadGrant(models.Model):
+    """Single-use, owner-bound authorization for a messaging S3 object."""
+
+    key = models.CharField(max_length=512, unique=True)
+    requested_by = models.ForeignKey("users.User", on_delete=models.CASCADE, related_name="+")
+    content_type = models.CharField(max_length=127)
+    expected_size_bytes = models.PositiveBigIntegerField()
+    actual_size_bytes = models.PositiveBigIntegerField(null=True, blank=True)
+    expires_at = models.DateTimeField(db_index=True)
+    consumed_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [models.Index(fields=("requested_by", "consumed_at", "expires_at"))]
+
+
 class Thread(models.Model):
     subject = models.CharField(max_length=200, blank=True)
     branch = models.ForeignKey(

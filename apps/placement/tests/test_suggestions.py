@@ -61,8 +61,12 @@ def _setup(tenant, user_in, as_user):
         "lead_c": as_user(tenant, lead_u),
         "attempt": attempt,
         "ids": {
-            "adv": adv.id, "adv_uncapped": adv_uncapped.id, "intermediate": intermediate.id,
-            "adv_full": adv_full.id, "adv_archived": adv_archived.id, "adv_other": adv_other.id,
+            "adv": adv.id,
+            "adv_uncapped": adv_uncapped.id,
+            "intermediate": intermediate.id,
+            "adv_full": adv_full.id,
+            "adv_archived": adv_archived.id,
+            "adv_other": adv_other.id,
         },
     }
 
@@ -105,8 +109,12 @@ def test_ended_cohort_is_not_suggested(tenant_a, user_in, as_user):
     s = _setup(tenant_a, user_in, as_user)
     with schema_context(tenant_a.schema_name):
         ended = CohortFactory.create(
-            branch=s["branch"], name="Adv-Ended", level="advanced", capacity=10,
-            start_date=date(2025, 1, 1), end_date=date(2025, 12, 31),
+            branch=s["branch"],
+            name="Adv-Ended",
+            level="advanced",
+            capacity=10,
+            start_date=date(2025, 1, 1),
+            end_date=date(2025, 12, 31),
         )
     rows = s["staff"].get(f"{ATTEMPTS}{s['attempt'].id}/suggestions/").json()["data"]
     assert ended.id not in [r["cohort_id"] for r in rows]

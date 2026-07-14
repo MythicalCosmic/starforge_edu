@@ -6,7 +6,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 
-from django.db.models import QuerySet
+from django.db.models import Q, QuerySet, Subquery
 
 from apps.payments.models import Payment
 
@@ -15,38 +15,48 @@ def payments_qs() -> QuerySet[Payment]:
     return Payment.objects.select_related("payer", "cashier_shift").order_by("-created_at")
 
 
-def payment_with_attempts(payment_id: int) -> Payment:
-    return (
-        Payment.objects.select_related("payer", "fiscal_receipt")
-        .prefetch_related("attempts")
-        .get(pk=payment_id)
-    )
+def payments_for_branches(queryset: QuerySet[Payment], *, branch_ids: set[int]) -> QuerySet[Payment]:
+    """Limit the staff payment log to transactions belonging to their branches.
+
+    ``Payment`` deliberately has no direct invoice FK. Provider rows carry the
+    canonical invoice number in indexed ``account_ref``; cash rows also carry a
+    drawer branch, and older/manual rows can be recovered through the finance
+    allocation spine. Keep all three paths in one selector so list, detail and
+    reconciliation cannot drift into different authorization rules.
+    """
+    from apps.finance.models import Invoice, PaymentAllocation
+
+    invoice_numbers = Invoice.objects.filter(student__branch_id__in=branch_ids).values("number")
+    allocation_payment_ids = PaymentAllocation.objects.filter(
+        invoice__student__branch_id__in=branch_ids
+    ).values("payment_id")
+    return queryset.filter(
+        Q(cashier_shift__branch_id__in=branch_ids)
+        | Q(account_ref__in=Subquery(invoice_numbers))
+        | Q(pk__in=Subquery(allocation_payment_ids))
+    ).distinct()
 
 
-def reconciliation(*, on: date) -> dict[str, Any]:
+def reconciliation(*, on: date, branch_ids: set[int] | None = None) -> dict[str, Any]:
     """Payments completed on ``on`` vs the amount finance allocated against them.
 
     Mismatch = a completed payment whose allocated total != its amount. Finance's
     ``PaymentAllocation`` carries a soft ``payment_id`` (BigInteger, not an FK —
     Lane A decision), so we sum it via a lazy query and tolerate finance absent.
     """
-    completed = list(
-        Payment.objects.filter(status=Payment.Status.COMPLETED, paid_at__date=on).values(
-            "id", "amount_uzs", "provider", "allocation_status"
-        )
-    )
+    completed_qs = Payment.objects.filter(status=Payment.Status.COMPLETED, paid_at__date=on)
+    if branch_ids is not None:
+        completed_qs = payments_for_branches(completed_qs, branch_ids=branch_ids)
+    completed = list(completed_qs.values("id", "amount_uzs", "provider", "allocation_status"))
     payment_ids = [p["id"] for p in completed]
-    allocated: dict[int, Decimal] = {}
-    try:
-        from apps.finance.models import PaymentAllocation
+    from apps.finance.models import PaymentAllocation
 
-        rows = PaymentAllocation.objects.filter(payment_id__in=payment_ids).values_list(
-            "payment_id", "amount_uzs"
-        )
-        for pid, amt in rows:
-            allocated[pid] = allocated.get(pid, Decimal("0")) + (amt or Decimal("0"))
-    except Exception:
-        allocated = {}
+    allocated: dict[int, Decimal] = {}
+    rows = PaymentAllocation.objects.filter(payment_id__in=payment_ids).values_list(
+        "payment_id", "amount_uzs"
+    )
+    for pid, amt in rows:
+        allocated[pid] = allocated.get(pid, Decimal("0")) + (amt or Decimal("0"))
 
     total_paid = sum((p["amount_uzs"] for p in completed), Decimal("0"))
     total_allocated = sum(allocated.values(), Decimal("0"))

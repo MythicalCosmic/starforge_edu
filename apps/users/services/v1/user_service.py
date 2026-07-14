@@ -10,6 +10,7 @@ from typing import Any
 
 from django.db.models import QuerySet
 from django.utils import timezone
+from django.utils.translation import gettext_lazy as _
 
 from apps.users import services as users_domain
 from apps.users.interfaces.repositories import IDeviceRepository, IUserRepository
@@ -49,7 +50,7 @@ class UserService(IUserService):
             value = changes.get(field)
             if value and User.objects.filter(**{field: value}).exclude(pk=user.pk).exists():
                 raise ValidationException(
-                    "Invalid input.",
+                    _("Invalid input."),
                     code="validation_error",
                     fields={field: [f"user with this {field} already exists."]},
                 )

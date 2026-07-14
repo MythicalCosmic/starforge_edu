@@ -11,7 +11,6 @@ from django.contrib.auth.validators import UnicodeUsernameValidator
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.validators import validate_email
 from django.db import transaction
-from django.db.models import F
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
@@ -230,6 +229,10 @@ def sync_role_user_bridge(account) -> None:
         account.username = username
         if not account.password:
             account.set_unusable_password()
+        if not account.is_active:
+            account.set_unusable_password()
+            user.is_active = False
+            user.save(update_fields=["is_active"])
         return
 
     username = validate_role_username(
@@ -262,6 +265,10 @@ def sync_role_user_bridge(account) -> None:
             "password",
         ]
     )
+    if not account.is_active:
+        # Admin edits use this sync path directly.  Deactivation must revoke the
+        # authorization graph as well as flipping two booleans.
+        revoke_role_account_access(account)
 
 
 @transaction.atomic
@@ -290,6 +297,37 @@ def update_role_identity(account, changes: dict) -> None:
 
 
 @transaction.atomic
+def revoke_role_account_access(account, *, deactivate_profile: bool = True) -> None:
+    """Disable a role account's bridge and every credential/grant backed by it.
+
+    The bridge is retained for immutable audit/history foreign keys, but it must not
+    remain an active authorization principal after a profile is deactivated or deleted.
+    This helper is also called by the profile ``pre_delete`` receivers, covering API,
+    admin, and direct service deletion paths uniformly.
+    """
+    from apps.users.models import RoleMembership, Session
+
+    now = timezone.now()
+    if deactivate_profile and account.pk:
+        account.is_active = False
+        account.set_unusable_password()
+        type(account).objects.filter(pk=account.pk).update(
+            is_active=False,
+            password=account.password,
+        )
+
+    user = User.objects.select_for_update().get(pk=account.user_id)
+    user.is_active = False
+    user.set_unusable_password()
+    user.token_version += 1
+    user.save(update_fields=["is_active", "password", "token_version"])
+    account.user = user
+    RoleMembership.objects.filter(user_id=account.user_id, revoked_at__isnull=True).update(revoked_at=now)
+    Session.objects.filter(user_id=account.user_id, revoked_at__isnull=True).update(revoked_at=now)
+    Device.objects.filter(user_id=account.user_id, revoked_at__isnull=True).update(revoked_at=now)
+
+
+@transaction.atomic
 def set_role_account_password(account, raw_password: str, *, must_change: bool = False) -> None:
     """Set the role-owned password and revoke every session for that account."""
     account.set_password(raw_password)
@@ -312,7 +350,7 @@ def issue_role_credentials(account, *, actor, resource_type: str) -> dict[str, s
 
     if account.user.is_staff or account.user.is_superuser:
         raise PermissionException(
-            "Cannot replace a platform administrator password through a role endpoint.",
+            _("Cannot replace a platform administrator password through a role endpoint."),
             code="forbidden",
         )
     temporary_password = generate_temp_password()
@@ -326,27 +364,124 @@ def issue_role_credentials(account, *, actor, resource_type: str) -> dict[str, s
     return {"username": account.username, "temporary_password": temporary_password}
 
 
-def ensure_role_membership(account, *, role: str, branch, department=None):
-    """Keep the canonical scoped role grant aligned with a role profile."""
+@transaction.atomic
+def ensure_role_membership(
+    account,
+    *,
+    branch,
+    department=None,
+    role: str | None = None,
+    account_type=None,
+    replace_scope: bool = True,
+):
+    """Keep a role profile's permission-native AccountType grant aligned.
+
+    ``role`` is a compatibility input for callers that want the seeded system
+    type. New admin code passes ``account_type`` directly. Explicit custom type
+    memberships are never rewritten into a system type; only the selected type
+    (or a legacy null row being upgraded) is touched.
+    """
+    from apps.access.models import AccountType
     from apps.users.models import RoleMembership
 
-    membership = (
-        RoleMembership.objects.filter(user=account.user, role=role, revoked_at__isnull=True)
-        .order_by("id")
-        .first()
+    if account_type is None:
+        if not role:
+            raise ValidationException(
+                _("Choose an account type."),
+                code="account_type_required",
+                fields={"account_type": [_("This field is required.")]},
+            )
+        account_type = AccountType.objects.filter(
+            is_system=True,
+            is_active=True,
+            slug=role,
+        ).first()
+        if account_type is None:
+            raise ValidationException(
+                _("The default account type is unavailable."),
+                code="account_type_unavailable",
+                fields={"account_type": [_("Activate the seeded account type first.")]},
+            )
+    else:
+        account_type = AccountType.objects.filter(pk=account_type.pk, is_active=True).first()
+        if account_type is None:
+            raise ValidationException(
+                _("Choose an active account type."),
+                code="account_type_inactive",
+                fields={"account_type": [_("Choose an active account type.")]},
+            )
+
+    kind_by_model = {
+        "org.staffprofile": AccountType.AccountKind.STAFF,
+        "teachers.teacherprofile": AccountType.AccountKind.TEACHER,
+        "students.studentprofile": AccountType.AccountKind.STUDENT,
+        "parents.parentprofile": AccountType.AccountKind.PARENT,
+    }
+    principal_kind = kind_by_model.get(account._meta.label_lower)
+    if principal_kind is not None and account_type.account_kind != principal_kind:
+        raise ValidationException(
+            _("The account type does not match this profile."),
+            code="principal_kind_mismatch",
+            fields={"account_type": [_("Choose an account type for this profile kind.")]},
+        )
+
+    compatibility_role = account_type.compatibility_role
+    department_id = department.pk if department is not None else None
+    exact = RoleMembership.objects.filter(
+        user=account.user,
+        account_type=account_type,
+        branch=branch,
     )
+    exact = (
+        exact.filter(department__isnull=True)
+        if department_id is None
+        else exact.filter(department_id=department_id)
+    )
+    exact = exact.order_by("revoked_at", "id")
+    membership = exact.first()
+    if membership is None:
+        # Upgrade a pre-migration row in place before considering a new row.
+        membership = (
+            RoleMembership.objects.filter(
+                user=account.user,
+                account_type__isnull=True,
+                role=compatibility_role,
+                revoked_at__isnull=True,
+            )
+            .order_by("id")
+            .first()
+        )
+    if membership is None and account_type.is_system and replace_scope:
+        # A teacher/student/staff profile has one primary system type scope;
+        # profile moves align that row. Parent guardian links pass
+        # replace_scope=False because one parent can legitimately span branches.
+        membership = (
+            RoleMembership.objects.filter(
+                user=account.user,
+                account_type=account_type,
+                revoked_at__isnull=True,
+            )
+            .order_by("id")
+            .first()
+        )
     if membership is None:
         return RoleMembership.objects.create(
             user=account.user,
-            role=role,
+            account_type=account_type,
+            role=compatibility_role,
             branch=branch,
             department=department,
         )
     changed: list[str] = []
+    if membership.account_type_id != account_type.pk:
+        membership.account_type = account_type
+        changed.append("account_type")
+    if membership.role != compatibility_role:
+        membership.role = compatibility_role
+        changed.append("role")
     if membership.branch_id != branch.pk:
         membership.branch = branch
         changed.append("branch")
-    department_id = department.pk if department is not None else None
     if membership.department_id != department_id:
         membership.department = department
         changed.append("department")
@@ -358,9 +493,12 @@ def ensure_role_membership(account, *, role: str, branch, department=None):
     return membership
 
 
+@transaction.atomic
 def bump_token_version(user_id: int) -> None:
     """Invalidate every live access token for a user (TD-1 `tv` claim)."""
-    User.objects.filter(pk=user_id).update(token_version=F("token_version") + 1)
+    user = User.objects.select_for_update().get(pk=user_id)
+    user.token_version += 1
+    user.save(update_fields=["token_version"])
 
 
 def set_user_password(user: User, raw_password: str) -> None:

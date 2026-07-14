@@ -99,6 +99,8 @@ def _subscription_changes(request: HttpRequest) -> dict[str, Any]:
         raw = data["plan_code"]
         if not isinstance(raw, str) or not raw.strip():
             raise _reject("plan_code", "This field must be a non-empty string.")
+        if "\x00" in raw:
+            raise _reject("plan_code", "Must not contain NUL bytes.")
         plan_code = raw.strip()  # change_subscription resolves it -> 400 unknown_plan
         provided = True
     if "status" in data:
@@ -186,7 +188,8 @@ def usage_view(request: HttpRequest) -> HttpResponse:
         return _method_not_allowed()
     center_id = _require_center(request.GET.get("center"))
     qs = _service().usage(center_id=center_id)
-    return success([usage_snapshot_to_dict(u) for u in qs])
+    items, total, page, size = paginate(request, qs)
+    return paginated([usage_snapshot_to_dict(u) for u in items], total=total, page=page, page_size=size)
 
 
 @csrf_exempt
@@ -196,7 +199,8 @@ def ai_charges_view(request: HttpRequest) -> HttpResponse:
         return _method_not_allowed()
     center_id = _require_center(request.GET.get("center"))
     qs = _service().ai_charges(center_id=center_id)
-    return success([ai_usage_charge_to_dict(c) for c in qs])
+    items, total, page, size = paginate(request, qs)
+    return paginated([ai_usage_charge_to_dict(c) for c in items], total=total, page=page, page_size=size)
 
 
 # --- checkout (mock platform payment) --------------------------------------

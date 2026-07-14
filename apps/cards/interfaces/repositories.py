@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from django.db.models import QuerySet
 
-from apps.cards.models import Card, CardType, Wallet
+from apps.cards.models import Card, CardScan, CardType, Wallet
 from apps.students.models import StudentProfile
 from core.interfaces import IBaseRepository
 
@@ -35,6 +35,9 @@ class ICardRepository(IBaseRepository[Card]):
         raise NotImplementedError
 
     def get_student(self, *, student_id: int) -> StudentProfile | None:
+        raise NotImplementedError
+
+    def scoped_scans(self, *, is_director: bool, branch_ids: set[int]) -> QuerySet[CardScan]:
         raise NotImplementedError
 
 

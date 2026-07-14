@@ -24,7 +24,7 @@ class ParentProfileAdmin(RoleAccountAdminMixin):
 
     def save_related(self, request, form, formsets, change) -> None:
         super().save_related(request, form, formsets, change)
-        from apps.users.models import RoleMembership
+        from apps.users.services import ensure_role_membership
         from core.permissions import Role
 
         parent = form.instance
@@ -32,11 +32,12 @@ class ParentProfileAdmin(RoleAccountAdminMixin):
             guardian.student.branch
             for guardian in parent.guardianships.select_related("student__branch").all()
         }:
-            RoleMembership.objects.get_or_create(
-                user=parent.user,
+            ensure_role_membership(
+                parent,
                 role=Role.PARENT,
                 branch=branch,
                 department=None,
+                replace_scope=False,
             )
 
 

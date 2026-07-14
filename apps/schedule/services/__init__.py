@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import datetime as dt
 
-from dateutil.rrule import rrulestr
+from dateutil.rrule import DAILY, MONTHLY, WEEKLY, YEARLY, rrulestr
 from django.apps import apps as django_apps
 from django.core import signing
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
 from apps.schedule.models import Lesson, RecurrenceRule, Term
-from apps.schedule.selectors import check_conflicts
+from apps.schedule.selectors import check_conflicts, check_occurrence_conflicts
 from apps.schedule.signals import lesson_cancelled, lesson_reminder_due, lesson_rescheduled
 from core.exceptions import ConflictException, ValidationException
 from core.utils import current_schema
@@ -26,6 +26,14 @@ ICAL_TOKEN_MAX_AGE = dt.timedelta(days=30)
 # recent-past window (calendars only need near-past for context) plus a hard row cap.
 ICAL_WINDOW_DAYS = 90
 ICAL_MAX_LESSONS = 2000
+# A recurrence rule represents one class slot per calendar day at most. Sub-daily
+# frequencies are nonsensical with the model's fixed start/end time and can expand
+# to millions of datetimes before the old date de-duplication ran.
+ALLOWED_RULE_FREQUENCIES = frozenset((DAILY, WEEKLY, MONTHLY, YEARLY))
+MAX_RULE_OCCURRENCES = 1000
+MAX_RRULE_EXPANSION_CANDIDATES = 2000
+MAX_RRULE_LENGTH = 2048
+DISALLOWED_FIXED_TIME_COMPONENTS = frozenset(("BYHOUR", "BYMINUTE", "BYSECOND"))
 
 
 # ---------------------------------------------------------------------------
@@ -38,10 +46,40 @@ def _aware(date: dt.date, time: dt.time):
 
 
 def validate_rrule(rrule_str: str, *, start_date: dt.date, start_time: dt.time) -> None:
+    if not isinstance(rrule_str, str) or not rrule_str.strip() or len(rrule_str) > MAX_RRULE_LENGTH:
+        raise ValidationException(
+            _("Invalid recurrence rule."),
+            code="invalid_rrule",
+            fields={"rrule": [f"A non-empty rule of at most {MAX_RRULE_LENGTH} characters is required."]},
+        )
+    normalized = rrule_str.strip()
+    # Only a single RRULE is accepted. DTSTART/RDATE/EXRULE blocks would turn this
+    # fixed-time model into an attacker-controlled rruleset with very different cost.
+    if "\r" in normalized or "\n" in normalized:
+        raise ValidationException(
+            _("Invalid recurrence rule."),
+            code="invalid_rrule",
+            fields={"rrule": ["Only a single RRULE is allowed."]},
+        )
+    body = normalized[6:] if normalized.upper().startswith("RRULE:") else normalized
+    component_names = {part.partition("=")[0].strip().upper() for part in body.split(";")}
+    disallowed = sorted(component_names & DISALLOWED_FIXED_TIME_COMPONENTS)
+    if disallowed:
+        raise ValidationException(
+            _("Recurrence time must use the rule's fixed start_time."),
+            code="rrule_time_component_not_allowed",
+            fields={"rrule": [f"These components are not allowed: {', '.join(disallowed)}."]},
+        )
     try:
-        rrulestr(rrule_str, dtstart=dt.datetime.combine(start_date, start_time))
+        parsed = rrulestr(normalized, dtstart=dt.datetime.combine(start_date, start_time))
     except (ValueError, TypeError) as exc:
         raise ValidationException(_("Invalid recurrence rule."), code="invalid_rrule") from exc
+    if getattr(parsed, "_freq", None) not in ALLOWED_RULE_FREQUENCIES:
+        raise ValidationException(
+            _("Recurrence frequency must be daily or less frequent."),
+            code="rrule_frequency_too_frequent",
+            fields={"rrule": ["Use DAILY, WEEKLY, MONTHLY, or YEARLY."]},
+        )
 
 
 def _holiday_dates(branch_id: int) -> set[dt.date]:
@@ -59,14 +97,35 @@ def _rule_occurrences(rule: RecurrenceRule) -> list[tuple]:
     then localized — Asia/Tashkent has no DST so wall-clock times are stable."""
     naive_start = dt.datetime.combine(rule.start_date, rule.start_time)
     naive_until = dt.datetime.combine(rule.end_date, dt.time(23, 59, 59))
+    # Revalidate here as well as on create/update so legacy or directly-created rows
+    # cannot bypass the resource bounds by calling materialize_rule directly.
+    validate_rrule(rule.rrule, start_date=rule.start_date, start_time=rule.start_time)
     rset = rrulestr(rule.rrule, dtstart=naive_start)
     holidays = _holiday_dates(rule.cohort.branch_id)
     seen: set[dt.date] = set()
-    occurrences = []
-    for occ in rset.between(naive_start, naive_until, inc=True):
+    occurrences: list[tuple[dt.datetime, dt.datetime]] = []
+    # xafter is lazy; unlike between(), it never allocates an attacker-controlled
+    # multi-million occurrence list before we can enforce the cap.
+    for candidate_count, occ in enumerate(rset.xafter(naive_start, inc=True), start=1):
+        if occ > naive_until:
+            break
+        # Holidays and same-day de-duplication must not permit an enormous raw
+        # expansion to burn CPU while yielding only a small lesson list.
+        if candidate_count > MAX_RRULE_EXPANSION_CANDIDATES:
+            raise ValidationException(
+                _("Recurrence creates too many candidate dates."),
+                code="rrule_too_many_occurrences",
+                fields={"rrule": [f"At most {MAX_RULE_OCCURRENCES} occurrences are allowed."]},
+            )
         date = occ.date()
         if date in holidays or date in seen:
             continue
+        if len(occurrences) >= MAX_RULE_OCCURRENCES:
+            raise ValidationException(
+                _("Recurrence creates too many lessons."),
+                code="rrule_too_many_occurrences",
+                fields={"rrule": [f"At most {MAX_RULE_OCCURRENCES} occurrences are allowed."]},
+            )
         seen.add(date)
         occurrences.append((_aware(date, rule.start_time), _aware(date, rule.end_time)))
     return occurrences
@@ -108,20 +167,23 @@ def materialize_rule(rule: RecurrenceRule) -> list[Lesson]:
     if not rule.is_active:
         return list(rule.lessons.order_by("starts_at"))
 
+    occurrences = [
+        (starts_at, ends_at)
+        for starts_at, ends_at in _rule_occurrences(rule)
+        if starts_at > now and starts_at not in kept_starts
+    ]
+    conflicts = check_occurrence_conflicts(
+        occurrences,
+        cohort_id=rule.cohort_id,
+        teacher_id=rule.teacher_id,
+        room_id=rule.room_id,
+        exclude_lesson_ids=[lf.id for lf in kept],
+    )
+    if conflicts:
+        raise ConflictException(_("Schedule conflict."), code="schedule_conflict", fields=conflicts)
+
     to_create = []
-    for starts_at, ends_at in _rule_occurrences(rule):
-        if starts_at <= now or starts_at in kept_starts:
-            continue
-        conflicts = check_conflicts(
-            starts_at=starts_at,
-            ends_at=ends_at,
-            cohort_id=rule.cohort_id,
-            teacher_id=rule.teacher_id,
-            room_id=rule.room_id,
-            exclude_lesson_ids=[lf.id for lf in kept],
-        )
-        if conflicts:
-            raise ConflictException(_("Schedule conflict."), code="schedule_conflict", fields=conflicts)
+    for starts_at, ends_at in occurrences:
         to_create.append(
             Lesson(
                 rule=rule,
@@ -135,7 +197,13 @@ def materialize_rule(rule: RecurrenceRule) -> list[Lesson]:
                 ends_at=ends_at,
             )
         )
-    Lesson.objects.bulk_create(to_create)
+    try:
+        # A concurrent lesson insert can race the friendly pre-check; the exclusion
+        # constraints decide the winner, and the savepoint keeps this transaction usable.
+        with transaction.atomic():
+            Lesson.objects.bulk_create(to_create)
+    except IntegrityError:
+        raise ConflictException(_("Schedule conflict."), code="schedule_conflict") from None
     return list(rule.lessons.order_by("starts_at"))
 
 
@@ -220,7 +288,18 @@ def move_occurrence(lesson: Lesson, *, starts_at, ends_at, actor=None) -> Lesson
     lesson.starts_at = starts_at
     lesson.ends_at = ends_at
     lesson.detached_from_rule = True
-    lesson.save(update_fields=["starts_at", "ends_at", "detached_from_rule", "updated_at"])
+    # A moved occurrence must be eligible for one-time absence reconciliation at its
+    # new time. Existing attendance remains authoritative and will not be overwritten.
+    lesson.auto_absence_processed_at = None
+    lesson.save(
+        update_fields=[
+            "starts_at",
+            "ends_at",
+            "detached_from_rule",
+            "auto_absence_processed_at",
+            "updated_at",
+        ]
+    )
     schema = current_schema()
     # moved_at = the lesson's post-save updated_at: a monotonic, unique-per-move,
     # stored value. It's the notification dedupe discriminator so EVERY move notifies —
@@ -269,26 +348,58 @@ def bulk_reschedule(rule: RecurrenceRule, *, shift_minutes: int, actor=None) -> 
     impact reschedule and must not be silent."""
     delta = dt.timedelta(minutes=shift_minutes)
     now = timezone.now()
-    lessons = list(rule.lessons.filter(status=Lesson.Status.SCHEDULED, starts_at__gt=now))
+    lessons = list(
+        rule.lessons.select_for_update()
+        .filter(status=Lesson.Status.SCHEDULED, starts_at__gt=now)
+        .order_by("pk")
+    )
     moved_ids = [lf.id for lf in lessons]
     old_starts = {lf.id: lf.starts_at for lf in lessons}
+    shifted_occurrences = [(lesson.starts_at + delta, lesson.ends_at + delta) for lesson in lessons]
+    conflicts = check_occurrence_conflicts(
+        shifted_occurrences,
+        cohort_id=rule.cohort_id,
+        teacher_id=rule.teacher_id,
+        room_id=rule.room_id,
+        exclude_lesson_ids=moved_ids,
+    )
+    if conflicts:
+        raise ConflictException(_("Schedule conflict."), code="schedule_conflict", fields=conflicts)
+    if not lessons:
+        return 0
+
+    # PostgreSQL checks each non-deferrable exclusion constraint while the write
+    # happens. Saving a weekly batch row-by-row can therefore make the first row's
+    # new slot collide with the second row's *old* slot, even though the final batch
+    # is conflict-free. Temporarily move every locked row outside the constraint's
+    # ``status='scheduled'`` predicate, update all times, then restore them together.
+    # The outer transaction makes the temporary state invisible and guarantees that
+    # any failure restores the original schedule.
+    moved_at = timezone.now()
+    moving = Lesson.objects.filter(pk__in=moved_ids)
+    try:
+        with transaction.atomic():
+            moving.update(status=Lesson.Status.CANCELLED)
+            for lesson, (new_start, new_end) in zip(lessons, shifted_occurrences, strict=True):
+                lesson.starts_at = new_start
+                lesson.ends_at = new_end
+                lesson.updated_at = moved_at
+                # Keep the same invariant as move_occurrence: changing a lesson's
+                # time makes it eligible for absence reconciliation at the new time.
+                lesson.auto_absence_processed_at = None
+            Lesson.objects.bulk_update(
+                lessons,
+                ["starts_at", "ends_at", "auto_absence_processed_at", "updated_at"],
+                batch_size=500,
+            )
+            moving.update(status=Lesson.Status.SCHEDULED)
+    except IntegrityError as exc:
+        # A concurrent insert can still win after the pre-check; surface the same
+        # stable API conflict instead of leaking a database exception.
+        raise ConflictException(_("Schedule conflict."), code="schedule_conflict") from exc
+
     for lesson in lessons:
-        new_start = lesson.starts_at + delta
-        new_end = lesson.ends_at + delta
-        conflicts = check_conflicts(
-            starts_at=new_start,
-            ends_at=new_end,
-            cohort_id=lesson.cohort_id,
-            teacher_id=lesson.teacher_id,
-            room_id=lesson.room_id,
-            exclude_lesson_ids=moved_ids,
-        )
-        if conflicts:
-            raise ConflictException(_("Schedule conflict."), code="schedule_conflict", fields=conflicts)
-        lesson.starts_at = new_start
-        lesson.ends_at = new_end
-    for lesson in lessons:
-        lesson.save(update_fields=["starts_at", "ends_at", "updated_at"])
+        lesson.status = Lesson.Status.SCHEDULED
     schema = current_schema()
     actor_id = getattr(actor, "pk", None)
     for lesson in lessons:
@@ -316,8 +427,6 @@ def ical_token_for(user) -> str:
 
 
 def lessons_for_token(token: str):
-    from rest_framework_simplejwt.exceptions import TokenError
-
     from apps.schedule.selectors import scoped_lessons
     from apps.users.models import User
     from core.exceptions import AuthenticationException
@@ -336,13 +445,8 @@ def lessons_for_token(token: str):
     # token_version mismatch ⇒ password-change / logout revoked this feed.
     if data.get("tv") != user.token_version:
         raise AuthenticationException(_("Invalid feed token."), code="authentication_failed")
-    try:
-        cutoff = timezone.now() - dt.timedelta(days=ICAL_WINDOW_DAYS)
-        return scoped_lessons(user=user).filter(starts_at__gte=cutoff).order_by("starts_at")[
-            :ICAL_MAX_LESSONS
-        ]
-    except TokenError:  # pragma: no cover - defensive
-        return Lesson.objects.none()
+    cutoff = timezone.now() - dt.timedelta(days=ICAL_WINDOW_DAYS)
+    return scoped_lessons(user=user).filter(starts_at__gte=cutoff).order_by("starts_at")[:ICAL_MAX_LESSONS]
 
 
 def build_ical(lessons) -> bytes:

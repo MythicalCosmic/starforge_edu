@@ -11,17 +11,21 @@ no-op.
 from __future__ import annotations
 
 import calendar
+import json
 import logging
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
+from django.utils.translation import gettext_lazy as _
 
 from apps.reports.generators import get_generator
 from apps.reports.models import Report, ReportFormat, ReportRun, ReportSchedule
-from core.exceptions import PermissionException, ValidationException
-from core.permissions import Role
+from core.exceptions import ConflictException, PermissionException, ThrottledException, ValidationException
+from core.job_limits import lock_tenant_job_queue, release_job_execution, try_acquire_job_execution
+from core.permissions import PermissionRoleSet, Role, _code_allowed, has_permission_code
 from core.utils import current_schema
 
 logger = logging.getLogger("starforge.reports")
@@ -31,6 +35,197 @@ REPORT_READY_EVENT = "report.ready"
 
 # Roles that bypass per-report allowed_roles (see the whole library).
 _FULL_ROLES = {Role.DIRECTOR}
+
+# Server-owned metadata embedded in params.  It is copied to scheduled runs and
+# lets selectors enforce branch visibility without trusting a client-supplied
+# ``branch_id`` (some report types are scoped by cohort instead).
+_SCOPE_BRANCH_IDS = "_scope_branch_ids"
+
+_PARAMS_BY_REPORT: dict[str, set[str]] = {
+    "enrollment": {"branch_id", "cohort_id"},
+    "attendance": {"branch_id", "cohort_id", "date_from", "date_to"},
+    "grades": {"branch_id", "term_id", "subject_id", "include_unpublished"},
+    "finance": {"branch_id", "date_from", "date_to"},
+    "ai_usage": {"month"},
+    "storage_usage": set(),
+}
+
+# HoDs are branch/department managers.  The AI/storage aggregations have no
+# branch attribution, so exposing them to a HoD would silently restore
+# tenant-wide access.  Keep them director-only until their source rows carry a
+# branch dimension.
+_DIRECTOR_ONLY_REPORTS = {"ai_usage", "storage_usage"}
+_REPORT_DOMAIN_PERMISSION = {
+    "enrollment": "students:read",
+    "attendance": "attendance:read",
+    "grades": "academics:read",
+    "finance": "finance:read",
+}
+
+
+def _active_branch_ids(user, roles: set[str]) -> set[int]:
+    if user is None:
+        return set()
+    if isinstance(roles, PermissionRoleSet):
+        branch_ids: set[int] = set()
+        for membership in roles.membership_scopes:
+            if membership.is_legacy_fallback:
+                allowed = has_permission_code({membership.role}, "reports:write")
+            else:
+                allowed = _code_allowed(set(membership.grants), set(), "reports:write")
+            if allowed:
+                branch_ids.add(membership.branch_id)
+        return branch_ids
+    return set(user.role_memberships.filter(revoked_at__isnull=True).values_list("branch_id", flat=True))
+
+
+def _positive_int(params: dict[str, Any], name: str) -> int | None:
+    value = params.get(name)
+    if value in (None, ""):
+        return None
+    if isinstance(value, bool) or not (
+        isinstance(value, int) or (isinstance(value, str) and value.isdecimal())
+    ):
+        raise ValidationException(code="invalid_report_params", fields={name: ["Must be an integer."]})
+    value = int(value)
+    if value < 1:
+        raise ValidationException(code="invalid_report_params", fields={name: ["Must be positive."]})
+    return value
+
+
+def _validate_date_param(params: dict[str, Any], name: str) -> date | None:
+    value = params.get(name)
+    if value in (None, ""):
+        return None
+    if not isinstance(value, str):
+        raise ValidationException(code="invalid_report_params", fields={name: ["Use YYYY-MM-DD."]})
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValidationException(
+            code="invalid_report_params", fields={name: ["Use a valid YYYY-MM-DD date."]}
+        ) from exc
+    params[name] = parsed.isoformat()
+    return parsed
+
+
+def _normalize_params(*, report_key: str, params: dict[str, Any], user, roles: set[str]) -> dict[str, Any]:
+    """Validate report inputs and stamp an unforgeable branch-scope snapshot."""
+    if not isinstance(params, dict):
+        raise ValidationException(code="invalid_report_params", fields={"params": ["Must be an object."]})
+    if len(params) > 20 or len(json.dumps(params, default=str)) > 16_384:
+        raise ValidationException(code="invalid_report_params", fields={"params": ["Payload is too large."]})
+    allowed = _PARAMS_BY_REPORT.get(report_key, set())
+    # Never trust a persisted/client-provided scope snapshot: discard and
+    # recompute it from current memberships below.
+    params = {key: value for key, value in params.items() if key != _SCOPE_BRANCH_IDS}
+    unknown = set(params) - allowed
+    if unknown:
+        raise ValidationException(
+            code="invalid_report_params",
+            fields={"params": [f"Unknown parameter(s): {', '.join(sorted(unknown))}."]},
+        )
+
+    clean = dict(params)
+    branch_id = _positive_int(clean, "branch_id")
+    cohort_id = _positive_int(clean, "cohort_id")
+    for name in ("term_id", "subject_id"):
+        if name in clean:
+            parsed = _positive_int(clean, name)
+            if parsed is not None:
+                clean[name] = parsed
+    if branch_id is not None:
+        clean["branch_id"] = branch_id
+    if cohort_id is not None:
+        clean["cohort_id"] = cohort_id
+
+    start = _validate_date_param(clean, "date_from")
+    end = _validate_date_param(clean, "date_to")
+    if start and end and start > end:
+        raise ValidationException(
+            code="invalid_report_params", fields={"date_to": ["Must not be before date_from."]}
+        )
+    if "include_unpublished" in clean and not isinstance(clean["include_unpublished"], bool):
+        raise ValidationException(
+            code="invalid_report_params", fields={"include_unpublished": ["Must be a boolean."]}
+        )
+    if clean.get("include_unpublished") and not (
+        getattr(user, "is_superuser", False) or Role.DIRECTOR in roles
+    ):
+        raise PermissionException(code="report_forbidden")
+    month = clean.get("month")
+    if month not in (None, ""):
+        if not isinstance(month, str) or len(month) != 7:
+            raise ValidationException(code="invalid_report_params", fields={"month": ["Use YYYY-MM."]})
+        try:
+            datetime.strptime(month, "%Y-%m")
+        except ValueError as exc:
+            raise ValidationException(
+                code="invalid_report_params", fields={"month": ["Use a valid YYYY-MM."]}
+            ) from exc
+
+    from apps.org.models import Branch
+
+    target_branch: int | None = None
+    if branch_id is not None:
+        if not Branch.objects.filter(pk=branch_id, archived_at__isnull=True).exists():
+            raise ValidationException(code="invalid_report_params", fields={"branch_id": ["Not found."]})
+        target_branch = branch_id
+    if cohort_id is not None:
+        from apps.cohorts.models import Cohort
+
+        cohort_branch = Cohort.objects.filter(pk=cohort_id).values_list("branch_id", flat=True).first()
+        if cohort_branch is None:
+            raise ValidationException(code="invalid_report_params", fields={"cohort_id": ["Not found."]})
+        if target_branch is not None and target_branch != cohort_branch:
+            raise ValidationException(
+                code="invalid_report_params",
+                fields={"cohort_id": ["The cohort is not in the selected branch."]},
+            )
+        target_branch = cohort_branch
+
+    full_scope = bool(getattr(user, "is_superuser", False) or Role.DIRECTOR in roles)
+    membership_branches = _active_branch_ids(user, roles)
+    if not full_scope:
+        if not membership_branches:
+            raise PermissionException(code="report_forbidden")
+        if target_branch is not None and target_branch not in membership_branches:
+            raise PermissionException(code="report_forbidden")
+        scope_branches = {target_branch} if target_branch is not None else membership_branches
+    else:
+        # Empty means tenant-wide and is intentionally visible only to directors.
+        scope_branches = {target_branch} if target_branch is not None else set()
+    clean[_SCOPE_BRANCH_IDS] = sorted(scope_branches)
+    return clean
+
+
+def _validate_recipient_ids(*, recipient_ids: Any, scope_branch_ids: list[int]) -> list[int]:
+    if not isinstance(recipient_ids, list) or len(recipient_ids) > 50:
+        raise ValidationException(
+            code="invalid_recipients", fields={"recipient_ids": ["Must contain at most 50 user ids."]}
+        )
+    if any(isinstance(value, bool) or not isinstance(value, int) or value < 1 for value in recipient_ids):
+        raise ValidationException(
+            code="invalid_recipients", fields={"recipient_ids": ["Every id must be a positive integer."]}
+        )
+    unique = list(dict.fromkeys(recipient_ids))
+    if not unique:
+        return []
+    from apps.users.models import User
+
+    users = User.objects.filter(pk__in=unique, is_active=True)
+    if scope_branch_ids:
+        users = users.filter(
+            role_memberships__branch_id__in=scope_branch_ids,
+            role_memberships__revoked_at__isnull=True,
+        ).distinct()
+    found = set(users.values_list("pk", flat=True))
+    if found != set(unique):
+        raise ValidationException(
+            code="invalid_recipients",
+            fields={"recipient_ids": ["A recipient is inactive, missing, or outside this branch scope."]},
+        )
+    return unique
 
 
 def can_run_report(*, report: Report, roles: set[str], is_superuser: bool = False) -> bool:
@@ -42,8 +237,78 @@ def can_run_report(*, report: Report, roles: set[str], is_superuser: bool = Fals
     """
     if is_superuser or (roles & _FULL_ROLES):
         return True
+    if report.key in _DIRECTOR_ONLY_REPORTS:
+        return False
     allowed = set(report.allowed_roles or [])
-    return bool(roles & allowed)
+    legacy_roles = roles.fallback_roles if isinstance(roles, PermissionRoleSet) else roles
+    if legacy_roles & allowed:
+        return True
+    return bool(
+        isinstance(roles, PermissionRoleSet)
+        and has_permission_code(roles, "reports:write", {})
+        and has_permission_code(roles, _REPORT_DOMAIN_PERMISSION.get(report.key, "*:*"), {})
+    )
+
+
+def _admit_report_run(
+    *, report: Report, requested_by, params: dict[str, Any], fmt: str, recipient_ids: list[int] | None = None
+) -> tuple[ReportRun, bool]:
+    """Return an identical active run or create one after concurrency-safe caps."""
+    lock_tenant_job_queue("documents")
+    recipient_ids = recipient_ids or []
+    active = (ReportRun.Status.QUEUED, ReportRun.Status.RUNNING)
+    duplicate = (
+        ReportRun.objects.filter(
+            report=report,
+            requested_by=requested_by,
+            params=params,
+            format=fmt,
+            recipient_ids=recipient_ids,
+            status__in=active,
+        )
+        .order_by("-created_at")
+        .first()
+    )
+    if duplicate is not None:
+        return duplicate, False
+
+    now = timezone.now()
+    user_active = ReportRun.objects.filter(requested_by=requested_by, status__in=active).count()
+    tenant_active = ReportRun.objects.filter(status__in=active).count()
+    user_hourly = ReportRun.objects.filter(
+        requested_by=requested_by, created_at__gte=now - timedelta(hours=1)
+    ).count()
+    tenant_hourly = ReportRun.objects.filter(created_at__gte=now - timedelta(hours=1)).count()
+    from apps.academics.models import Transcript
+
+    transcript_active = Transcript.objects.filter(
+        status__in=(Transcript.Status.PENDING, Transcript.Status.PROCESSING)
+    ).count()
+    transcript_hourly = Transcript.objects.filter(created_at__gte=now - timedelta(hours=1)).count()
+    if user_active >= getattr(settings, "REPORT_MAX_ACTIVE_PER_USER", 3):
+        raise ThrottledException(code="report_user_queue_full", wait=60)
+    if tenant_active >= getattr(settings, "REPORT_MAX_ACTIVE_PER_TENANT", 20):
+        raise ThrottledException(code="report_tenant_queue_full", wait=60)
+    if tenant_active + transcript_active >= getattr(settings, "DOCUMENT_MAX_ACTIVE_PER_TENANT", 20):
+        raise ThrottledException(code="document_tenant_queue_full", wait=60)
+    if user_hourly >= getattr(settings, "REPORT_MAX_HOURLY_PER_USER", 10):
+        raise ThrottledException(code="report_user_hourly_limit", wait=3600)
+    if tenant_hourly >= getattr(settings, "REPORT_MAX_HOURLY_PER_TENANT", 100):
+        raise ThrottledException(code="report_tenant_hourly_limit", wait=3600)
+    if tenant_hourly + transcript_hourly >= getattr(settings, "DOCUMENT_MAX_HOURLY_PER_TENANT", 100):
+        raise ThrottledException(code="document_tenant_hourly_limit", wait=3600)
+
+    return (
+        ReportRun.objects.create(
+            report=report,
+            requested_by=requested_by,
+            params=params,
+            recipient_ids=recipient_ids,
+            format=fmt,
+            status=ReportRun.Status.QUEUED,
+        ),
+        True,
+    )
 
 
 @transaction.atomic
@@ -67,16 +332,22 @@ def create_report_run(
     if chosen not in ReportFormat.values:
         raise ValidationException(code="invalid_format")
 
-    run = ReportRun.objects.create(
+    normalized_params = _normalize_params(
+        report_key=report.key,
+        params=params or {},
+        user=requested_by,
+        roles=roles,
+    )
+    run, created = _admit_report_run(
         report=report,
         requested_by=requested_by,
-        params=params or {},
-        format=chosen,
-        status=ReportRun.Status.QUEUED,
+        params=normalized_params,
+        fmt=chosen,
     )
     schema = current_schema()
     run_id = run.pk
-    transaction.on_commit(lambda: _enqueue_build(run_id, schema))
+    if created:
+        transaction.on_commit(lambda: _enqueue_build(run_id, schema))
     return run
 
 
@@ -90,6 +361,15 @@ def _enqueue_build(run_id: int, schema: str) -> None:
 # build_report body (called by the Celery task — D4-LB-4)
 # --------------------------------------------------------------------------- #
 def build_report_run(run_id: int) -> str | None:
+    if not try_acquire_job_execution("report", run_id):
+        raise ConflictException(_("This report run is already being built."), code="report_in_progress")
+    try:
+        return _build_report_run(run_id)
+    finally:
+        release_job_execution("report", run_id)
+
+
+def _build_report_run(run_id: int) -> str | None:
     """Idempotent task body: queued → running → done | failed.
 
     Renders the generator output for the run's scoping (the requester's roles),
@@ -222,7 +502,58 @@ def create_schedule(*, report_key: str, created_by, roles: set[str], **fields: A
     is_superuser = bool(getattr(created_by, "is_superuser", False))
     if not can_run_report(report=report, roles=roles, is_superuser=is_superuser):
         raise PermissionException(code="report_forbidden")
+    fields = dict(fields)
+    fields["params"] = _normalize_params(
+        report_key=report.key,
+        params=fields.get("params") or {},
+        user=created_by,
+        roles=roles,
+    )
+    fields["recipient_ids"] = _validate_recipient_ids(
+        recipient_ids=fields.get("recipient_ids") or [],
+        scope_branch_ids=fields["params"][_SCOPE_BRANCH_IDS],
+    )
     return ReportSchedule.objects.create(report=report, created_by=created_by, **fields)
+
+
+@transaction.atomic
+def update_schedule(
+    schedule: ReportSchedule, *, actor, roles: set[str], report_key: str | None = None, **changes: Any
+) -> ReportSchedule:
+    """Update an already selector-scoped schedule with the same create gates."""
+    report = schedule.report
+    if report_key is not None:
+        try:
+            report = Report.objects.get(key=report_key)
+        except Report.DoesNotExist as exc:
+            raise ValidationException(code="unknown_report_key") from exc
+    if not can_run_report(
+        report=report,
+        roles=roles,
+        is_superuser=bool(getattr(actor, "is_superuser", False)),
+    ):
+        raise PermissionException(code="report_forbidden")
+
+    merged_params = changes.get("params", schedule.params or {})
+    normalized = _normalize_params(
+        report_key=report.key,
+        params=merged_params,
+        user=actor,
+        roles=roles,
+    )
+    recipients = _validate_recipient_ids(
+        recipient_ids=changes.get("recipient_ids", schedule.recipient_ids or []),
+        scope_branch_ids=normalized[_SCOPE_BRANCH_IDS],
+    )
+    schedule.report = report
+    schedule.params = normalized
+    schedule.recipient_ids = recipients
+    for field in ("cadence", "weekday", "day_of_month", "hour", "format", "is_active"):
+        if field in changes:
+            setattr(schedule, field, changes[field])
+    schedule.full_clean()
+    schedule.save()
+    return schedule
 
 
 def schedule_is_due(schedule: ReportSchedule, *, now: datetime) -> bool:
@@ -274,19 +605,36 @@ def fire_schedule(schedule: ReportSchedule, *, now: datetime) -> ReportRun:
         # OUTSIDE this atomic block — deactivating here would be rolled back by the
         # raise below).
         raise ValidationException(code="schedule_no_creator")
-    run = ReportRun.objects.create(
+    creator_roles = _requester_roles(locked.created_by)
+    if not can_run_report(
+        report=locked.report,
+        roles=creator_roles,
+        is_superuser=bool(getattr(locked.created_by, "is_superuser", False)),
+    ):
+        raise PermissionException(code="report_forbidden")
+    normalized_params = _normalize_params(
+        report_key=locked.report.key,
+        params=locked.params or {},
+        user=locked.created_by,
+        roles=creator_roles,
+    )
+    recipient_ids = _validate_recipient_ids(
+        recipient_ids=list(locked.recipient_ids or []),
+        scope_branch_ids=normalized_params[_SCOPE_BRANCH_IDS],
+    )
+    run, created = _admit_report_run(
         report=locked.report,
         requested_by=locked.created_by,
-        params=locked.params or {},
-        recipient_ids=list(locked.recipient_ids or []),
-        format=locked.format,
-        status=ReportRun.Status.QUEUED,
+        params=normalized_params,
+        recipient_ids=recipient_ids,
+        fmt=locked.format,
     )
     locked.last_run_at = now
     locked.save(update_fields=["last_run_at"])
     schema = current_schema()
     run_id = run.pk
-    transaction.on_commit(lambda: _enqueue_build(run_id, schema))
+    if created:
+        transaction.on_commit(lambda: _enqueue_build(run_id, schema))
     return run
 
 
@@ -308,6 +656,16 @@ def run_due_schedules(*, now: datetime | None = None) -> int:
         try:
             fire_schedule(schedule, now=now)
             fired += 1
-        except ValidationException:
-            continue  # lost the race / no longer due
+        except PermissionException:
+            ReportSchedule.objects.filter(pk=schedule.pk).update(is_active=False)
+            logger.warning("report schedule %s deactivated: creator no longer authorized", schedule.pk)
+        except ValidationException as exc:
+            if exc.code != "schedule_not_due":
+                ReportSchedule.objects.filter(pk=schedule.pk).update(is_active=False)
+                logger.warning("report schedule %s deactivated: invalid persisted configuration", schedule.pk)
+            continue
+        except ThrottledException:
+            # Queue pressure is temporary. Leave last_run_at untouched so the
+            # next hourly scan can try again.
+            continue
     return fired

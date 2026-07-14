@@ -52,18 +52,20 @@ class RewardGrantService(IRewardGrantService):
 
     @staticmethod
     def _resolve_staff_recipient(recipient_id: int):
+        from apps.access.models import AccountType
         from apps.users.models import User
-        from core.permissions import Role
+        from core.permissions import role_memberships_for_account_kinds
 
         # Rewards go to STAFF only (never students/parents) — mirrors the old
         # GrantRewardSerializer recipient queryset.
-        staff_roles = tuple(r for r in Role.ALL if r not in (Role.STUDENT, Role.PARENT))
+        staff_memberships = role_memberships_for_account_kinds(
+            (AccountType.AccountKind.STAFF, AccountType.AccountKind.TEACHER)
+        )
         recipient = (
             User.objects.filter(
                 pk=recipient_id,
                 is_active=True,
-                role_memberships__revoked_at__isnull=True,
-                role_memberships__role__in=staff_roles,
+                role_memberships__in=staff_memberships,
             )
             .distinct()
             .first()

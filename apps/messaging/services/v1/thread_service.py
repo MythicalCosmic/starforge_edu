@@ -49,3 +49,18 @@ class ThreadService(IThreadService):
 
     def mark_read(self, *, thread: Thread, user) -> None:
         mark_read(thread=thread, user=user)
+
+    def presign_attachment(self, *, filename: str, content_type: str, size_bytes: int, requested_by) -> dict:
+        from apps.messaging.services import presign_attachment_upload
+
+        return presign_attachment_upload(
+            filename=filename,
+            content_type=content_type,
+            size_bytes=size_bytes,
+            requested_by=requested_by,
+        )
+
+    def attachment_download_url(self, *, thread: Thread, key: str) -> str:
+        from apps.messaging.services import attachment_download_url
+
+        return attachment_download_url(thread=thread, key=key)

@@ -23,3 +23,4 @@ from __future__ import annotations
 import django.dispatch
 
 student_marked_absent = django.dispatch.Signal()
+student_marked_late = django.dispatch.Signal()

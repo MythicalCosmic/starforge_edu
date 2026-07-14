@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from django.db.models import Q, QuerySet
+from django.db.models import QuerySet
 from django.utils import timezone
 
 from apps.teachers.models import TeacherProfile
@@ -39,26 +39,22 @@ def _pending_forms_for(*, teacher: TeacherProfile, user, roles, now) -> list[dic
         .filter(_answered=False)
         .order_by("closes_at", "created_at")[:10]
     )
-    return [
-        {"id": f.id, "title": f.title, "closes_at": f.closes_at}
-        for f in forms
-    ]
+    return [{"id": f.id, "title": f.title, "closes_at": f.closes_at} for f in forms]
 
 
 def teacher_dashboard(*, teacher: TeacherProfile, user, roles) -> dict:
     """A single read over the teacher's groups, schedule (with lesson types), exams,
     expected graduations, outstanding rule acknowledgments, and forms to fill (F3-2)."""
     from apps.academics.models import Exam
-    from apps.cohorts.models import Cohort, CohortMembership
+    from apps.cohorts.models import CohortMembership
+    from apps.cohorts.selectors import taught_cohorts
     from apps.compliance import selectors as compliance_selectors
     from apps.schedule.models import Lesson
 
     now = timezone.now()
     today = now.date()
 
-    cohorts = Cohort.objects.filter(
-        Q(primary_teacher=teacher) | Q(co_teachers__teacher=teacher)
-    ).distinct()
+    cohorts = taught_cohorts(teacher=teacher)
     cohort_ids = list(cohorts.values_list("id", flat=True))
 
     level_groups: dict[str, int] = {}

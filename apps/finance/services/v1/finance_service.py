@@ -11,7 +11,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from django.db import IntegrityError, transaction
 from django.db.models import QuerySet
+from django.utils.translation import gettext_lazy as _
 
 from apps.finance import selectors
 from apps.finance import services as domain
@@ -32,7 +34,9 @@ from apps.finance.models import (
     Invoice,
     PaymentMethod,
     PaymentPlan,
+    Refund,
 )
+from core.exceptions import ValidationException
 
 
 class FinanceService(IFinanceService):
@@ -118,7 +122,17 @@ class FinanceService(IFinanceService):
         return self._pm.get(pk)
 
     def create_payment_method(self, *, data: dict[str, Any]) -> PaymentMethod:
-        return PaymentMethod.objects.create(**data)
+        try:
+            # Keep duplicate-slug handling inside a savepoint so a caller's
+            # surrounding request/test transaction remains usable.
+            with transaction.atomic():
+                return PaymentMethod.objects.create(**data)
+        except IntegrityError as exc:
+            raise ValidationException(
+                _("A payment method with this slug already exists."),
+                code="duplicate_slug",
+                fields={"slug": ["already_exists"]},
+            ) from exc
 
     def update_payment_method(
         self, *, payment_method: PaymentMethod, changes: dict[str, Any]
@@ -126,7 +140,15 @@ class FinanceService(IFinanceService):
         for field, value in changes.items():
             setattr(payment_method, field, value)
         if changes:
-            payment_method.save(update_fields=list(changes.keys()))
+            try:
+                with transaction.atomic():
+                    payment_method.save(update_fields=list(changes.keys()))
+            except IntegrityError as exc:
+                raise ValidationException(
+                    _("A payment method with this slug already exists."),
+                    code="duplicate_slug",
+                    fields={"slug": ["already_exists"]},
+                ) from exc
         return payment_method
 
     def delete_payment_method(self, *, payment_method: PaymentMethod) -> None:
@@ -157,6 +179,21 @@ class FinanceService(IFinanceService):
     def pay_expense(self, *, expense_id: int, payment_method_id: int, actor) -> Expense:
         return domain.pay_expense(expense_id=expense_id, payment_method_id=payment_method_id, actor=actor)
 
+    # --- refunds ---
+    def refunds(self) -> QuerySet[Refund]:
+        return Refund.objects.select_related(
+            "invoice__student",
+            "requested_by",
+            "approved_by",
+            "ledger_entry",
+        ).all()
+
+    def refund(self, pk: int) -> Refund | None:
+        return self.refunds().filter(pk=pk).first()
+
+    def approve_refund(self, *, refund_id: int, actor) -> Refund:
+        return domain.transition_refund(refund_id=refund_id, to_state=Refund.State.APPROVED, actor=actor)
+
     # --- cashier shifts ---
     def cashier_shifts(self) -> QuerySet[CashierShift]:
         return self._shift.query()
@@ -169,8 +206,15 @@ class FinanceService(IFinanceService):
             cashier=cashier, branch=branch, opening_cash_uzs=opening_cash_uzs, notes=notes
         )
 
-    def close_cashier_shift(self, *, shift: CashierShift, closing_cash_uzs, notes: str) -> CashierShift:
-        return domain.close_cashier_shift(shift=shift, closing_cash_uzs=closing_cash_uzs, notes=notes)
+    def close_cashier_shift(
+        self, *, shift: CashierShift, closing_cash_uzs, notes: str, actor
+    ) -> CashierShift:
+        return domain.close_cashier_shift(
+            shift=shift,
+            closing_cash_uzs=closing_cash_uzs,
+            notes=notes,
+            actor=actor,
+        )
 
     def cashier_shift_report(self, *, shift: CashierShift) -> dict:
         return selectors.cashier_shift_report(shift=shift)

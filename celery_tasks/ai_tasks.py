@@ -346,9 +346,7 @@ def run_form_analysis(self, ai_request_id: int, *, params: dict | None = None) -
         for field in summary["fields"]:
             agg_lines.append(f"- {field['label']} ({field['field_type']}): {field['summary']}")
         comment_blocks = []
-        for f in form.fields.filter(
-            field_type__in=(FormField.FieldType.TEXT, FormField.FieldType.TEXTAREA)
-        ):
+        for f in form.fields.filter(field_type__in=(FormField.FieldType.TEXT, FormField.FieldType.TEXTAREA)):
             answers = [
                 a for a in f.answers.values_list("value", flat=True) if isinstance(a, str) and a.strip()
             ]

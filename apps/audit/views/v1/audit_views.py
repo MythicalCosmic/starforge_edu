@@ -33,8 +33,8 @@ from core.container import container
 from core.exceptions import NotFoundException, ValidationException
 from core.listing import cursor_paginate
 from core.responses import error, success
+from core.tenant_context import assert_tenant_context
 from core.utils import client_ip, user_agent
-from core.viewsets import assert_tenant_context
 
 # A CSV stream beyond this size is a misuse of the export endpoint; force the caller
 # to narrow filters rather than dump the entire trail. Module-level so tests can patch it.
@@ -105,6 +105,13 @@ def audit_export_view(request: HttpRequest) -> HttpResponseBase:
             fields={"rows": [f"{total} rows match (max {MAX_EXPORT_ROWS})."]},
         )
 
+    if request.method == "HEAD":
+        # HEAD must be observational: advertise the same media/disposition
+        # without creating a phantom EXPORT audit event or opening a stream.
+        head_response = HttpResponse(content_type="text/csv")
+        head_response["Content-Disposition"] = 'attachment; filename="audit_log.csv"'
+        return head_response
+
     audit_log(
         actor=request.user,
         action=AuditLog.Action.EXPORT,
@@ -114,9 +121,9 @@ def audit_export_view(request: HttpRequest) -> HttpResponseBase:
         user_agent=user_agent(request),
     )
 
-    response = StreamingHttpResponse(_csv_rows(qs), content_type="text/csv")
-    response["Content-Disposition"] = 'attachment; filename="audit_log.csv"'
-    return response
+    streaming_response = StreamingHttpResponse(_csv_rows(qs), content_type="text/csv")
+    streaming_response["Content-Disposition"] = 'attachment; filename="audit_log.csv"'
+    return streaming_response
 
 
 # --- CSV streaming ---------------------------------------------------------

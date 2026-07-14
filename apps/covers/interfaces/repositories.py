@@ -15,11 +15,24 @@ from core.interfaces import IBaseRepository
 
 class ICoverRepository(IBaseRepository[CoverRequest]):
     def scoped(
-        self, *, user, is_unscoped: bool, is_manager: bool, branch_ids: set[int]
+        self,
+        *,
+        user,
+        is_unscoped: bool,
+        is_manager: bool,
+        manager_branch_ids: set[int],
+        teacher_branch_ids: set[int],
     ) -> QuerySet[CoverRequest]:
         raise NotImplementedError
 
     def get_scoped(
-        self, *, user, is_unscoped: bool, is_manager: bool, branch_ids: set[int], pk: int
+        self,
+        *,
+        user,
+        is_unscoped: bool,
+        is_manager: bool,
+        manager_branch_ids: set[int],
+        teacher_branch_ids: set[int],
+        pk: int,
     ) -> CoverRequest | None:
         raise NotImplementedError

@@ -23,10 +23,15 @@ from apps.procurement.presenters import po_to_dict
 from core.api_auth import check_perm, require_auth
 from core.container import container
 from core.exceptions import NotFoundException, PermissionException, ValidationException
-from core.http import decimal_field, int_field, read_json, str_field
+from core.http import decimal_field, int_field, read_json, str_field, trimmed_str_field
 from core.listing import apply_filters, paginate
-from core.permissions import Role, get_role_memberships, get_user_roles, has_permission_code
+from core.permissions import get_user_roles
 from core.responses import created, error, paginated, success
+from core.scoping import (
+    assert_permission_membership_scope,
+    is_unscoped,
+    permission_membership_branch_ids,
+)
 
 _RESOURCE = "procurement"
 _MIN_QTY = Decimal("0.01")
@@ -36,22 +41,23 @@ def _service() -> IPurchaseOrderService:
     return container.resolve(IPurchaseOrderService)  # type: ignore[type-abstract]
 
 
-def _is_unscoped(request: HttpRequest) -> bool:
-    """A director/superuser and any finance handler (they approve/disburse the money) see
-    every PO; everyone else is scoped to the POs they raised."""
+def _scope(request: HttpRequest) -> tuple[bool, set[int]]:
+    """Owner bypass plus branches supplied by exact finance-handler memberships."""
     req: Any = request  # perm helpers are duck-typed on .user (typed Request upstream)
     roles = get_user_roles(req)
-    if getattr(request.user, "is_superuser", False) or Role.DIRECTOR in roles:
-        return True
-    return has_permission_code(roles, "approvals:approve") or has_permission_code(roles, "approvals:disburse")
+    handler_branch_ids = permission_membership_branch_ids(
+        roles=roles, permission="approvals:approve"
+    ) | permission_membership_branch_ids(roles=roles, permission="approvals:disburse")
+    return is_unscoped(req), handler_branch_ids
 
 
 @csrf_exempt
 @require_auth
 def purchase_orders_collection_view(request: HttpRequest) -> HttpResponse:
-    if request.method == "GET":
+    if request.method in ("GET", "HEAD"):
         check_perm(request, f"{_RESOURCE}:read")
-        qs = _service().scoped_list(is_unscoped=_is_unscoped(request), user=request.user)
+        unscoped, branch_ids = _scope(request)
+        qs = _service().scoped_list(is_unscoped=unscoped, user=request.user, branch_ids=branch_ids)
         qs = apply_filters(
             request,
             qs,
@@ -72,7 +78,8 @@ def purchase_order_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method not in ("GET", "HEAD"):
         return error("Method not allowed.", code="method_not_allowed", status=405)
     check_perm(request, f"{_RESOURCE}:read")
-    po = _service().get_visible(is_unscoped=_is_unscoped(request), user=request.user, pk=pk)
+    unscoped, branch_ids = _scope(request)
+    po = _service().get_visible(is_unscoped=unscoped, user=request.user, branch_ids=branch_ids, pk=pk)
     if po is None:
         raise NotFoundException(code="not_found")  # out-of-scope -> 404, no existence leak
     return success(po_to_dict(po))
@@ -98,7 +105,10 @@ def _create_po(request: HttpRequest) -> HttpResponse:
     _assert_branch_in_scope(request, branch)
 
     dto = CreatePurchaseOrderDTO(
-        title=title, supplier=supplier, description=str_field(body, "description"), items=items
+        title=title,
+        supplier=supplier,
+        description=trimmed_str_field(body, "description"),
+        items=items,
     )
     po = _service().create(dto, requested_by=request.user, branch=branch)
     return created(po_to_dict(po))
@@ -155,7 +165,26 @@ def _resolve_branch(request: HttpRequest, body: dict[str, Any]):
     """Resolve an OPTIONAL branch id to a non-archived Branch (unknown/archived -> 400);
     an absent/null branch is a centre-wide PO."""
     if body.get("branch") is None:
-        return None
+        req: Any = request
+        if is_unscoped(req):
+            return None
+        write_branch_ids = permission_membership_branch_ids(
+            roles=get_user_roles(req), permission=f"{_RESOURCE}:write"
+        )
+        if len(write_branch_ids) != 1:
+            raise ValidationException(
+                "Choose a branch for this purchase order.",
+                code="branch_required",
+                fields={"branch": ["This field is required when more than one branch is available."]},
+            )
+        branch = _service().get_branch(branch_id=next(iter(write_branch_ids)))
+        if branch is None:
+            raise ValidationException(
+                "Choose an active branch for this purchase order.",
+                code="branch_required",
+                fields={"branch": ["The membership branch is archived."]},
+            )
+        return branch
     branch_id = int_field(body, "branch", required=True)
     branch = _service().get_branch(branch_id=branch_id)  # type: ignore[arg-type]
     if branch is None:
@@ -172,12 +201,15 @@ def _assert_branch_in_scope(request: HttpRequest, branch) -> None:
     a director/superuser is unscoped, and a centre-wide (no branch) PO is allowed."""
     if branch is None:
         return
-    req: Any = request
-    roles = get_user_roles(req)
-    if getattr(request.user, "is_superuser", False) or Role.DIRECTOR in roles:
-        return
-    my = {m.branch_id for m in get_role_memberships(req) if m.branch_id}
-    if branch.id not in my:
-        raise PermissionException(
-            _("You can only raise a purchase order for your own branch."), code="branch_out_of_scope"
+    try:
+        assert_permission_membership_scope(
+            request,
+            permission=f"{_RESOURCE}:write",
+            branch_id=branch.id,
+            enforce_department=False,
         )
+    except PermissionException as exc:
+        raise PermissionException(
+            _("You can only raise a purchase order for your own branch."),
+            code="branch_out_of_scope",
+        ) from exc

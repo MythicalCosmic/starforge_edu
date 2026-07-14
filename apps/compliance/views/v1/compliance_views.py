@@ -23,8 +23,13 @@ from core.container import container
 from core.exceptions import NotFoundException, PermissionException, ValidationException
 from core.http import bool_field, int_field, read_json, str_field
 from core.listing import apply_filters, paginate
-from core.permissions import Role, get_role_memberships, get_user_roles, has_permission_code
+from core.permissions import get_user_roles, has_permission_code
 from core.responses import created, error, no_content, paginated, success
+from core.scoping import (
+    assert_permission_membership_scope,
+    is_unscoped,
+    permission_membership_branch_ids,
+)
 
 
 def _rule_service() -> IRuleService:
@@ -88,6 +93,15 @@ def rule_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
     if read:
         return success(rule_to_dict(rule))
     if request.method in ("PUT", "PATCH"):
+        if request.method == "PUT":
+            body = read_json(request)
+            missing = [field for field in ("title", "body") if field not in body]
+            if missing:
+                raise ValidationException(
+                    "title and body are required for a full update.",
+                    code="validation_error",
+                    fields={field: ["Required."] for field in missing},
+                )
         return success(rule_to_dict(_rule_service().update(rule, _rule_changes(request))))
     if request.method == "DELETE":
         _rule_service().delete(rule)
@@ -139,11 +153,12 @@ def rule_acknowledge_view(request: HttpRequest, pk: int) -> HttpResponse:
 def penalties_collection_view(request: HttpRequest) -> HttpResponse:
     if request.method in ("GET", "HEAD"):
         check_perm(request, "penalty:read")
-        is_director, can_waive, can_write, branch_ids = _penalty_scope(request)
+        is_director, can_waive, can_write, waive_branch_ids, write_branch_ids = _penalty_scope(request)
         qs = _penalty_service().scoped_list(
             is_director=is_director,
             user=request.user,
-            branch_ids=branch_ids,
+            waive_branch_ids=waive_branch_ids,
+            write_branch_ids=write_branch_ids,
             can_waive=can_waive,
             can_write=can_write,
         )
@@ -167,11 +182,12 @@ def penalty_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method not in ("GET", "HEAD"):
         return error("Method not allowed.", code="method_not_allowed", status=405)
     check_perm(request, "penalty:read")
-    is_director, can_waive, can_write, branch_ids = _penalty_scope(request)
+    is_director, can_waive, can_write, waive_branch_ids, write_branch_ids = _penalty_scope(request)
     penalty = _penalty_service().get_visible(
         is_director=is_director,
         user=request.user,
-        branch_ids=branch_ids,
+        waive_branch_ids=waive_branch_ids,
+        write_branch_ids=write_branch_ids,
         can_waive=can_waive,
         can_write=can_write,
         pk=pk,
@@ -198,11 +214,18 @@ def penalty_staff_view(request: HttpRequest) -> HttpResponse:
         raise ValidationException(
             "Unknown or archived branch.", code="validation_error", fields={"branch": ["No such branch."]}
         )
-    is_director, _cw, _cwr, branch_ids = _penalty_scope(request)
-    if not is_director and branch.id not in branch_ids:
-        raise PermissionException(
-            _("You can only discipline staff in your own branch."), code="branch_out_of_scope"
+    try:
+        assert_permission_membership_scope(
+            request,
+            permission="penalty:staff",
+            branch_id=branch.id,
+            enforce_department=False,
         )
+    except PermissionException as exc:
+        raise PermissionException(
+            _("You can only discipline staff in your own branch."),
+            code="branch_out_of_scope",
+        ) from exc
     penalty = _penalty_service().issue_staff(
         staff=staff,
         branch=branch,
@@ -220,17 +243,24 @@ def penalty_waive_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method != "POST":
         return error("Method not allowed.", code="method_not_allowed", status=405)
     check_perm(request, "penalty:waive")
-    is_director, can_waive, can_write, branch_ids = _penalty_scope(request)
+    is_director, can_waive, can_write, waive_branch_ids, write_branch_ids = _penalty_scope(request)
     penalty = _penalty_service().get_visible(
         is_director=is_director,
         user=request.user,
-        branch_ids=branch_ids,
+        waive_branch_ids=waive_branch_ids,
+        write_branch_ids=write_branch_ids,
         can_waive=can_waive,
         can_write=can_write,
         pk=pk,
     )
     if penalty is None:
         raise NotFoundException(code="not_found")
+    assert_permission_membership_scope(
+        request,
+        permission="penalty:waive",
+        branch_id=penalty.branch_id,
+        enforce_department=False,
+    )
     result = _penalty_service().waive(
         penalty, actor=request.user, reason=str_field(read_json(request), "reason", max_length=255)
     )
@@ -238,14 +268,15 @@ def penalty_waive_view(request: HttpRequest, pk: int) -> HttpResponse:
 
 
 # --- helpers ---------------------------------------------------------------
-def _penalty_scope(request: HttpRequest) -> tuple[bool, bool, bool, set[int]]:
+def _penalty_scope(request: HttpRequest) -> tuple[bool, bool, bool, set[int], set[int]]:
     req: Any = request
     roles = get_user_roles(req)
-    is_director = bool(getattr(request.user, "is_superuser", False)) or Role.DIRECTOR in roles
+    is_director = is_unscoped(req)
     can_waive = has_permission_code(roles, "penalty:waive")
     can_write = has_permission_code(roles, "penalty:write")
-    branch_ids = {m.branch_id for m in get_role_memberships(req) if m.branch_id}
-    return is_director, can_waive, can_write, branch_ids
+    waive_branch_ids = permission_membership_branch_ids(roles=roles, permission="penalty:waive")
+    write_branch_ids = permission_membership_branch_ids(roles=roles, permission="penalty:write")
+    return is_director, can_waive, can_write, waive_branch_ids, write_branch_ids
 
 
 def _issue_penalty(request: HttpRequest) -> HttpResponse:
@@ -255,11 +286,18 @@ def _issue_penalty(request: HttpRequest) -> HttpResponse:
         raise ValidationException(
             "Unknown student.", code="validation_error", fields={"student": ["No such student."]}
         )
-    is_director, _cw, _cwr, branch_ids = _penalty_scope(request)
-    if not is_director and student.branch_id not in branch_ids:
-        raise PermissionException(
-            _("You can only penalise a student in your own branch."), code="branch_out_of_scope"
+    try:
+        assert_permission_membership_scope(
+            request,
+            permission="penalty:write",
+            branch_id=student.branch_id,
+            enforce_department=False,
         )
+    except PermissionException as exc:
+        raise PermissionException(
+            _("You can only penalise a student in your own branch."),
+            code="branch_out_of_scope",
+        ) from exc
     penalty = _penalty_service().issue(
         student=student,
         points=_points(body),
@@ -333,7 +371,11 @@ def _roles_list(body: dict[str, Any]) -> list:
     acknowledge / the rule selectors)."""
     raw = body.get("applies_to_roles", [])
     if raw is None:
-        return []
+        raise ValidationException(
+            "applies_to_roles may not be null.",
+            code="validation_error",
+            fields={"applies_to_roles": ["May not be null."]},
+        )
     if not isinstance(raw, list):
         raise ValidationException(
             "applies_to_roles must be a list.",

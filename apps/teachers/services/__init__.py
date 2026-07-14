@@ -11,8 +11,7 @@ from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
 from apps.teachers.models import PayoutPolicy, TeacherProfile
-from apps.users.models import RoleMembership
-from apps.users.services import create_role_user_bridge, prepare_role_identity
+from apps.users.services import create_role_user_bridge, ensure_role_membership, prepare_role_identity
 from core.exceptions import UnprocessableEntity, ValidationException
 from core.permissions import Role
 
@@ -38,6 +37,7 @@ def create_teacher(
     rate=None,
     is_substitute: bool = False,
     username: str = "",
+    account_type=None,
 ) -> TeacherProfile:
     if department is not None and department.branch_id != branch.id:
         raise ValidationException(
@@ -75,11 +75,12 @@ def create_teacher(
         rate=rate,
         is_substitute=is_substitute,
     )
-    RoleMembership.objects.get_or_create(
-        user=user,
+    ensure_role_membership(
+        teacher,
         branch=branch,
         department=department,
-        role=Role.TEACHER,
+        role=Role.TEACHER if account_type is None else None,
+        account_type=account_type,
     )
     return teacher
 
@@ -180,15 +181,13 @@ def _period_bounds(period_start: dt.date, period_end: dt.date) -> tuple[dt.datet
 
 
 def _teacher_cohort_ids(teacher: TeacherProfile) -> list[int]:
-    """Ids of the cohorts this teacher teaches (primary or co)."""
-    from django.db.models import Q
-
-    from apps.cohorts.models import Cohort
+    """Ids of cohorts reached through typed assignments, legacy primary, or lessons."""
+    from apps.cohorts.selectors import taught_cohorts
 
     return list(
-        Cohort.objects.filter(Q(primary_teacher=teacher) | Q(co_teachers__teacher=teacher))
-        .values_list("id", flat=True)
-        .distinct()
+        # Percentage-of-tuition payout follows explicit cohort responsibility, not a
+        # one-off/substitute lesson that could otherwise credit the whole cohort's fees.
+        taught_cohorts(teacher=teacher, include_lesson_teacher=False).values_list("id", flat=True)
     )
 
 

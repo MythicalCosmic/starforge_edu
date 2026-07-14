@@ -27,6 +27,7 @@ from django.core.signals import request_finished
 from django.db.models.signals import post_delete, post_save, pre_save
 from django.dispatch import receiver
 
+from apps.audit.context import current_actor, current_request
 from apps.audit.models import AuditLog
 from apps.audit.services import audit_log, audit_log_on_commit, diff_snapshots, serialize_instance
 from apps.auth.signals import (
@@ -101,21 +102,23 @@ def _on_post_save(sender: Any, instance: Any, created: bool, **kwargs: Any) -> N
     after = serialize_instance(instance)
     if created:
         audit_log_on_commit(
-            actor=None,
+            actor=current_actor(),
             action=AuditLog.Action.CREATE,
             resource_type=label,
             resource_id=instance.pk,
             before=None,
             after=after,
+            request=current_request(),
         )
         return
     audit_log_on_commit(
-        actor=None,
+        actor=current_actor(),
         action=AuditLog.Action.UPDATE,
         resource_type=label,
         resource_id=instance.pk,
         before=before,
         after=diff_snapshots(before, after) if before else after,
+        request=current_request(),
     )
 
 
@@ -133,12 +136,13 @@ def _clear_before_store(sender: Any, **kwargs: Any) -> None:
 
 def _on_post_delete(sender: Any, instance: Any, **kwargs: Any) -> None:
     audit_log_on_commit(
-        actor=None,
+        actor=current_actor(),
         action=AuditLog.Action.DELETE,
         resource_type=_label_for(sender),
         resource_id=instance.pk,
         before=serialize_instance(instance),
         after=None,
+        request=current_request(),
     )
 
 

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from django.db.models import QuerySet
+from django.db.models import Prefetch, QuerySet
 
 from apps.users.interfaces.repositories import IDeviceRepository, IUserRepository
-from apps.users.models import Device, User
+from apps.users.models import Device, RoleMembership, User
 from core.repositories import BaseRepository
 
 
@@ -13,7 +13,12 @@ class UserRepository(BaseRepository[User], IUserRepository):
     model = User
 
     def query(self) -> QuerySet[User]:
-        return User.objects.prefetch_related("role_memberships").all()
+        return User.objects.prefetch_related(
+            Prefetch(
+                "role_memberships",
+                queryset=RoleMembership.objects.select_related("account_type"),
+            )
+        ).all()
 
     def get(self, pk: int) -> User | None:
         return self.query().filter(pk=pk).first()

@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Any
 
-from django.db.models import Avg, Count, ExpressionWrapper, F, FloatField, Q, QuerySet
+from django.db.models import Avg, Count, ExpressionWrapper, F, FloatField, Q, QuerySet, Subquery
 from django.utils import timezone
 
 from apps.academics.models import ExamResult
@@ -60,6 +60,7 @@ def student_risk(students: QuerySet[StudentProfile], *, now=None, include_financ
     one-per-student) keep it cheap. `include_finance=False` omits the overdue-payment
     flag for callers who may not see finance."""
     now = now or timezone.now()
+    student_scope = students.order_by().values("id")
     ids = list(students.values_list("id", flat=True))
     if not ids:
         return []
@@ -70,7 +71,11 @@ def student_risk(students: QuerySet[StudentProfile], *, now=None, include_financ
         # Window keys on the LESSON's date, not the row-write time, so a late
         # backfill/correction can't inject old lessons into "the last 30 days".
         # `total` excludes EXCUSED so an excused absence neither hurts nor dilutes.
-        for row in AttendanceRecord.objects.filter(student_id__in=ids, lesson__starts_at__gte=window)
+        for row in AttendanceRecord.objects.filter(
+            student_id__in=Subquery(student_scope),
+            lesson__starts_at__gte=window,
+            lesson__starts_at__lte=now,
+        )
         .values("student_id")
         .annotate(
             total=Count("id", filter=~Q(status=AttendanceRecord.Status.EXCUSED)),
@@ -79,7 +84,7 @@ def student_risk(students: QuerySet[StudentProfile], *, now=None, include_financ
     }
     grades = {
         row["student_id"]: row["avg_pct"]
-        for row in ExamResult.objects.filter(student_id__in=ids, exam__is_published=True)
+        for row in ExamResult.objects.filter(student_id__in=Subquery(student_scope), exam__is_published=True)
         .values("student_id")
         .annotate(
             avg_pct=Avg(
@@ -92,9 +97,9 @@ def student_risk(students: QuerySet[StudentProfile], *, now=None, include_financ
     overdue: set[int] = set()
     if include_finance:
         overdue = set(
-            Invoice.objects.filter(student_id__in=ids, status=Invoice.Status.OVERDUE).values_list(
-                "student_id", flat=True
-            )
+            Invoice.objects.filter(
+                student_id__in=Subquery(student_scope), status=Invoice.Status.OVERDUE
+            ).values_list("student_id", flat=True)
         )
 
     flagged: list[tuple[int, list[dict]]] = []
@@ -111,7 +116,11 @@ def student_risk(students: QuerySet[StudentProfile], *, now=None, include_financ
     out: list[dict] = []
     for sid, flags in flagged:
         score = sum(RULES[f["code"]]["weight"] for f in flags)
-        student = by_id[sid]
+        # The first id scan and this reload are separate READ COMMITTED queries. A
+        # concurrent offboarding may legitimately remove the row between them.
+        student = by_id.get(sid)
+        if student is None:
+            continue
         out.append(
             {
                 "student": sid,
@@ -211,6 +220,7 @@ def branch_ranking(branches, *, now=None, include_finance: bool = True) -> list[
             student__branch_id__in=branch_ids,
             student__status__in=ACTIVE_STUDENT_STATUSES,
             lesson__starts_at__gte=window,
+            lesson__starts_at__lte=now,
         )
         .values("student__branch_id")
         .annotate(
@@ -342,12 +352,12 @@ def family_health(branches, *, now=None, include_finance: bool = True) -> list[d
     if not branch_ids:
         return []
     students = StudentProfile.objects.filter(branch_id__in=branch_ids, status__in=ACTIVE_STUDENT_STATUSES)
-    student_ids = set(students.values_list("id", flat=True))
-    if not student_ids:
+    student_scope = students.order_by().values("id")
+    if not students.exists():
         return []
 
     families: dict[int, dict] = {}
-    for g in Guardian.objects.filter(student_id__in=student_ids).select_related("parent__user"):
+    for g in Guardian.objects.filter(student_id__in=Subquery(student_scope)).select_related("parent__user"):
         parent_user = g.parent.user
         fam = families.setdefault(
             g.parent_id,
@@ -361,9 +371,9 @@ def family_health(branches, *, now=None, include_finance: bool = True) -> list[d
     overdue_ids: set[int] = set()
     if include_finance:
         overdue_ids = set(
-            Invoice.objects.filter(student_id__in=student_ids, status=Invoice.Status.OVERDUE).values_list(
-                "student_id", flat=True
-            )
+            Invoice.objects.filter(
+                student_id__in=Subquery(student_scope), status=Invoice.Status.OVERDUE
+            ).values_list("student_id", flat=True)
         )
 
     out: list[dict] = []
@@ -474,16 +484,18 @@ def teacher_engagement(teachers: QuerySet, *, now=None) -> list[dict]:
     TeacherProfile queryset. A couple of grouped aggregates keep it cheap. A teacher
     with no marks gets a null rate (not a spurious 0) and sorts last."""
     now = now or timezone.now()
+    teacher_scope = teachers.order_by().values("id")
     teacher_rows = {t.id: t for t in teachers.select_related("user")}
     if not teacher_rows:
         return []
-    teacher_ids = list(teacher_rows)
     window = now - timedelta(days=ATTENDANCE_WINDOW_DAYS)
     st = AttendanceRecord.Status
     attendance = {
         row["lesson__teacher_id"]: row
         for row in AttendanceRecord.objects.filter(
-            lesson__teacher_id__in=teacher_ids, lesson__starts_at__gte=window
+            lesson__teacher_id__in=Subquery(teacher_scope),
+            lesson__starts_at__gte=window,
+            lesson__starts_at__lte=now,
         )
         .values("lesson__teacher_id")
         .annotate(
@@ -497,7 +509,7 @@ def teacher_engagement(teachers: QuerySet, *, now=None) -> list[dict]:
         # Upper-bounded at `now`: future SCHEDULED lessons (materialized from
         # recurrence rules) are not yet delivered, so they must not inflate the count.
         for row in Lesson.objects.filter(
-            teacher_id__in=teacher_ids, starts_at__gte=window, starts_at__lte=now
+            teacher_id__in=Subquery(teacher_scope), starts_at__gte=window, starts_at__lte=now
         )
         .exclude(status__in=(Lesson.Status.CANCELLED, Lesson.Status.ARCHIVED))
         .values("teacher_id")

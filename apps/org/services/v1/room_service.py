@@ -75,7 +75,5 @@ class RoomService(IRoomService):
                 fields={"name": ["Already used in this branch."]},
             ) from exc
         except DataError as exc:  # e.g. capacity out of range -> clean 400, not a 500
-            raise ValidationException(
-                _("A field value is out of range."), code="validation_error"
-            ) from exc
+            raise ValidationException(_("A field value is out of range."), code="validation_error") from exc
         return room

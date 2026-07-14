@@ -138,3 +138,16 @@ def test_a_topup_that_would_overflow_the_balance_is_a_clean_422(tenant_a, user_i
     r = _topup(s, big)  # would push the balance to 1.8e16 -> overflow the column
     assert r.status_code == 422
     assert r.json()["code"] == "balance_overflow"
+
+
+def test_refund_credits_wallet_with_an_explicit_ledger_kind(tenant_a, user_in, as_user):
+    s = _setup(tenant_a, user_in, as_user)
+    response = s["cashier"].post(
+        f"/api/v1/cards/wallets/{s['student'].id}/refund/",
+        {"amount": "2500", "note": "Reversed canteen sale"},
+        format="json",
+    )
+    assert response.status_code == 201, response.content
+    assert response.json()["data"]["kind"] == "refund"
+    assert response.json()["data"]["balance_after_uzs"] == "2500.00"
+    assert response.json()["data"]["note"] == "Reversed canteen sale"

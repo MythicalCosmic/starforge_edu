@@ -49,7 +49,11 @@ class RuleService(IRuleService):
         return domain.update_rule_body(rule=rule, body=body, title=title, **changes)
 
     def delete(self, rule: Rule) -> None:
-        rule.delete()
+        # DELETE is a semantic retirement. Keeping the row preserves the exact title,
+        # body and version referenced by historical acknowledgments and penalties.
+        if rule.is_active:
+            rule.is_active = False
+            rule.save(update_fields=["is_active", "updated_at"])
 
     def mine(self, *, user, roles) -> tuple[list[Rule], set[int]]:
         rules = selectors.rules_for_roles(roles)
@@ -67,23 +71,40 @@ class PenaltyService(IPenaltyService):
         self.repository = repository
 
     def scoped_list(
-        self, *, is_director: bool, user, branch_ids: set[int], can_waive: bool, can_write: bool
+        self,
+        *,
+        is_director: bool,
+        user,
+        waive_branch_ids: set[int],
+        write_branch_ids: set[int],
+        can_waive: bool,
+        can_write: bool,
     ) -> QuerySet[Penalty]:
         return self.repository.scoped(
             is_director=is_director,
             user=user,
-            branch_ids=branch_ids,
+            waive_branch_ids=waive_branch_ids,
+            write_branch_ids=write_branch_ids,
             can_waive=can_waive,
             can_write=can_write,
         )
 
     def get_visible(
-        self, *, is_director: bool, user, branch_ids: set[int], can_waive: bool, can_write: bool, pk: int
+        self,
+        *,
+        is_director: bool,
+        user,
+        waive_branch_ids: set[int],
+        write_branch_ids: set[int],
+        can_waive: bool,
+        can_write: bool,
+        pk: int,
     ) -> Penalty | None:
         return self.repository.get_scoped(
             is_director=is_director,
             user=user,
-            branch_ids=branch_ids,
+            waive_branch_ids=waive_branch_ids,
+            write_branch_ids=write_branch_ids,
             can_waive=can_waive,
             can_write=can_write,
             pk=pk,

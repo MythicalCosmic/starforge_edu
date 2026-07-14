@@ -85,3 +85,18 @@ def test_settings_accepts_valid_json_knobs(as_role):
     body = resp.json()["data"]
     assert body["allowed_file_types"] == ["pdf", "docx"]
     assert body["otp_channel_prefs"] == {"sms": True, "email": False}
+
+
+def test_settings_exposes_and_updates_language_and_absence_knobs(as_role):
+    client, _ = as_role(Role.DIRECTOR)
+    payload = {
+        "default_language": "ru",
+        "absence_deduction_enabled": True,
+        "absence_deduction_excused_only": True,
+    }
+
+    response = client.patch(URL, payload, format="json")
+    assert response.status_code == 200, response.content
+    assert {key: response.json()["data"][key] for key in payload} == payload
+    fetched = client.get(URL).json()["data"]
+    assert {key: fetched[key] for key in payload} == payload

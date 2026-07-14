@@ -28,6 +28,10 @@ class _FakeRedis:
         self.lists.setdefault(key, []).insert(0, value)
         return len(self.lists[key])
 
+    def ltrim(self, key, start, stop):
+        self.lists[key] = self.lists.get(key, [])[start : stop + 1]
+        return True
+
 
 class _Sender:
     def __init__(self, name):
@@ -57,6 +61,10 @@ def test_task_failure_pushes_one_dlq_entry(monkeypatch):
     assert record["task_id"] == "abc-123"
     assert "kaboom" in record["exc"]
     assert "schema" in record  # tenant-tagged
+    assert record["arg_types"] == ["int", "int"]
+    assert record["kwarg_keys"] == ["x"]
+    assert "args" not in record
+    assert "kwargs" not in record
 
 
 def test_dlq_push_swallows_redis_errors(monkeypatch):

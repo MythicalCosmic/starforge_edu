@@ -6,40 +6,79 @@ from __future__ import annotations
 from django.db.models import Count, Q, QuerySet
 
 from apps.attendance.models import AttendanceRecord
-from core.permissions import Role
-
-# Who sees every record in the tenant. TEACHER is deliberately NOT here: a
-# teacher is scoped to the lessons they teach (D2-B-4 "teacher only their
-# cohorts'"). REGISTRAR/IT have no `attendance:read` in the matrix, so they
-# never reach these selectors.
-STAFF_ROLES = {Role.DIRECTOR, Role.HEAD_OF_DEPT}
+from apps.cohorts.models import Cohort
+from core.permissions import PermissionRoleSet, Role
+from core.scoping import permission_membership_scope_q, role_membership_scope_q
 
 
 def _base() -> QuerySet[AttendanceRecord]:
     # lesson__cohort (the group) + lesson__teacher__user (the teacher) are surfaced in
     # the presenter, so join them here — no extra query per row.
-    return AttendanceRecord.objects.select_related(
-        "student__user", "lesson__cohort", "lesson__teacher__user"
-    )
+    return AttendanceRecord.objects.select_related("student__user", "lesson__cohort", "lesson__teacher__user")
 
 
 def scoped_records(*, user, roles: set[str] | None = None) -> QuerySet[AttendanceRecord]:
-    """Records visible to `user`: staff → all; teacher → records on lessons they
-    teach; parent → guardian-linked children's; student → own."""
+    """Records visible through management membership, teaching, family, or self scope."""
     qs = _base()
     if user.is_superuser:
         return qs
     if roles is None:
         roles = {m.role for m in user.role_memberships.filter(revoked_at__isnull=True)}
-    if roles & STAFF_ROLES:
+    if Role.DIRECTOR in roles:
         return qs
+
+    visible = permission_membership_scope_q(
+        roles=roles,
+        permission="attendance:read",
+        branch_field="lesson__cohort__branch_id",
+        department_field="lesson__cohort__department_id",
+        account_kinds={"staff"},
+    )
+    if not isinstance(roles, PermissionRoleSet) and Role.HEAD_OF_DEPT in roles:
+        visible |= role_membership_scope_q(
+            user=user,
+            roles={Role.HEAD_OF_DEPT},
+            branch_field="lesson__cohort__branch_id",
+            department_field="lesson__cohort__department_id",
+        )
     if Role.TEACHER in roles:
-        return qs.filter(lesson__teacher__user=user)
+        visible |= Q(lesson__teacher__user=user)
     if Role.PARENT in roles:
-        return qs.filter(student__guardians__parent__user=user).distinct()
+        visible |= Q(student__guardians__parent__user=user)
     if Role.STUDENT in roles:
-        return qs.filter(student__user=user)
-    return qs.none()
+        visible |= Q(student__user=user)
+    return qs.filter(visible).distinct()
+
+
+def scoped_dashboard_cohorts(*, user, roles: set[str] | None = None) -> QuerySet[Cohort]:
+    """Cohorts whose whole-class attendance dashboard ``user`` may inspect."""
+    qs = Cohort.objects.all()
+    if user.is_superuser:
+        return qs
+    if roles is None:
+        roles = {m.role for m in user.role_memberships.filter(revoked_at__isnull=True)}
+    if Role.DIRECTOR in roles:
+        return qs
+
+    visible = permission_membership_scope_q(
+        roles=roles,
+        permission="attendance:read",
+        branch_field="branch_id",
+        department_field="department_id",
+        account_kinds={"staff"},
+    )
+    if not isinstance(roles, PermissionRoleSet) and Role.HEAD_OF_DEPT in roles:
+        visible |= role_membership_scope_q(
+            user=user,
+            roles={Role.HEAD_OF_DEPT},
+            branch_field="branch_id",
+            department_field="department_id",
+        )
+    if Role.TEACHER in roles:
+        from apps.cohorts.selectors import taught_cohorts
+
+        visible |= Q(pk__in=taught_cohorts(user=user).values("pk"))
+    return qs.filter(visible).distinct()
 
 
 def term_summary(*, base_qs: QuerySet[AttendanceRecord], student_id: int, term_id: int) -> dict:

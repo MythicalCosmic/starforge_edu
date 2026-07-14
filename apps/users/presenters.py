@@ -27,14 +27,23 @@ def user_brief(user: Any) -> dict[str, Any]:
 
 
 def role_membership_to_dict(rm: Any) -> dict[str, Any]:
-    """Was RoleMembershipSerializer."""
-    return {
+    """Permission-native membership payload; legacy role only for null rows."""
+    payload = {
         "id": rm.id,
-        "role": rm.role,
+        "account_type": rm.account_type_id,
         "branch": rm.branch_id,
         "department": rm.department_id,
         "granted_at": _iso(rm.granted_at),
     }
+    if rm.account_type_id is not None:
+        payload.update(
+            account_type_name=rm.account_type.name,
+            account_type_slug=rm.account_type.slug,
+            account_kind=rm.account_type.account_kind,
+        )
+    else:
+        payload["legacy_role"] = rm.role
+    return payload
 
 
 def user_to_dict(user: Any) -> dict[str, Any]:
@@ -85,7 +94,7 @@ def role_account_to_dict(kind: str, account: Any) -> dict[str, Any]:
     """Current-account payload for a role-native session; never exposes its bridge."""
     payload: dict[str, Any] = {
         "id": account.id,
-        "account_type": kind,
+        "principal_kind": kind,
         "username": account.username,
         "phone": account.phone,
         "email": account.email,

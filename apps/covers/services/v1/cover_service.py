@@ -15,7 +15,7 @@ from apps.covers.dto.cover_dto import CreateCoverDTO
 from apps.covers.interfaces.repositories import ICoverRepository
 from apps.covers.interfaces.services import ICoverService
 from apps.covers.models import CoverRequest
-from core.exceptions import ValidationException
+from core.exceptions import PermissionException, ValidationException
 
 
 class CoverService(ICoverService):
@@ -23,25 +23,57 @@ class CoverService(ICoverService):
         self._covers = covers
 
     def scoped_list(
-        self, *, user, is_unscoped: bool, is_manager: bool, branch_ids: set[int]
+        self,
+        *,
+        user,
+        is_unscoped: bool,
+        is_manager: bool,
+        manager_branch_ids: set[int],
+        teacher_branch_ids: set[int],
     ) -> QuerySet[CoverRequest]:
         return self._covers.scoped(
-            user=user, is_unscoped=is_unscoped, is_manager=is_manager, branch_ids=branch_ids
+            user=user,
+            is_unscoped=is_unscoped,
+            is_manager=is_manager,
+            manager_branch_ids=manager_branch_ids,
+            teacher_branch_ids=teacher_branch_ids,
         )
 
     def get_visible(
-        self, *, user, is_unscoped: bool, is_manager: bool, branch_ids: set[int], pk: int
+        self,
+        *,
+        user,
+        is_unscoped: bool,
+        is_manager: bool,
+        manager_branch_ids: set[int],
+        teacher_branch_ids: set[int],
+        pk: int,
     ) -> CoverRequest | None:
         return self._covers.get_scoped(
-            user=user, is_unscoped=is_unscoped, is_manager=is_manager, branch_ids=branch_ids, pk=pk
+            user=user,
+            is_unscoped=is_unscoped,
+            is_manager=is_manager,
+            manager_branch_ids=manager_branch_ids,
+            teacher_branch_ids=teacher_branch_ids,
+            pk=pk,
         )
 
-    def create(self, data: CreateCoverDTO, *, requester) -> CoverRequest:
+    def create(
+        self,
+        data: CreateCoverDTO,
+        *,
+        requester,
+        is_unscoped: bool,
+        branch_ids: set[int],
+    ) -> CoverRequest:
         from apps.covers.services import create_cover_request
 
-        return create_cover_request(
-            lesson=self._resolve_lesson(data.lesson_id), requester=requester, reason=data.reason
-        )
+        lesson = self._resolve_lesson(data.lesson_id)
+        if not is_unscoped and lesson.cohort.branch_id not in branch_ids:
+            raise PermissionException(
+                _("You can only request cover in your own branch."), code="branch_out_of_scope"
+            )
+        return create_cover_request(lesson=lesson, requester=requester, reason=data.reason)
 
     def assign(self, *, cover_id: int, cover_teacher_id: int, actor) -> CoverRequest:
         from apps.covers.services import assign_cover

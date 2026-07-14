@@ -23,9 +23,13 @@ from core.container import container
 from core.exceptions import NotFoundException, ValidationException
 from core.http import decimal_field, int_field, read_json, str_field
 from core.listing import apply_filters, paginate
-from core.permissions import Role, get_role_memberships, get_user_roles, has_permission_code
+from core.permissions import get_user_roles, has_permission_code
 from core.responses import created, error, paginated, success
-from core.scoping import assert_branch_id_in_scope
+from core.scoping import (
+    assert_permission_membership_scope,
+    is_unscoped,
+    permission_membership_branch_ids,
+)
 
 _RESOURCE = "loan"
 _MIN_AMOUNT = Decimal("0.01")
@@ -40,10 +44,10 @@ def _scope(request: HttpRequest) -> tuple[bool, bool, set[int]]:
     is_collector = holds loan:collect (their branches + centre-wide); else borrower-scoped."""
     req: Any = request  # perm helpers are duck-typed on .user (typed Request upstream)
     roles = get_user_roles(req)
-    is_unscoped = bool(getattr(request.user, "is_superuser", False)) or Role.DIRECTOR in roles
+    unscoped = is_unscoped(req)
     is_collector = has_permission_code(roles, "loan:collect")
-    branch_ids = {m.branch_id for m in get_role_memberships(req) if m.branch_id}
-    return is_unscoped, is_collector, branch_ids
+    branch_ids = permission_membership_branch_ids(roles=roles, permission="loan:collect")
+    return unscoped, is_collector, branch_ids
 
 
 def _get_visible(request: HttpRequest, pk: int):
@@ -165,7 +169,12 @@ def _resolve_branch(request: HttpRequest, body: dict[str, Any]):
     # repayments) to their OWN branch — every read path here is branch-scoped, so
     # accepting an arbitrary branch on the write path mis-attributes the money and
     # leaks a branch-id existence oracle. No-op for an unscoped caller (director).
-    assert_branch_id_in_scope(request, branch.id)
+    assert_permission_membership_scope(
+        request,
+        permission="loan:write",
+        branch_id=branch.id,
+        enforce_department=False,
+    )
     return branch
 
 

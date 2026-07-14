@@ -38,12 +38,34 @@ class DoNotContactService(IDoNotContactService):
         phone = normalize_phone(phone)
         try:
             with transaction.atomic():
-                return DoNotContact.objects.create(phone=phone, reason=reason, created_by=actor)
+                entry = DoNotContact.objects.create(phone=phone, reason=reason, created_by=actor)
+                from apps.audit.services import audit_log
+
+                audit_log(
+                    actor=actor,
+                    action="create",
+                    resource_type="campaign_do_not_contact",
+                    resource_id=entry.pk,
+                    after={"phone": entry.phone, "reason": entry.reason},
+                )
+                return entry
         except IntegrityError:
             # the unique(phone) constraint — already opted out is a clean 409, not a 500
             raise ConflictException(
                 _("That phone is already on the do-not-contact list."), code="already_opted_out"
             ) from None
 
-    def delete(self, entry: DoNotContact) -> None:
+    @transaction.atomic
+    def delete(self, entry: DoNotContact, *, actor) -> None:
+        from apps.audit.services import audit_log
+
+        resource_id = entry.pk
+        before = {"phone": entry.phone, "reason": entry.reason}
         entry.delete()
+        audit_log(
+            actor=actor,
+            action="delete",
+            resource_type="campaign_do_not_contact",
+            resource_id=resource_id,
+            before=before,
+        )

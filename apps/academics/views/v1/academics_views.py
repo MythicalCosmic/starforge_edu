@@ -41,16 +41,14 @@ from core.container import container
 from core.exceptions import NotFoundException, PermissionException, ValidationException
 from core.http import bool_field, decimal_field, parse_bool, read_json
 from core.listing import apply_filters, paginate
-from core.permissions import Role, get_user_roles, has_permission_code
+from core.permissions import get_user_roles, has_permission_code
 from core.ratelimit import check_rate
 from core.responses import created, error, no_content, paginated, success
+from core.scoping import is_unscoped, permission_membership_scope_q, permission_membership_scopes
 from core.utils import current_schema
 
 # Honor-roll / warnings are staff-facing aggregates (never exposed to the
 # students/parents who also hold `academics:read`).
-_REPORT_ROLES = {Role.DIRECTOR, Role.HEAD_OF_DEPT, Role.TEACHER}
-
-
 # --- service accessors -----------------------------------------------------
 
 
@@ -168,8 +166,16 @@ def _subject_create_data(request: HttpRequest) -> dict[str, Any]:
     return out
 
 
-def _subject_changes(request: HttpRequest) -> dict[str, Any]:
+def _subject_changes(request: HttpRequest, *, partial: bool) -> dict[str, Any]:
     data = read_json(request)
+    if not partial:
+        missing = [field for field in ("name", "code") if field not in data]
+        if missing:
+            raise ValidationException(
+                "Required fields are missing.",
+                code="validation_error",
+                fields={field: ["This field is required."] for field in missing},
+            )
     changes: dict[str, Any] = {}
     if "name" in data:
         changes["name"] = _str_value(data["name"], "name", max_length=200)
@@ -219,7 +225,14 @@ def subject_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
     if read:
         return success(subject_to_dict(subject))
     if request.method in ("PUT", "PATCH"):
-        return success(subject_to_dict(_subject_service().update(subject, changes=_subject_changes(request))))
+        return success(
+            subject_to_dict(
+                _subject_service().update(
+                    subject,
+                    changes=_subject_changes(request, partial=request.method == "PATCH"),
+                )
+            )
+        )
     if request.method == "DELETE":
         _subject_service().delete(subject)
         return no_content()
@@ -301,19 +314,24 @@ def exam_type_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
 
 
 def _writable_cohort_ids(request: HttpRequest):
-    """Cohorts the caller may write an exam into. None = unscoped (staff/superuser
-    reach the whole tenant); a set = a TEACHER limited to cohorts they teach."""
-    from apps.academics.selectors import STAFF_ROLES, _cohorts_taught_by
+    """Cohorts covered by the exact membership granting academics:write."""
+    from django.db.models import Q
+
+    from apps.academics.selectors import _cohorts_taught_by
 
     user = request.user
-    if getattr(user, "is_superuser", False):
+    if is_unscoped(request):
         return None
     roles = get_user_roles(request)
-    if roles & STAFF_ROLES:
-        return None
-    if Role.TEACHER in roles:
-        return set(_cohorts_taught_by(user))
-    return set()
+    staff_scope = permission_membership_scope_q(
+        roles=roles,
+        permission="academics:write",
+        branch_field="branch_id",
+        department_field="department_id",
+        account_kinds={"staff"},
+    )
+    teacher_scope = Q(pk__in=_cohorts_taught_by(user)) if "teacher" in roles else Q(pk__in=[])
+    return set(Cohort.objects.filter(staff_scope | teacher_scope).values_list("pk", flat=True))
 
 
 def _exam_create_data(request: HttpRequest) -> dict[str, Any]:
@@ -330,8 +348,17 @@ def _exam_create_data(request: HttpRequest) -> dict[str, Any]:
     return out
 
 
-def _exam_changes(request: HttpRequest) -> dict[str, Any]:
+def _exam_changes(request: HttpRequest, *, partial: bool) -> dict[str, Any]:
     data = read_json(request)
+    if not partial:
+        required = ("subject", "cohort", "term", "exam_type", "title", "exam_date")
+        missing = [field for field in required if field not in data]
+        if missing:
+            raise ValidationException(
+                "Required fields are missing.",
+                code="validation_error",
+                fields={field: ["This field is required."] for field in missing},
+            )
     changes: dict[str, Any] = {}
     if "subject" in data:
         changes["subject"] = _int_value(data["subject"], "subject")
@@ -340,7 +367,9 @@ def _exam_changes(request: HttpRequest) -> dict[str, Any]:
     if "term" in data:
         changes["term"] = _int_value(data["term"], "term")
     if "exam_type" in data:
-        changes["exam_type"] = None if data["exam_type"] is None else _int_value(data["exam_type"], "exam_type")
+        changes["exam_type"] = (
+            None if data["exam_type"] is None else _int_value(data["exam_type"], "exam_type")
+        )
     if "title" in data:
         changes["title"] = _str_value(data["title"], "title", max_length=200)
     if "exam_date" in data:
@@ -358,6 +387,8 @@ def _add_optional_decimals(data: dict[str, Any], out: dict[str, Any]) -> None:
         value = decimal_field(data, field, max_digits=digits, decimal_places=places)
         if value is None:
             raise _reject(field, "This field may not be null.")
+        if value <= 0:
+            raise _reject(field, "This field must be greater than zero.")
         out[field] = value
 
 
@@ -379,7 +410,9 @@ def exams_collection_view(request: HttpRequest) -> HttpResponse:
     if request.method == "POST":
         check_perm(request, "academics:write")
         exam = _exam_service().create(
-            data=_exam_create_data(request), writable_cohort_ids=_writable_cohort_ids(request)
+            data=_exam_create_data(request),
+            writable_cohort_ids=_writable_cohort_ids(request),
+            created_by=request.user,
         )
         return created(exam_to_dict(exam))
     return _method_not_allowed()
@@ -402,7 +435,9 @@ def exam_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
         return success(exam_to_dict(exam))
     if request.method in ("PUT", "PATCH"):
         exam = _exam_service().update(
-            exam, changes=_exam_changes(request), writable_cohort_ids=_writable_cohort_ids(request)
+            exam,
+            changes=_exam_changes(request, partial=request.method == "PATCH"),
+            writable_cohort_ids=_writable_cohort_ids(request),
         )
         return success(exam_to_dict(exam))
     if request.method == "DELETE":
@@ -431,7 +466,8 @@ def _parse_result_rows(request: HttpRequest) -> list[dict]:
 
     if len(raw) > MAX_IMPORT_ROWS:
         raise _reject("rows", f"Too many rows (max {MAX_IMPORT_ROWS}).")
-    rows: list[dict] = []
+    parsed_rows: list[tuple[int, int, Any, str]] = []
+    seen_student_ids: set[int] = set()
     for index, item in enumerate(raw):
         if not isinstance(item, dict):
             raise _reject(f"rows[{index}]", "Each row must be an object.")
@@ -445,7 +481,16 @@ def _parse_result_rows(request: HttpRequest) -> list[dict]:
             if note in (None, "")
             else _str_value(note, f"rows[{index}].note", max_length=255, allow_blank=True)
         )
-        student = StudentProfile.objects.filter(pk=student_id).first()
+        if student_id in seen_student_ids:
+            raise _reject(f"rows[{index}].student", "A student may appear only once per batch.")
+        seen_student_ids.add(student_id)
+        parsed_rows.append((index, student_id, score, note))
+
+    # Resolve all student ids in one query rather than one lookup per input row.
+    students = StudentProfile.objects.in_bulk(seen_student_ids)
+    rows: list[dict] = []
+    for index, student_id, score, note in parsed_rows:
+        student = students.get(student_id)
         if student is None:
             raise _reject(f"rows[{index}].student", "Student does not exist.")
         rows.append({"student": student, "score": score, "note": note})
@@ -461,7 +506,13 @@ def exam_results_view(request: HttpRequest, pk: int) -> HttpResponse:
     check_perm(request, "academics:write")
     exam = _get_exam_in_scope(request, pk)
     if request.method in ("GET", "HEAD"):
-        return success([exam_result_to_dict(r) for r in _exam_service().results_for(exam)])
+        items, total, page, size = paginate(request, _exam_service().results_for(exam))
+        return paginated(
+            [exam_result_to_dict(r) for r in items],
+            total=total,
+            page=page,
+            page_size=size,
+        )
     rows = _parse_result_rows(request)
     result = _exam_service().record_results(exam=exam, rows=rows, actor=request.user)
     return success(
@@ -557,9 +608,7 @@ def grade_recompute_view(request: HttpRequest) -> HttpResponse:
     # cohort's (or another branch's) grades. None = staff/superuser, unscoped.
     writable = _writable_cohort_ids(request)
     if writable is not None and cohort_id not in writable:
-        raise PermissionException(
-            "You may only recompute grades for cohorts you teach.", code="forbidden"
-        )
+        raise PermissionException("You may only recompute grades for cohorts you teach.", code="forbidden")
     grades = _grade_service().recompute(cohort=cohort, subject=subject, term=term, publish=publish)
     return success({"recomputed": len(grades)})
 
@@ -593,10 +642,13 @@ def transcripts_collection_view(request: HttpRequest) -> HttpResponse:
         student = StudentProfile.objects.filter(pk=_int_value(_require(data, "student"), "student")).first()
         # Uniform not-found for a missing student and an existing student outside
         # the caller's authority. A 400-vs-403 split is a tenant-wide ID oracle.
-        if student is None or (
-            not _is_self_or_child(request, student)
-            and not has_permission_code(get_user_roles(request), "academics:write")
-        ):
+        roles = get_user_roles(request)
+        staff_scoped = False
+        if student is not None and has_permission_code(roles, "academics:write"):
+            from apps.students.selectors import scoped_students
+
+            staff_scoped = scoped_students(user=request.user, roles=roles).filter(pk=student.pk).exists()
+        if student is None or (not _is_self_or_child(request, student) and not staff_scoped):
             raise NotFoundException(code="not_found")
         term = None
         if data.get("term") is not None:
@@ -626,15 +678,13 @@ def transcript_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
 
 
 def _assert_report_access(request: HttpRequest) -> None:
-    if request.user.is_superuser or (get_user_roles(request) & _REPORT_ROLES):
+    if is_unscoped(request) or permission_membership_scopes(
+        roles=get_user_roles(request),
+        permission="academics:read",
+        account_kinds={"staff", "teacher"},
+    ):
         return
     raise PermissionException("Honor roll and warnings are staff-only.", code="forbidden")
-
-
-# Honor-roll / warnings are ordered top-N reports (by score); hard-cap the row count so a
-# large term can't materialize an unbounded list into one response (every other list here
-# paginates — these return a bare list on purpose, so cap with a SQL LIMIT slice instead).
-_HONOR_WARNING_CAP = 1000
 
 
 @csrf_exempt
@@ -646,7 +696,8 @@ def honor_roll_view(request: HttpRequest) -> HttpResponse:
     _assert_report_access(request)
     term_id = _require_int_qparam(request, "term")
     grades = _grade_service().honor_roll(term_id=term_id, user=request.user, roles=get_user_roles(request))
-    return success([grade_to_dict(g) for g in grades[:_HONOR_WARNING_CAP]])
+    items, total, page, size = paginate(request, grades)
+    return paginated([grade_to_dict(g) for g in items], total=total, page=page, page_size=size)
 
 
 @csrf_exempt
@@ -658,4 +709,5 @@ def warnings_view(request: HttpRequest) -> HttpResponse:
     _assert_report_access(request)
     term_id = _require_int_qparam(request, "term")
     grades = _grade_service().warnings(term_id=term_id, user=request.user, roles=get_user_roles(request))
-    return success([grade_to_dict(g) for g in grades[:_HONOR_WARNING_CAP]])
+    items, total, page, size = paginate(request, grades)
+    return paginated([grade_to_dict(g) for g in items], total=total, page=page, page_size=size)

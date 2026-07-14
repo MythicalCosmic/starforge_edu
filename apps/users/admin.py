@@ -4,6 +4,7 @@ from django import forms
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.db.models import Q
+from django.utils.translation import gettext_lazy as _
 
 from apps.org.models import StaffProfile
 from apps.parents.models import ParentProfile
@@ -96,7 +97,7 @@ class RoleMembershipAdminForm(forms.ModelForm):
 
     class Meta:
         model = RoleMembership
-        fields = ("role", "branch", "department", "revoked_at")
+        fields = ("account_type", "branch", "department", "revoked_at")
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -116,13 +117,21 @@ class RoleMembershipAdminForm(forms.ModelForm):
     def clean(self):
         cleaned = super().clean() or {}
         selected = [
-            cleaned.get(name)
+            (name, cleaned.get(name))
             for name in ("staff_account", "teacher_account", "student_account", "parent_account")
             if cleaned.get(name) is not None
         ]
         if len(selected) != 1:
-            raise forms.ValidationError("Choose exactly one staff, teacher, student, or parent account.")
-        self._selected_account = selected[0]
+            raise forms.ValidationError(_("Choose exactly one staff, teacher, student, or parent account."))
+        account_type = cleaned.get("account_type")
+        if account_type is None:
+            raise forms.ValidationError(_("Choose an account type."))
+        field_name, self._selected_account = selected[0]
+        principal_kind = field_name.removesuffix("_account")
+        if account_type.account_kind != principal_kind:
+            raise forms.ValidationError(_("The selected account must match the account type kind."))
+        if not account_type.is_active:
+            raise forms.ValidationError(_("Inactive account types cannot be assigned."))
         return cleaned
 
     def save(self, commit=True):
@@ -130,6 +139,9 @@ class RoleMembershipAdminForm(forms.ModelForm):
         if self._selected_account is None:  # defensive; clean() enforces this
             raise ValueError("A role account must be selected.")
         membership.user = self._selected_account.user
+        if membership.account_type_id is None:
+            raise ValueError("An account type must be selected.")
+        membership.role = membership.account_type.compatibility_role
         if commit:
             membership.save()
             self.save_m2m()
@@ -144,14 +156,27 @@ class RoleMembershipAdmin(admin.ModelAdmin):
         "teacher_account",
         "student_account",
         "parent_account",
-        "role",
+        "account_type",
         "branch",
         "department",
         "revoked_at",
     )
-    list_display = ("role_account", "role", "branch", "department", "granted_at", "revoked_at")
-    list_filter = ("role",)
-    search_fields = ("user__username", "user__phone", "user__email")
+    list_display = (
+        "role_account",
+        "account_type",
+        "branch",
+        "department",
+        "granted_at",
+        "revoked_at",
+    )
+    list_filter = ("account_type__account_kind", "account_type__is_active")
+    search_fields = (
+        "account_type__name",
+        "account_type__slug",
+        "user__username",
+        "user__phone",
+        "user__email",
+    )
 
     @admin.display(description="Account", ordering="user__username")
     def role_account(self, obj: RoleMembership) -> str:
@@ -169,9 +194,8 @@ class RoleMembershipAdmin(admin.ModelAdmin):
 
 @admin.register(Session)
 class SessionAdmin(ReadOnlyAdmin):
-    """View-only. ``key`` is a live Bearer token — never list, search, or render
-    it (exposing it lets a viewer impersonate the user), so it is excluded from
-    the form entirely. Session lifecycle is owned by the auth service."""
+    """View-only. The stored digest is operationally unnecessary and is excluded
+    from the form. Session lifecycle is owned by the auth service."""
 
     list_display = (
         "id",
@@ -188,4 +212,4 @@ class SessionAdmin(ReadOnlyAdmin):
     search_fields = ("user__username", "ip_address", "device_id")
     date_hierarchy = "created_at"
     ordering = ("-created_at",)
-    exclude = ("key",)
+    exclude = ("key_hash",)

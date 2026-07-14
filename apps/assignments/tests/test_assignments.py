@@ -1,6 +1,6 @@
 """Assignments lane tests (D2-D): late-flag grace, resubmit limit, rubric
 validation, draft/cross-cohort scoping, due-soon idempotency, the four signals,
-upload-url allowlist + key prefix, plagiarism stub, cross-tenant, query budgets."""
+upload-url allowlist + key prefix, local plagiarism detection, cross-tenant, query budgets."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from django.utils import timezone
 from django_tenants.utils import schema_context
 
 from apps.assignments import selectors, services
-from apps.assignments.models import Assignment
+from apps.assignments.models import Assignment, AssignmentUploadGrant
 from apps.assignments.services import PlagiarismResult
 from apps.assignments.signals import (
     ai_feedback_requested,
@@ -342,21 +342,172 @@ def test_patch_max_score_null_is_400_not_conflict(tenant_a, user_in, as_user):
     assert r.status_code == 400
 
 
-# --------------------------------------------------------------------------- #
-# plagiarism stub
-# --------------------------------------------------------------------------- #
-
-
-def test_plagiarism_stub_typed(tenant_a):
+def test_assignment_close_lifecycle_is_reachable_and_idempotent(tenant_a, user_in, as_user):
+    director = user_in(tenant_a, roles=["director"])
     with schema_context(tenant_a.schema_name):
         branch = BranchFactory()
         cohort = CohortFactory(branch=branch)
-        student = _member(cohort, branch)
+        published = AssignmentFactory(cohort=cohort, status=Assignment.Status.PUBLISHED)
+        draft = AssignmentFactory(cohort=cohort, status=Assignment.Status.DRAFT)
+
+    client = as_user(tenant_a, director)
+    first = client.post(f"/api/v1/assignments/{published.id}/close/", {}, format="json")
+    assert first.status_code == 200, first.content
+    assert first.json()["data"]["status"] == Assignment.Status.CLOSED
+    retry = client.post(f"/api/v1/assignments/{published.id}/close/", {}, format="json")
+    assert retry.status_code == 200
+    rejected = client.post(f"/api/v1/assignments/{draft.id}/close/", {}, format="json")
+    assert rejected.status_code == 422
+    assert rejected.json()["code"] == "assignment_not_published"
+
+
+def test_submission_can_be_returned_for_revision(tenant_a, user_in, as_user):
+    director = user_in(tenant_a, roles=["director"])
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        cohort = CohortFactory(branch=branch)
+        assignment = AssignmentFactory(cohort=cohort, status=Assignment.Status.PUBLISHED)
+        submission = services.submit(assignment=assignment, student=_member(cohort, branch))
+
+    client = as_user(tenant_a, director)
+    url = f"/api/v1/assignments/submissions/{submission.id}/return/"
+    returned = client.post(url, {}, format="json")
+    assert returned.status_code == 200, returned.content
+    assert returned.json()["data"]["status"] == "returned"
+    assert client.post(url, {}, format="json").status_code == 200
+
+
+def test_assignment_put_requires_core_fields_and_preserves_omitted_optional_fields(
+    tenant_a, user_in, as_user
+):
+    director = user_in(tenant_a, roles=["director"])
+    with schema_context(tenant_a.schema_name):
+        cohort = CohortFactory(branch=BranchFactory())
+        assignment = AssignmentFactory(
+            cohort=cohort,
+            description="old",
+            attachments=["legacy-key"],
+            rubric=[{"criterion": "old", "max_points": 5}],
+            max_score=Decimal("25"),
+            max_resubmits=3,
+        )
+
+    client = as_user(tenant_a, director)
+    missing = client.put(f"/api/v1/assignments/{assignment.id}/", {}, format="json")
+    assert missing.status_code == 400
+    replaced = client.put(
+        f"/api/v1/assignments/{assignment.id}/",
+        {
+            "cohort": cohort.id,
+            "title": "Replacement",
+            "due_at": (timezone.now() + timedelta(days=10)).isoformat(),
+        },
+        format="json",
+    )
+    assert replaced.status_code == 200, replaced.content
+    data = replaced.json()["data"]
+    assert data["description"] == "old"
+    assert data["attachments"] == ["legacy-key"]
+    assert data["rubric"] == [{"criterion": "old", "max_points": 5}]
+    assert data["max_score"] == "25.00"
+    assert data["max_resubmits"] == 3
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"max_score": "0"},
+        {"max_resubmits": -1},
+        {"attachments": ["another_tenant/assignments/file.pdf"]},
+    ],
+)
+def test_assignment_authoring_rejects_invalid_limits_and_foreign_keys(tenant_a, user_in, as_user, extra):
+    director = user_in(tenant_a, roles=["director"])
+    with schema_context(tenant_a.schema_name):
+        cohort = CohortFactory(branch=BranchFactory())
+    payload = {
+        "cohort": cohort.id,
+        "title": "Invalid assignment",
+        "due_at": (timezone.now() + timedelta(days=3)).isoformat(),
+        **extra,
+    }
+    response = as_user(tenant_a, director).post("/api/v1/assignments/", payload, format="json")
+    assert response.status_code in (400, 422), response.content
+
+
+def test_far_future_due_date_does_not_overflow_late_check(tenant_a):
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        cohort = CohortFactory(branch=branch)
+        assignment = AssignmentFactory(
+            cohort=cohort,
+            due_at=timezone.make_aware(datetime(9999, 12, 31, 23, 59, 59)),
+        )
+        submission = services.submit(assignment=assignment, student=_member(cohort, branch))
+        assert submission.is_late is False
+
+
+def test_assignment_collections_support_head_and_paginate_submissions(tenant_a, user_in, as_user):
+    director = user_in(tenant_a, roles=["director"])
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        cohort = CohortFactory(branch=branch)
+        assignment = AssignmentFactory(cohort=cohort)
+        for _ in range(5):
+            services.submit(assignment=assignment, student=_member(cohort, branch))
+    client = as_user(tenant_a, director)
+    assert client.head("/api/v1/assignments/").status_code == 200
+    assert client.head("/api/v1/assignments/submissions/").status_code == 200
+    assert client.head(f"/api/v1/assignments/{assignment.id}/submissions/").status_code == 200
+    response = client.get(f"/api/v1/assignments/{assignment.id}/submissions/?page_size=2")
+    assert response.status_code == 200
+    assert len(response.json()["data"]) == 2
+    assert response.json()["pagination"]["total"] == 5
+
+
+# --------------------------------------------------------------------------- #
+# local plagiarism detector
+# --------------------------------------------------------------------------- #
+
+
+def test_plagiarism_local_detector_and_api(tenant_a, user_in, as_user):
+    director = user_in(tenant_a, roles=["director"])
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        cohort = CohortFactory(branch=branch)
         assignment: Any = AssignmentFactory(cohort=cohort)
-        sub = services.submit(assignment=assignment, student=student)
-        result = services.check_submission(sub)
+        original = services.submit(
+            assignment=assignment,
+            student=_member(cohort, branch),
+            text="The quick brown fox jumps over the quiet garden wall every morning.",
+        )
+        copied = services.submit(
+            assignment=assignment,
+            student=_member(cohort, branch),
+            text="The quick brown fox jumps over the quiet garden wall every morning!",
+        )
+        short = services.submit(
+            assignment=assignment,
+            student=_member(cohort, branch),
+            text="Too short",
+        )
+        result = services.check_submission(copied)
         assert isinstance(result, PlagiarismResult)
-        assert (result.status, result.score) == ("not_implemented", None)
+        assert (result.status, result.score) == ("completed", 1.0)
+        assert result.matched_submission_id == original.id
+        assert services.check_submission(short).status == "insufficient_text"
+
+    response = as_user(tenant_a, director).post(
+        f"/api/v1/assignments/submissions/{copied.id}/plagiarism/",
+        {},
+        format="json",
+    )
+    assert response.status_code == 200, response.content
+    assert response.json()["data"] == {
+        "status": "completed",
+        "score": 1.0,
+        "matched_submission_id": original.id,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -399,6 +550,50 @@ def test_upload_url_key_prefix_and_allowlist(tenant_a, monkeypatch):
                 filename="big.pdf", content_type="application/pdf", size_bytes=10**12
             )
         assert exc2.value.code == "file_too_large"
+
+
+def test_public_upload_grant_is_owner_bound_verified_and_single_use(tenant_a, monkeypatch):
+    monkeypatch.setattr(
+        services,
+        "presign_post_upload",
+        lambda key, **kwargs: {"url": "https://s3/upload", "fields": {"key": key}},
+    )
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        cohort = CohortFactory(branch=branch)
+        student = _member(cohort, branch)
+        assignment: Any = AssignmentFactory(cohort=cohort)
+        result = services.validate_and_presign_upload(
+            filename="essay.pdf",
+            content_type="application/pdf",
+            size_bytes=1024,
+            requested_by=student.user,
+        )
+        assert result["method"] == "POST"
+        monkeypatch.setattr(
+            services,
+            "head_object",
+            lambda key: {"ContentLength": 1024, "ContentType": "application/pdf"},
+        )
+        submission = services.submit(
+            assignment=assignment,
+            student=student,
+            attachment_keys=[result["key"]],
+            actor=student.user,
+        )
+        assert submission.attachments == [result["key"]]
+        grant = AssignmentUploadGrant.objects.get(key=result["key"])
+        assert grant.consumed_at is not None
+        assert grant.actual_size_bytes == 1024
+
+        with pytest.raises(UnprocessableEntity) as replay:
+            services.submit(
+                assignment=assignment,
+                student=student,
+                attachment_keys=[result["key"]],
+                actor=student.user,
+            )
+        assert replay.value.code == "invalid_attachment_grant"
 
 
 # --------------------------------------------------------------------------- #
@@ -579,6 +774,56 @@ def test_teacher_cannot_repoint_assignment_to_non_taught_cohort(tenant_a, user_i
     with schema_context(tenant_a.schema_name):
         assignment.refresh_from_db()
         assert assignment.cohort_id == own_cohort.id  # unchanged
+
+
+def test_department_hod_assignments_read_and_write_are_exactly_scoped(tenant_a, user_in, as_user):
+    from apps.org.tests.factories import DepartmentFactory
+    from apps.users.models import RoleMembership
+    from core.permissions import Role
+
+    hod = user_in(tenant_a)
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        own_department = DepartmentFactory(branch=branch)
+        sibling_department = DepartmentFactory(branch=branch)
+        own_cohort = CohortFactory(branch=branch, department=own_department)
+        sibling_cohort = CohortFactory(branch=branch, department=sibling_department)
+        own_assignment = AssignmentFactory(cohort=own_cohort, status=Assignment.Status.DRAFT)
+        sibling_assignment = AssignmentFactory(
+            cohort=sibling_cohort,
+            status=Assignment.Status.DRAFT,
+        )
+        RoleMembership.objects.create(
+            user=hod,
+            branch=branch,
+            department=own_department,
+            role=Role.HEAD_OF_DEPT,
+        )
+        hod.refresh_from_db()
+
+    client = as_user(tenant_a, hod)
+    listing = client.get("/api/v1/assignments/")
+    assert listing.status_code == 200
+    assert {row["id"] for row in listing.json()["data"]} == {own_assignment.id}
+    assert client.get(f"/api/v1/assignments/{sibling_assignment.id}/").status_code == 404
+
+    base = {
+        "title": "Department work",
+        "due_at": (timezone.now() + timedelta(days=3)).isoformat(),
+        "max_score": "100",
+    }
+    denied = client.post(
+        "/api/v1/assignments/",
+        {**base, "cohort": sibling_cohort.id},
+        format="json",
+    )
+    assert denied.status_code == 400
+    allowed = client.post(
+        "/api/v1/assignments/",
+        {**base, "cohort": own_cohort.id},
+        format="json",
+    )
+    assert allowed.status_code == 201, allowed.content
 
 
 # --------------------------------------------------------------------------- #

@@ -30,25 +30,3 @@ def purge_expired_otps() -> int:
             deleted, _ = OTP.objects.filter(expires_at__lt=timezone.now()).delete()
             total += deleted
     return total
-
-
-@app.task
-def flush_expired_jwt_blacklist() -> int:
-    """Delete expired simplejwt blacklist/outstanding rows in every schema.
-
-    Wraps simplejwt's ``flushexpiredtokens``: ``OutstandingToken`` /
-    ``BlacklistedToken`` exist in the public schema AND every tenant schema
-    (``token_blacklist`` is in both SHARED_APPS and TENANT_APPS, TD-3), so we
-    delete per-schema rather than calling the command once. Delete-by-filter on
-    ``expires_at__lte=now`` — naturally idempotent (a second run finds nothing).
-    Returns the number of OutstandingToken rows removed (BlacklistedToken rows
-    cascade with their parent).
-    """
-    from rest_framework_simplejwt.token_blacklist.models import OutstandingToken
-
-    total = 0
-    for schema in _all_schemas():
-        with schema_context(schema):
-            deleted, _ = OutstandingToken.objects.filter(expires_at__lte=timezone.now()).delete()
-            total += deleted
-    return total

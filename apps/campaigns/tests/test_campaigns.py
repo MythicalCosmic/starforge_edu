@@ -68,7 +68,7 @@ def test_create_and_send_campaign_texts_recipients(tenant_a, user_in, as_user, s
     assert data["total"] == 3
 
     sent = _send(client, cid)
-    assert sent.status_code == 200, sent.content
+    assert sent.status_code == 202, sent.content
     assert sent.json()["data"]["status"] == "sent"
     assert sent.json()["data"]["sent_count"] == 3
 
@@ -84,7 +84,7 @@ def test_send_is_idempotent(tenant_a, user_in, as_user, sms_outbox):
     client = as_user(tenant_a, user_in(tenant_a, roles=[Role.REGISTRAR], branch=branch))
     cid = _create(client, branch=branch.id)["id"]
 
-    assert _send(client, cid).status_code == 200
+    assert _send(client, cid).status_code == 202
     again = _send(client, cid)
     assert again.status_code == 422
     assert again.json()["code"] == "campaign_already_sent"
@@ -170,6 +170,9 @@ def test_failed_send_is_recorded(tenant_a, user_in, as_user, monkeypatch):
     recip = _recipients(client, cid)[0]
     assert recip["status"] == "failed"
     assert recip["error"]  # the failure reason is captured for the audit trail
+    again = _send(client, cid)
+    assert again.status_code == 422
+    assert again.json()["code"] == "campaign_delivery_failed"
 
 
 def test_send_resumes_a_stuck_sending_campaign(tenant_a, user_in, as_user, sms_outbox):
@@ -295,3 +298,14 @@ def test_recipients_endpoint_is_paginated(tenant_a, user_in, as_user):
     body = resp.json()
     assert isinstance(body["data"], list)
     assert body["pagination"]["total"] == 3
+
+
+def test_campaign_collection_and_recipients_support_head(tenant_a, user_in, as_user):
+    branch = _branch(tenant_a)
+    with schema_context(tenant_a.schema_name):
+        _student(branch)
+    client = as_user(tenant_a, user_in(tenant_a, roles=[Role.REGISTRAR], branch=branch))
+    campaign_id = _create(client, branch=branch.id)["id"]
+
+    assert client.head(CAMPAIGNS).status_code == 200
+    assert client.head(f"{CAMPAIGNS}{campaign_id}/recipients/").status_code == 200

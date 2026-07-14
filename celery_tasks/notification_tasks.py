@@ -47,9 +47,7 @@ def dispatch_notification(notification_id: int, *, channels: list[str] | None = 
     from apps.org.selectors import get_center_settings
 
     try:
-        notification = (
-            Notification.objects.select_for_update().select_related("user").get(pk=notification_id)
-        )
+        notification = Notification.objects.select_for_update().select_related("user").get(pk=notification_id)
     except Notification.DoesNotExist:
         logger.warning("dispatch_notification: notification %s gone", notification_id)
         return {"notification_id": notification_id, "status": "missing"}
@@ -174,9 +172,7 @@ def deliver_single_channel(
             return "still_deferred"
 
     try:
-        notification = (
-            Notification.objects.select_for_update().select_related("user").get(pk=notification_id)
-        )
+        notification = Notification.objects.select_for_update().select_related("user").get(pk=notification_id)
     except Notification.DoesNotExist:
         return "missing"
 
@@ -314,10 +310,7 @@ def _channel_is_complete(notification, channel: str) -> bool:
         if (response := row["provider_response"] or {}).get("device_id")
         and (
             row["status"] in terminal
-            or (
-                row["status"] == NotificationDelivery.Status.FAILED
-                and not response.get("retryable", False)
-            )
+            or (row["status"] == NotificationDelivery.Status.FAILED and not response.get("retryable", False))
         )
     }
     return active_device_ids.issubset(complete_device_ids)
@@ -363,7 +356,7 @@ def _deliver_sms(notification, user, text) -> str:
     from apps.notifications.models import Channel, NotificationDelivery
     from infrastructure.sms.eskiz_client import get_sms_client
 
-    phone = getattr(user, "phone", None)
+    phone = _role_contact(user, "phone")
     if not phone:
         _record(
             notification,
@@ -381,7 +374,7 @@ def _deliver_email(notification, user, subject, body) -> str:
     from apps.notifications.models import Channel, NotificationDelivery
     from infrastructure.email.email_client import send_email
 
-    email = getattr(user, "email", None)
+    email = _role_contact(user, "email")
     if not email:
         _record(
             notification,
@@ -426,33 +419,15 @@ def _deliver_push(notification, user, title, body, context) -> str:
                 data={k: str(v) for k, v in context.items()},
             )
         except Exception as exc:
-            failure_status = NotificationDelivery.Status.FAILED
-            if (
-                _consecutive_push_failures(user_id=user.pk, device_id=device.device_id) + 1
-                >= PUSH_DEAD_TOKEN_THRESHOLD
-            ):
-                Device.objects.filter(pk=device.pk).update(push_token="")
-                failure_status = NotificationDelivery.Status.DEAD_TOKEN
-                any_dead = True
-            if failure_status == NotificationDelivery.Status.FAILED:
-                _record_retryable_failure(
-                    notification,
-                    Channel.PUSH,
-                    exc,
-                    device_id=device.device_id,
-                )
-                retry_error = exc
-            else:
-                _record(
-                    notification,
-                    Channel.PUSH,
-                    failure_status,
-                    provider_response={
-                        "device_id": device.device_id,
-                        "error": type(exc).__name__,
-                        "retryable": False,
-                    },
-                )
+            # Dependency, credential, timeout, and provider outages say nothing
+            # about token validity. Never erase a token for a generic exception.
+            _record_retryable_failure(
+                notification,
+                Channel.PUSH,
+                exc,
+                device_id=device.device_id,
+            )
+            retry_error = exc
             continue
         if response.get("success"):
             any_sent = True
@@ -462,7 +437,7 @@ def _deliver_push(notification, user, title, body, context) -> str:
                 NotificationDelivery.Status.SENT,
                 provider_response={"device_id": device.device_id, **response},
             )
-        else:
+        elif response.get("error") == "unregistered":
             failure_status = NotificationDelivery.Status.FAILED
             if (
                 _consecutive_push_failures(user_id=user.pk, device_id=device.device_id) + 1
@@ -478,11 +453,44 @@ def _deliver_push(notification, user, title, body, context) -> str:
                 failure_status,
                 provider_response={"device_id": device.device_id, **response},
             )
+        else:
+            failure_exc = RetryableDeliveryError(str(response.get("error") or "push provider failure"))
+            _record_retryable_failure(
+                notification,
+                Channel.PUSH,
+                failure_exc,
+                device_id=device.device_id,
+            )
+            retry_error = failure_exc
     if retry_error is not None:
         raise RetryableDeliveryError("push notification delivery failed") from retry_error
     if any_sent:
         return "sent"
     return "dead_token" if any_dead else "failed"
+
+
+def _role_contact(user, field: str) -> str:
+    """Resolve delivery contacts from the role principal, not its hidden User bridge.
+
+    A legacy user can be linked to multiple profiles. Identical values are safe;
+    conflicting values fail closed rather than notifying the wrong person.
+    """
+    from django.core.exceptions import ObjectDoesNotExist
+
+    values: set[str] = set()
+    for relation in ("student_profile", "teacher_profile", "parent_profile", "staff_profile"):
+        try:
+            profile = getattr(user, relation)
+        except ObjectDoesNotExist:
+            continue
+        value = str(getattr(profile, field, "") or "").strip()
+        if value and getattr(profile, "is_active", True):
+            values.add(value)
+    if len(values) == 1:
+        return values.pop()
+    if len(values) > 1:
+        return ""
+    return str(getattr(user, field, "") or "").strip()
 
 
 def _push_device_is_complete(notification, device_id: str) -> bool:
@@ -584,6 +592,9 @@ def dispatch_many_chunk(
     sent = 0
     for uid in user_ids:
         dedupe_key = f"{dedupe_prefix}:{uid}" if dedupe_prefix else None
-        if dispatch(event_type=event_type, recipient_id=uid, context=context, dedupe_key=dedupe_key) is not None:
+        if (
+            dispatch(event_type=event_type, recipient_id=uid, context=context, dedupe_key=dedupe_key)
+            is not None
+        ):
             sent += 1
     return sent

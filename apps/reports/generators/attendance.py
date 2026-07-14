@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
+from django.db.models import Q
 from django.utils import timezone
 
 from apps.attendance.models import AttendanceRecord
@@ -16,6 +17,7 @@ from apps.reports.generators.base import (
     ReportGenerator,
     enforce_report_row_cap,
     is_full_scope,
+    staff_report_scope_q,
     teacher_cohort_ids,
 )
 
@@ -40,6 +42,8 @@ class AttendanceGenerator(ReportGenerator):
         ).order_by("lesson__starts_at", "student__student_id")
         if params.get("cohort_id"):
             qs = qs.filter(lesson__cohort_id=params["cohort_id"])
+        if params.get("branch_id"):
+            qs = qs.filter(lesson__cohort__branch_id=params["branch_id"])
         date_from = _parse_date(params.get("date_from"))
         date_to = _parse_date(params.get("date_to"))
         if date_from:
@@ -48,7 +52,15 @@ class AttendanceGenerator(ReportGenerator):
             qs = qs.filter(lesson__starts_at__date__lte=date_to)
 
         if not is_full_scope(user=user, roles=roles):
-            qs = qs.filter(lesson__cohort_id__in=teacher_cohort_ids(user))
+            visible = staff_report_scope_q(
+                roles=roles,
+                user=user,
+                branch_field="lesson__cohort__branch_id",
+                department_field="lesson__cohort__department_id",
+            )
+            if "teacher" in roles:
+                visible |= Q(lesson__cohort_id__in=teacher_cohort_ids(user))
+            qs = qs.filter(visible).distinct()
 
         enforce_report_row_cap(qs)
         rows = []

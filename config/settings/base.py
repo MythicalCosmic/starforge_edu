@@ -10,7 +10,6 @@ token validated against a per-tenant ``Session`` row (no JWT library). Django's
 cookie sessions remain enabled only so the built-in /admin/ keeps working.
 """
 
-from datetime import timedelta
 from pathlib import Path
 
 import environ
@@ -39,6 +38,7 @@ env = environ.Env(
     ESKIZ_FROM=(str, "4546"),  # TD-17: approved sender nick; 4546 is Eskiz's test sender
     ESKIZ_USE_MOCK=(bool, True),
     NUM_PROXIES=(int, 0),  # trusted reverse-proxy hops for X-Forwarded-For (0 = trust REMOTE_ADDR only)
+    SESSION_TTL_DAYS=(int, 7),
     ANTHROPIC_API_KEY=(str, ""),
     ANTHROPIC_USE_MOCK=(bool, True),  # D4-LA-2 (TD-2): mock-first; production.py sets False
     FIELD_ENCRYPTION_KEY=(str, ""),  # TD-11 Fernet key (O-11); dev/test override locally
@@ -84,6 +84,10 @@ if env_file.exists():
 SECRET_KEY = env("SECRET_KEY")
 DEBUG = env("DEBUG")
 ALLOWED_HOSTS = env("ALLOWED_HOSTS")
+SESSION_TTL_DAYS = env("SESSION_TTL_DAYS")
+HEALTH_READY_RATELIMIT = env("HEALTH_READY_RATELIMIT", default="30/min")
+HEALTH_READY_CACHE_SECONDS = env.float("HEALTH_READY_CACHE_SECONDS", default=0.0)
+HEALTH_REQUIRE_CELERY_HEARTBEAT = env.bool("HEALTH_REQUIRE_CELERY_HEARTBEAT", default=False)
 
 # ---------------------------------------------------------------------------
 # Apps: SHARED_APPS (public schema) vs TENANT_APPS (per-tenant schema)
@@ -112,10 +116,12 @@ SHARED_APPS = [
     # These stay in TENANT_APPS too (a table per tenant schema as well).
     "apps.users.apps.UsersConfig",
     "apps.auth.apps.AuthAppConfig",
+    # Audit exists in public and tenant schemas: platform-admin mutations must
+    # be just as traceable as tenant operations.
+    "apps.audit.apps.AuditConfig",
     # TD-8: platform billing (Plan/Subscription/UsageSnapshot) is public-schema
     # only — it monetizes tenants, so it must NOT appear in TENANT_APPS.
     "apps.billing.apps.BillingConfig",
-    "rest_framework_simplejwt.token_blacklist",
     "django_celery_beat",
     "channels",
     "corsheaders",
@@ -128,7 +134,6 @@ TENANT_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "rest_framework",
-    "rest_framework_simplejwt.token_blacklist",
     "drf_spectacular",
     "django_filters",
     "apps.users.apps.UsersConfig",
@@ -175,6 +180,22 @@ TENANT_MODEL = "tenancy.Center"
 TENANT_DOMAIN_MODEL = "tenancy.Domain"
 PUBLIC_SCHEMA_URLCONF = "config.urls_public"
 
+# Custom-domain ownership verification. Development-owned ``*.localhost``
+# hostnames can route immediately; production resets the trusted list to an
+# explicit env allowlist so arbitrary customer domains always require DNS TXT.
+DOMAIN_VERIFICATION_TRUSTED_SUFFIXES = env.list(
+    "DOMAIN_VERIFICATION_TRUSTED_SUFFIXES",
+    default=["localhost"],
+)
+DOMAIN_VERIFICATION_DNS_URL = env.str(
+    "DOMAIN_VERIFICATION_DNS_URL",
+    default="https://cloudflare-dns.com/dns-query",
+)
+DOMAIN_VERIFICATION_TIMEOUT_SECONDS = env.float(
+    "DOMAIN_VERIFICATION_TIMEOUT_SECONDS",
+    default=3.0,
+)
+
 # ---------------------------------------------------------------------------
 # Middleware (TenantMainMiddleware MUST be first)
 # ---------------------------------------------------------------------------
@@ -186,6 +207,10 @@ MIDDLEWARE = [
     # admin, DEBUG technical pages) into the JSON {"error": {...}} envelope. Just
     # below RequestID so it runs late outbound and preserves inner CORS headers.
     "core.middleware.JsonErrorResponseMiddleware",
+    # CORS must wrap every early response below, including readiness and the
+    # pre-tenant 429 limiter, so browser clients can read the JSON envelope and
+    # Retry-After header.
+    "corsheaders.middleware.CorsMiddleware",
     # Liveness/readiness probes answer on ANY Host header and must bypass tenant
     # resolution, so this sits before TenantMainMiddleware (D1-LA-8).
     "core.middleware.HealthCheckMiddleware",
@@ -193,10 +218,6 @@ MIDDLEWARE = [
     # throttles). Before tenant resolution so a flood never costs a schema lookup.
     "core.middleware.ApiRateLimitMiddleware",
     "django_tenants.middleware.main.TenantMainMiddleware",
-    # CORS must wrap the short-circuit responses below (402 paywall / 503 inactive)
-    # so a browser SPA on an allowed origin can read the real envelope instead of a
-    # generic CORS failure — hence it sits ABOVE SubscriptionGate/InactiveTenant.
-    "corsheaders.middleware.CorsMiddleware",
     # TD-8 paywall: a suspended tenant's API returns 402 (needs the resolved
     # tenant, so immediately after TenantMainMiddleware; allowlists admin/auth/
     # healthz/schema; public schema is a no-op).
@@ -213,6 +234,7 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "apps.audit.middleware.AuditActorMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
@@ -274,7 +296,7 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 # ---------------------------------------------------------------------------
-# DRF + simplejwt + drf-spectacular
+# DRF session authentication + drf-spectacular
 # ---------------------------------------------------------------------------
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
@@ -305,16 +327,6 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         "anon": "60/min",  # keep in sync with API_RATELIMIT_ANON below
         "user": "1000/min",  # keep in sync with API_RATELIMIT_USER below
-        "login_user": "5/min",
-        "login_ip": "10/min",
-        "otp_phone": "3/min",
-        "otp_verify": "10/min",
-        "otp_ip": "10/min",
-        "otp_global": "1000/hour",
-        # Per-(schema, user) caps on expensive endpoints (core.throttles).
-        "announcement": "10/min",
-        "bulk_import": "6/min",
-        "ai_generation": "20/min",
     },
     # Trusted-proxy depth for DRF's get_ident (IP throttles); mirrors
     # core.utils.client_ip so all IP-keyed controls share one source.
@@ -326,21 +338,25 @@ REST_FRAMEWORK = {
 NUM_PROXIES = env("NUM_PROXIES")
 
 # Blanket /api/ rate caps enforced by core.middleware.ApiRateLimitMiddleware for
-# BOTH view styles (DRF's throttles above only see DRF views). DRF-format strings;
-# a Bearer-carrying request buckets per token at USER, anything else per IP at ANON.
+# BOTH view styles (DRF's throttles above only see DRF views). Every request pays
+# the pre-auth IP cap; valid sessions then pay a stable user-id cap.
 API_RATELIMIT_USER = env.str("API_RATELIMIT_USER", default="1000/min")
 API_RATELIMIT_ANON = env.str("API_RATELIMIT_ANON", default="60/min")
+API_RATELIMIT_PREAUTH = env.str("API_RATELIMIT_PREAUTH", default="300/min")
 
-SIMPLE_JWT = {
-    # Request auth is custom session auth (core.session_auth), NOT JWT. simplejwt
-    # stays configured only for the schedule iCal-feed signed token (a calendar
-    # subscription URL can't carry a session). SESSION_TTL_DAYS bounds real sessions.
-    "ACCESS_TOKEN_LIFETIME": timedelta(days=env.int("ACCESS_TOKEN_DAYS", default=7)),
-    "UPDATE_LAST_LOGIN": True,
-    "AUTH_HEADER_TYPES": ("Bearer",),
-    "USER_ID_FIELD": "id",
-    "USER_ID_CLAIM": "user_id",
-}
+# Admission limits for memory/CPU-heavy PDF/XLSX background work. The shared
+# document caps cover report runs and transcripts together; per-kind caps make
+# abusive clients fail before they can monopolize that shared allowance.
+REPORT_MAX_ACTIVE_PER_USER = env.int("REPORT_MAX_ACTIVE_PER_USER", default=3)
+REPORT_MAX_ACTIVE_PER_TENANT = env.int("REPORT_MAX_ACTIVE_PER_TENANT", default=20)
+REPORT_MAX_HOURLY_PER_USER = env.int("REPORT_MAX_HOURLY_PER_USER", default=10)
+REPORT_MAX_HOURLY_PER_TENANT = env.int("REPORT_MAX_HOURLY_PER_TENANT", default=100)
+TRANSCRIPT_MAX_ACTIVE_PER_USER = env.int("TRANSCRIPT_MAX_ACTIVE_PER_USER", default=3)
+TRANSCRIPT_MAX_ACTIVE_PER_TENANT = env.int("TRANSCRIPT_MAX_ACTIVE_PER_TENANT", default=20)
+TRANSCRIPT_MAX_HOURLY_PER_USER = env.int("TRANSCRIPT_MAX_HOURLY_PER_USER", default=10)
+TRANSCRIPT_MAX_HOURLY_PER_TENANT = env.int("TRANSCRIPT_MAX_HOURLY_PER_TENANT", default=100)
+DOCUMENT_MAX_ACTIVE_PER_TENANT = env.int("DOCUMENT_MAX_ACTIVE_PER_TENANT", default=20)
+DOCUMENT_MAX_HOURLY_PER_TENANT = env.int("DOCUMENT_MAX_HOURLY_PER_TENANT", default=100)
 
 SPECTACULAR_SETTINGS = {
     "TITLE": "Starforge Edu API",
@@ -349,7 +365,14 @@ SPECTACULAR_SETTINGS = {
     "SERVE_INCLUDE_SCHEMA": False,
     "SCHEMA_PATH_PREFIX": r"/api/v1",
     "COMPONENT_SPLIT_REQUEST": True,
-    "ENUM_NAME_OVERRIDES": {},
+    # Report models expose the same choices through model and request
+    # serializers. Name those shared enums explicitly so schema generation is
+    # deterministic and production ``check --deploy`` can treat warnings as
+    # release-blocking failures.
+    "ENUM_NAME_OVERRIDES": {
+        "ReportFormatEnum": "apps.reports.models.ReportFormat.choices",
+        "ReportKeyEnum": "apps.reports.models.ReportKey.choices",
+    },
 }
 
 # ---------------------------------------------------------------------------
@@ -389,9 +412,32 @@ CELERY_TASK_TRACK_STARTED = True
 CELERY_TASK_TIME_LIMIT = 30 * 60
 CELERY_TASK_SOFT_TIME_LIMIT = 25 * 60
 CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
-# tenant-schemas-celery: every task auto-activates the right tenant schema.
-CELERY_TASK_CLS = "tenant_schemas_celery.task:TenantTask"
-
+# Keep long AI/report work from reserving large batches ahead of payment and
+# notification work. Child recycling bounds leaks from PDF/image/native stacks.
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+CELERY_WORKER_MAX_TASKS_PER_CHILD = 200
+CELERY_WORKER_MAX_MEMORY_PER_CHILD = 256_000  # KiB
+CELERY_RESULT_EXPIRES = 60 * 60 * 24
+CELERY_TASK_DEFAULT_QUEUE = "default"
+CELERY_TASK_ROUTES = {
+    "celery_tasks.payment_tasks.*": {"queue": "critical"},
+    "celery_tasks.health_tasks.*": {"queue": "critical"},
+    "celery_tasks.notification_tasks.*": {"queue": "notifications"},
+    "celery_tasks.campaign_tasks.*": {"queue": "notifications"},
+    "celery_tasks.ai_tasks.*": {"queue": "ai"},
+    "celery_tasks.report_tasks.*": {"queue": "reports"},
+    "celery_tasks.academics_tasks.*": {"queue": "reports"},
+    "celery_tasks.content_tasks.*": {"queue": "reports"},
+    "celery_tasks.print_tasks.*": {"queue": "reports"},
+    "celery_tasks.cleanup_tasks.*": {"queue": "maintenance"},
+    "celery_tasks.audit_tasks.*": {"queue": "maintenance"},
+    "celery_tasks.tenancy_tasks.*": {"queue": "maintenance"},
+    "celery_tasks.attendance_tasks.*": {"queue": "maintenance"},
+    "celery_tasks.schedule_tasks.*": {"queue": "maintenance"},
+    "celery_tasks.assignment_tasks.*": {"queue": "maintenance"},
+    "celery_tasks.billing_tasks.*": {"queue": "maintenance"},
+    "celery_tasks.finance_tasks.*": {"queue": "maintenance"},
+}
 # Beat schedule (DatabaseScheduler ingests this at beat startup; tasks register
 # with workers via celery_tasks/tasks.py — see tests/test_celery_registration.py.
 # purge_expired_otps already iterates public + tenant schemas; D4-F only
@@ -399,6 +445,11 @@ CELERY_TASK_CLS = "tenant_schemas_celery.task:TenantTask"
 from celery.schedules import crontab  # noqa: E402
 
 CELERY_BEAT_SCHEDULE = {
+    "runtime-heartbeat": {
+        "task": "celery_tasks.health_tasks.record_runtime_heartbeat",
+        "schedule": 30.0,
+        "options": {"queue": "critical", "expires": 25},
+    },
     "deactivate-expired-trials": {
         "task": "celery_tasks.tenancy_tasks.deactivate_expired_trials",
         "schedule": 60 * 60,  # hourly
@@ -427,6 +478,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "celery_tasks.finance_tasks.late_payment_reminders",
         "schedule": 60 * 60 * 24,  # daily (D3-A-8)
     },
+    "refresh-fx-rates": {
+        "task": "celery_tasks.finance_tasks.refresh_fx_rates",
+        "schedule": crontab(hour=0, minute=15),  # daily CBU snapshot after midnight
+    },
     "cleanup-old-audit-logs": {
         "task": "celery_tasks.audit_tasks.cleanup_old_audit_logs",
         "schedule": 60 * 60 * 24 * 7,  # weekly (D3-D-6)
@@ -435,21 +490,12 @@ CELERY_BEAT_SCHEDULE = {
         "task": "celery_tasks.billing_tasks.run_nightly_metering",
         "schedule": 60 * 60 * 24,  # nightly usage snapshot + state flips (D3-E-5)
     },
-    # Day 4 (D4-LF-4 consolidation)
-    "flush-expired-jwt-blacklist": {
-        "task": "celery_tasks.cleanup_tasks.flush_expired_jwt_blacklist",
-        "schedule": 60 * 60 * 24 * 7,  # weekly
-    },
     "run-due-report-schedules": {
         "task": "celery_tasks.report_tasks.run_due_report_schedules",
         # Clock-aligned hourly (:00) — schedule_is_due requires an exact
         # local.hour match, so a drifting fixed interval could skip an hour
         # bucket (and that hour's due schedules) after a beat restart (D4-LB-6).
         "schedule": crontab(minute=0),
-    },
-    "nightly-platform-aggregation": {
-        "task": "celery_tasks.report_tasks.nightly_platform_aggregation",
-        "schedule": 60 * 60 * 24,  # daily, public schema (D4-LB-7)
     },
     "dispatch-scheduled-campaigns": {
         "task": "celery_tasks.campaign_tasks.dispatch_scheduled_campaigns",
@@ -458,6 +504,11 @@ CELERY_BEAT_SCHEDULE = {
     "prune-webhook-events": {
         "task": "celery_tasks.payment_tasks.prune_webhook_events",
         "schedule": 60 * 60 * 24,  # daily — bound WebhookEvent storage growth (R6/CONF3)
+    },
+    "reconcile-fiscal-receipts": {
+        "task": "celery_tasks.payment_tasks.reconcile_fiscal_receipts",
+        "schedule": 60 * 5,
+        "options": {"queue": "critical", "expires": 240},
     },
 }
 

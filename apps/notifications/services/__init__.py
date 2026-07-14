@@ -37,6 +37,7 @@ from typing import Any
 
 from django.db import transaction
 from django.utils import timezone
+from django.utils.translation import gettext_lazy as _
 
 from apps.notifications.models import (
     Channel,
@@ -167,8 +168,8 @@ def _queue_dispatch(notification_id: int, channels: list[str] | None, schema: st
 # Group names are SCHEMA-PREFIXED: user/branch/cohort ids are per-tenant
 # autoincrements, so an unscoped "user.5"/"cohort.3" collides across tenants on
 # the shared Redis channel layer. The Day-4 consumers join the SAME prefixed
-# groups (NotificationConsumer: {schema}.user.{id}/{schema}.branch.{b};
-# AttendanceConsumer: {schema}.cohort.{id}).
+# groups (NotificationConsumer: {schema}.user.{id}; AttendanceConsumer:
+# {schema}.cohort.{id}).
 # ---------------------------------------------------------------------------
 def push_in_app(notification, title: str, body: str) -> None:
     """group_send the in-app payload to ``{schema}.user.{recipient}``.
@@ -374,7 +375,16 @@ def announce_cohort(
     Dedupe key per (announcement, user) so a re-fire of the same announcement
     delivers each member exactly once.
     """
-    from apps.cohorts.models import CohortMembership
+    from apps.cohorts.models import Cohort, CohortMembership
+
+    if not Cohort.objects.filter(pk=cohort_id).exists():
+        from core.exceptions import ValidationException
+
+        raise ValidationException(
+            _("cohort does not exist."),
+            code="validation_error",
+            fields={"cohort": ["Object does not exist."]},
+        )
 
     ann_id = announcement_id or stable_hash(f"{cohort_id}:{title}:{timezone.now().isoformat()}")[:24]
     user_ids = list(

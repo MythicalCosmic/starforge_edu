@@ -7,6 +7,7 @@ from typing import Any
 
 from django.db.models import QuerySet
 from django.utils.text import slugify
+from django.utils.translation import gettext_lazy as _
 
 from apps.academics import services as domain
 from apps.academics.interfaces.repositories import (
@@ -30,7 +31,7 @@ from core.exceptions import ValidationException
 
 
 def _reject(field: str, message: str) -> ValidationException:
-    return ValidationException("Invalid input.", code="validation_error", fields={field: [message]})
+    return ValidationException(_("Invalid input."), code="validation_error", fields={field: [message]})
 
 
 class ExamTypeService(IExamTypeService):
@@ -142,8 +143,10 @@ class ExamService(IExamService):
                 out[field] = data[field]
         return out
 
-    def create(self, *, data: dict[str, Any], writable_cohort_ids) -> Exam:
-        return self.repository.add(data=self._resolve_write_fields(data, writable_cohort_ids))
+    def create(self, *, data: dict[str, Any], writable_cohort_ids, created_by=None) -> Exam:
+        resolved = self._resolve_write_fields(data, writable_cohort_ids)
+        resolved["created_by"] = created_by
+        return self.repository.add(data=resolved)
 
     def update(self, exam: Exam, *, changes: dict[str, Any], writable_cohort_ids) -> Exam:
         return self.repository.apply_changes(

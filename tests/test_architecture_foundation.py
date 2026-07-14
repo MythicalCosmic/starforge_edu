@@ -49,6 +49,48 @@ def test_container_caches_singletons_and_rejects_unbound_abstract():
         Container().resolve(_IGreeter)  # no binding for the abstract port
 
 
+def test_container_rejects_conflicting_registration_but_allows_idempotent_ready_hook():
+    c = Container()
+    c.register(_IGreeter, _Greeter)
+    c.register(_IGreeter, _Greeter)
+
+    class _OtherGreeter(_IGreeter):
+        def greet(self) -> str:
+            return "other"
+
+    with pytest.raises(RuntimeError, match="different binding"):
+        c.register(_IGreeter, _OtherGreeter)
+
+
+def test_container_constructs_singleton_once_under_concurrent_first_use():
+    import threading
+    import time
+
+    constructed = 0
+    constructed_lock = threading.Lock()
+
+    class _SlowGreeter(_IGreeter):
+        def __init__(self) -> None:
+            nonlocal constructed
+            time.sleep(0.01)
+            with constructed_lock:
+                constructed += 1
+
+        def greet(self) -> str:
+            return "hello"
+
+    c = Container().register(_IGreeter, _SlowGreeter)
+    resolved: list[_IGreeter] = []
+    threads = [threading.Thread(target=lambda: resolved.append(c.resolve(_IGreeter))) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert constructed == 1
+    assert len({id(instance) for instance in resolved}) == 1
+
+
 # --- response envelopes ----------------------------------------------------
 def test_response_envelopes_have_the_standard_shape():
     s = json.loads(success({"x": 1}, message="ok").content)
@@ -79,6 +121,10 @@ def test_response_envelopes_have_the_standard_shape():
 
 # --- base repository -------------------------------------------------------
 def test_base_repository_crud_runs_through_the_orm(tenant_a):
+    from datetime import timedelta
+
+    from django.utils import timezone
+
     from apps.org.models import Branch
 
     class _BranchRepo(BaseRepository[Branch]):
@@ -90,8 +136,13 @@ def test_base_repository_crud_runs_through_the_orm(tenant_a):
         assert repo.get_by_id(branch.pk).name == "North"
         assert repo.exists(slug="north-x") is True
         assert repo.count(slug="north-x") == 1
+        stale = timezone.now() - timedelta(days=1)
+        Branch.objects.filter(pk=branch.pk).update(updated_at=stale)
+        branch.refresh_from_db()
         repo.update(branch, name="South")
-        assert repo.get_by_id(branch.pk).name == "South"
+        updated = repo.get_by_id(branch.pk)
+        assert updated.name == "South"
+        assert updated.updated_at > stale
         again, made = repo.get_or_create(slug="north-x", defaults={"name": "South"})
         assert made is False
         assert again.pk == branch.pk

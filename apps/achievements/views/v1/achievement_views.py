@@ -24,15 +24,13 @@ from core.container import container
 from core.exceptions import NotFoundException, PermissionException, ValidationException
 from core.http import int_field, read_json, str_field
 from core.listing import apply_filters, paginate
-from core.permissions import (
-    Role,
-    _request_overrides,
-    get_role_memberships,
-    get_user_roles,
-    has_permission_code,
-)
+from core.permissions import _request_overrides, get_user_roles, has_permission_code
 from core.responses import created, error, paginated, success
-from core.scoping import branch_ids, is_unscoped
+from core.scoping import (
+    is_unscoped,
+    permission_membership_branch_ids,
+    request_permission_membership_allows,
+)
 
 _RESOURCE = "achievements"
 
@@ -46,11 +44,11 @@ def _scope(request: HttpRequest) -> tuple[bool, bool, bool, set[int]]:
     req: Any = request  # perm helpers are duck-typed on .user (typed Request upstream)
     roles = get_user_roles(req)
     overrides = _request_overrides(req)
-    is_unscoped = getattr(req.user, "is_superuser", False) or Role.DIRECTOR in roles
+    unscoped = is_unscoped(req)
     can_write = has_permission_code(roles, f"{_RESOURCE}:write", overrides)
-    can_approve = is_unscoped or has_permission_code(roles, f"{_RESOURCE}:approve", overrides)
-    branch_ids = {m.branch_id for m in get_role_memberships(req) if m.branch_id}
-    return is_unscoped, can_write, can_approve, branch_ids
+    can_approve = unscoped or has_permission_code(roles, f"{_RESOURCE}:approve", overrides)
+    write_branch_ids = permission_membership_branch_ids(roles=roles, permission=f"{_RESOURCE}:write")
+    return unscoped, can_write, can_approve, write_branch_ids
 
 
 def _get_visible(request: HttpRequest, pk: int) -> Achievement:
@@ -71,7 +69,7 @@ def _get_visible(request: HttpRequest, pk: int) -> Achievement:
 @csrf_exempt
 @require_auth
 def achievements_collection_view(request: HttpRequest) -> HttpResponse:
-    if request.method == "GET":
+    if request.method in ("GET", "HEAD"):
         check_perm(request, f"{_RESOURCE}:read")
         is_unscoped, can_write, can_approve, branch_ids = _scope(request)
         qs = _service().scoped_list(
@@ -135,7 +133,12 @@ def achievement_grant_view(request: HttpRequest, pk: int) -> HttpResponse:
     # could grant a GLOBAL achievement to another branch's student (cross-branch write)
     # and use the endpoint as a student-pk existence oracle. Mirrors the sales / cards /
     # compliance student-write paths.
-    if not is_unscoped(request) and student.branch_id not in branch_ids(request):
+    if not request_permission_membership_allows(
+        request,
+        permission=f"{_RESOURCE}:write",
+        branch_id=student.branch_id,
+        enforce_department=False,
+    ):
         raise PermissionException(
             "You can only grant to a student in your own branch.", code="branch_out_of_scope"
         )
@@ -147,7 +150,7 @@ def achievement_grant_view(request: HttpRequest, pk: int) -> HttpResponse:
 @csrf_exempt
 @require_auth
 def achievements_mine_view(request: HttpRequest) -> HttpResponse:
-    if request.method != "GET":
+    if request.method not in ("GET", "HEAD"):
         return error("Method not allowed.", code="method_not_allowed", status=405)
     check_perm(request, f"{_RESOURCE}:read")
     # A student sees their own wall; a parent sees their guardian-linked children's.
@@ -159,7 +162,7 @@ def achievements_mine_view(request: HttpRequest) -> HttpResponse:
 @csrf_exempt
 @require_auth
 def achievement_grants_view(request: HttpRequest, pk: int) -> HttpResponse:
-    if request.method != "GET":
+    if request.method not in ("GET", "HEAD"):
         return error("Method not allowed.", code="method_not_allowed", status=405)
     # Staff-only: who earned an achievement (+ the staff notes) is NOT for a
     # student/parent to enumerate — they only get their own wall via `mine`.
@@ -200,7 +203,9 @@ def _create(request: HttpRequest) -> HttpResponse:
         name=name,
         scope=scope,
         description=str_field(body, "description"),
-        emoji=str_field(body, "emoji", max_length=8),  # matches the old serializer's cap
+        # The model intentionally allows multi-codepoint ZWJ emoji. Keep the API
+        # limit aligned so valid family/profession emoji are not rejected early.
+        emoji=str_field(body, "emoji", max_length=32),
         cohort_id=int_field(body, "cohort"),
     )
     is_unscoped, _can_write, can_approve, branch_ids = _scope(request)

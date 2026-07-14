@@ -17,5 +17,12 @@ def generate_transcript_pdf(self, transcript_id: int) -> str | None:
     try:
         return generate_transcript(transcript_id)
     except Exception as exc:  # mark failed, then let Celery retry
+        from core.exceptions import ConflictException
+
+        if isinstance(exc, ConflictException) and exc.code == "transcript_in_progress":
+            # Another worker owns the advisory execution lock. Do not overwrite
+            # its PROCESSING state with FAILED; retry until its idempotent result
+            # is visible instead.
+            raise self.retry(exc=exc, countdown=5) from exc
         mark_transcript_failed(transcript_id, exc)
         raise self.retry(exc=exc) from exc

@@ -9,6 +9,44 @@ from django.utils.translation import gettext_lazy as _
 from apps.users.models import RoleAccount
 
 
+class TeacherType(models.Model):
+    """Tenant-defined teaching responsibility used on cohort assignments.
+
+    These are deliberately data rather than enum choices: each education centre can
+    add responsibilities without a deployment, while the seeded system rows provide
+    stable slugs for compatibility and the legacy ``primary_teacher`` projection.
+    """
+
+    name = models.CharField(max_length=80)
+    slug = models.SlugField(max_length=80, unique=True)
+    description = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True, db_index=True)
+    is_system = models.BooleanField(default=False, db_index=True)
+    is_default = models.BooleanField(default=False, db_index=True)
+    sort_order = models.PositiveSmallIntegerField(default=100)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("sort_order", "name", "id")
+        constraints = [
+            models.UniqueConstraint(Lower("name"), name="teacher_type_name_unique_ci"),
+            models.UniqueConstraint(Lower("slug"), name="teacher_type_slug_unique_ci"),
+            models.UniqueConstraint(
+                fields=("is_default",),
+                condition=models.Q(is_default=True),
+                name="one_default_teacher_type",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(is_default=False) | models.Q(is_active=True),
+                name="teacher_type_default_requires_active",
+            ),
+        ]
+
+    def __str__(self) -> str:  # pragma: no cover
+        return self.name
+
+
 class TeacherProfile(RoleAccount):
     class SalaryType(models.TextChoices):
         HOURLY = "hourly", _("Hourly")

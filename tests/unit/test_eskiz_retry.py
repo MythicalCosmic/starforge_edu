@@ -79,6 +79,7 @@ def test_eskiz_sender_comes_from_settings(monkeypatch, settings):
 
     client = get_sms_client()
     assert isinstance(client, EskizClient)
+    assert get_sms_client() is client  # bearer token is reused within this worker
     assert client.sender == "STARFORGE"
 
     captured: dict = {}

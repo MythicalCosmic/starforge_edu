@@ -15,7 +15,16 @@ class TeacherRepository(BaseRepository[TeacherProfile], ITeacherRepository):
     def get_queryset(self) -> QuerySet[TeacherProfile]:
         # user/branch/department are read by the presenter on every row — eager-load
         # them so a page of N teachers is 1 query, not 1 + 3N.
-        return TeacherProfile.objects.select_related("user", "branch", "department")
+        from django.db.models import Prefetch
+
+        from apps.users.models import RoleMembership
+
+        return TeacherProfile.objects.select_related("user", "branch", "department").prefetch_related(
+            Prefetch(
+                "user__role_memberships",
+                queryset=RoleMembership.objects.select_related("account_type", "branch", "department"),
+            )
+        )
 
     def for_user(self, user) -> TeacherProfile | None:
         return self.get_queryset().filter(user=user).first()
