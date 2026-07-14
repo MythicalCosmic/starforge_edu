@@ -29,13 +29,17 @@ from apps.students.presenters import (
 )
 from core.api_auth import check_perm, require_auth
 from core.container import container
-from core.exceptions import NotFoundException, ValidationException
+from core.exceptions import NotFoundException, PermissionException, ValidationException
 from core.http import bool_field, int_field, read_json, str_field
 from core.listing import apply_filters, paginate
 from core.permissions import get_user_roles
 from core.ratelimit import check_rate
 from core.responses import created, error, no_content, paginated, success
-from core.scoping import assert_branch_id_in_scope, assert_in_branch_scope
+from core.scoping import (
+    assert_permission_membership_scope,
+    permission_membership_scopes,
+    request_permission_membership_allows,
+)
 from core.utils import current_schema
 
 _RESOURCE = "students"
@@ -51,13 +55,46 @@ def _reason_service() -> IEnrollmentReasonService:
     return container.resolve(IEnrollmentReasonService)  # type: ignore[type-abstract]
 
 
-def _get_in_scope(request: HttpRequest, pk: int) -> StudentProfile:
+def _get_in_scope(request: HttpRequest, pk: int, *, permission: str) -> StudentProfile:
     """Role-scoped fetch (404 if not visible) then branch-scope assert (403)."""
-    student = _service().get(user=request.user, roles=get_user_roles(request), pk=pk)
+    roles = get_user_roles(request)
+    student = _service().get(user=request.user, roles=roles, pk=pk)
     if student is None:
         raise NotFoundException(code="not_found")  # role-scoped out -> 404, no leak
-    assert_in_branch_scope(request, student)  # object_scope="branch" -> 403 out_of_scope
-    return student
+    cohort = student.current_cohort
+    department_id = cohort.department_id if cohort is not None else None
+    if request_permission_membership_allows(
+        request,
+        permission=permission,
+        branch_id=student.branch_id,
+        department_id=department_id,
+        account_kinds={"staff", "teacher"},
+    ):
+        return student
+    if permission == f"{_RESOURCE}:read":
+        if student.user_id == request.user.id and permission_membership_scopes(
+            roles=roles,
+            permission=permission,
+            account_kinds={"student"},
+        ):
+            return student
+        if permission_membership_scopes(
+            roles=roles,
+            permission=permission,
+            account_kinds={"parent"},
+        ):
+            from apps.parents.models import Guardian
+
+            user_id = request.user.pk
+            if (
+                user_id is not None
+                and Guardian.objects.filter(
+                    student=student,
+                    parent__user_id=user_id,
+                ).exists()
+            ):
+                return student
+    raise PermissionException(code="out_of_scope")
 
 
 # --- collection: GET list / POST create -----------------------------------
@@ -78,7 +115,11 @@ def students_collection_view(request: HttpRequest) -> HttpResponse:
 def student_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
     read = request.method in ("GET", "HEAD")
     check_perm(request, f"{_RESOURCE}:read" if read else f"{_RESOURCE}:write")
-    student = _get_in_scope(request, pk)
+    student = _get_in_scope(
+        request,
+        pk,
+        permission=f"{_RESOURCE}:read" if read else f"{_RESOURCE}:write",
+    )
     medical = can_see_medical_notes(request)
     if read:
         return success(student_detail_to_dict(student, medical=medical))
@@ -100,7 +141,7 @@ def student_transition_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method != "POST":
         return error("Method not allowed.", code="method_not_allowed", status=405)
     check_perm(request, f"{_RESOURCE}:write")
-    student = _get_in_scope(request, pk)
+    student = _get_in_scope(request, pk, permission=f"{_RESOURCE}:write")
     body = read_json(request)
     dto = TransitionDTO(
         to_status=_choice(body, "to_status", StudentProfile.Status.values, required=True),
@@ -118,7 +159,7 @@ def student_block_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method != "POST":
         return error("Method not allowed.", code="method_not_allowed", status=405)
     check_perm(request, f"{_RESOURCE}:write")
-    student = _get_in_scope(request, pk)
+    student = _get_in_scope(request, pk, permission=f"{_RESOURCE}:write")
     reason = str_field(read_json(request), "reason")
     return success(student_to_dict(_service().block(student, reason, actor=request.user)))
 
@@ -129,7 +170,7 @@ def student_unblock_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method != "POST":
         return error("Method not allowed.", code="method_not_allowed", status=405)
     check_perm(request, f"{_RESOURCE}:write")
-    student = _get_in_scope(request, pk)
+    student = _get_in_scope(request, pk, permission=f"{_RESOURCE}:write")
     return success(student_to_dict(_service().unblock(student, actor=request.user)))
 
 
@@ -139,7 +180,7 @@ def student_events_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method != "GET":
         return error("Method not allowed.", code="method_not_allowed", status=405)
     check_perm(request, f"{_RESOURCE}:read")
-    student = _get_in_scope(request, pk)
+    student = _get_in_scope(request, pk, permission=f"{_RESOURCE}:read")
     return success([enrollment_event_to_dict(e) for e in _service().events(student)])
 
 
@@ -153,7 +194,7 @@ def student_credentials_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method != "POST":
         return error("Method not allowed.", code="method_not_allowed", status=405)
     check_perm(request, f"{_RESOURCE}:write")
-    student = _get_in_scope(request, pk)
+    student = _get_in_scope(request, pk, permission=f"{_RESOURCE}:write")
     return success(_service().issue_credentials(student, actor=request.user))
 
 
@@ -267,7 +308,13 @@ def students_import_view(request: HttpRequest) -> HttpResponse:
     branch_id = int_field(request.POST, "branch", required=True)
     # Same create-scope as the single-student POST: a branch-scoped role must not
     # mass-create students into a branch outside its memberships.
-    assert_branch_id_in_scope(request, branch_id)
+    assert_permission_membership_scope(
+        request,
+        permission=f"{_RESOURCE}:write",
+        branch_id=branch_id,
+        enforce_department=False,
+        account_kinds={"staff", "teacher"},
+    )
     result = _service().import_csv(file_obj=file_obj, branch_id=branch_id)  # type: ignore[arg-type]
     return created(result)
 
@@ -395,7 +442,13 @@ def _create(request: HttpRequest) -> HttpResponse:
     # the old serializer (PrimaryKeyRelatedField over active branches) running before
     # perform_create's scope assertion.
     _assert_active_branch(branch_id)
-    assert_branch_id_in_scope(request, branch_id)  # create-scope (object_scope="branch")
+    assert_permission_membership_scope(
+        request,
+        permission=f"{_RESOURCE}:write",
+        branch_id=branch_id,
+        enforce_department=False,
+        account_kinds={"staff", "teacher"},
+    )
     dto = StudentCreateDTO(
         branch_id=branch_id,  # type: ignore[arg-type]
         username=str_field(body, "username"),

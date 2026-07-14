@@ -41,6 +41,7 @@ CANONICAL_BEAT_TASKS: dict[str, str] = {
     "send-due-soon-reminders": "celery_tasks.assignment_tasks.send_due_soon_reminders",
     # Day 3
     "late-payment-reminders": "celery_tasks.finance_tasks.late_payment_reminders",
+    "refresh-fx-rates": "celery_tasks.finance_tasks.refresh_fx_rates",
     "cleanup-old-audit-logs": "celery_tasks.audit_tasks.cleanup_old_audit_logs",
     "run-nightly-metering": "celery_tasks.billing_tasks.run_nightly_metering",
     # Runtime / Day 4+

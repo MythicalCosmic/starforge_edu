@@ -5,10 +5,11 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from django.db.models import QuerySet, Sum
+from django.db.models import Q, QuerySet, Sum
 
 from apps.finance.models import CashierShift, Invoice
-from core.permissions import Role, has_permission_code
+from core.permissions import PermissionRoleSet, Role, has_permission_code
+from core.scoping import permission_membership_scope_q
 
 _ZERO = Decimal("0")
 
@@ -22,7 +23,7 @@ OPEN_STATUSES = (Invoice.Status.ISSUED, Invoice.Status.PARTIALLY_PAID, Invoice.S
 
 def _invoice_base() -> QuerySet[Invoice]:
     return Invoice.objects.select_related(
-        "student__user", "cohort", "fee_schedule", "created_by"
+        "student__user", "student__current_cohort", "cohort", "fee_schedule", "created_by"
     ).prefetch_related("lines", "allocations")
 
 
@@ -36,17 +37,30 @@ def scoped_invoices(*, user, roles: set[str] | None = None) -> QuerySet[Invoice]
         roles = {m.role for m in user.role_memberships.filter(revoked_at__isnull=True)}
     if Role.DIRECTOR in roles:
         return qs
-    if has_permission_code(roles, "finance:read"):
-        allowed_branches = user.role_memberships.filter(
-            revoked_at__isnull=True,
-            branch_id__isnull=False,
-        ).values_list("branch_id", flat=True)
-        return qs.filter(student__branch_id__in=allowed_branches)
+    visible = Q(pk__in=[])
+    if has_permission_code(roles, "finance:read") or has_permission_code(roles, "finance:write"):
+        if isinstance(roles, PermissionRoleSet):
+            for permission in ("finance:read", "finance:write"):
+                visible |= permission_membership_scope_q(
+                    roles=roles,
+                    permission=permission,
+                    branch_field="student__branch_id",
+                    department_field="student__current_cohort__department_id",
+                    account_kinds={"staff"},
+                )
+        else:
+            # Direct selector calls with a raw legacy role set retain the old
+            # compatibility behavior; request paths use PermissionRoleSet.
+            allowed_branches = user.role_memberships.filter(
+                revoked_at__isnull=True,
+                branch_id__isnull=False,
+            ).values_list("branch_id", flat=True)
+            visible |= Q(student__branch_id__in=allowed_branches)
     if Role.PARENT in roles:
-        return qs.filter(student__guardians__parent__user=user).distinct()
+        visible |= Q(student__guardians__parent__user=user)
     if Role.STUDENT in roles:
-        return qs.filter(student__user=user)
-    return qs.none()
+        visible |= Q(student__user=user)
+    return qs.filter(visible).distinct()
 
 
 def list_fee_schedules() -> QuerySet:

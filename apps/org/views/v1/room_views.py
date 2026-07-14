@@ -14,10 +14,10 @@ from apps.org.views.v1._shared import require_present
 from core.api_auth import check_perm, require_auth
 from core.container import container
 from core.exceptions import NotFoundException, ValidationException
-from core.http import bool_field, int_field, read_json, str_field
+from core.http import bool_field, int_field, read_json, str_field, trimmed_str_field
 from core.listing import apply_filters, paginate
 from core.responses import created, error, no_content, paginated, success
-from core.scoping import assert_branch_id_in_scope, assert_in_branch_scope, scope_to_branches
+from core.scoping import assert_permission_membership_scope, scope_to_permission_memberships
 
 _RESOURCE = "org"
 _FILTERS = ("branch", "is_active")
@@ -34,7 +34,12 @@ def _service() -> IRoomService:
 def rooms_collection_view(request: HttpRequest) -> HttpResponse:
     if request.method == "GET":
         check_perm(request, f"{_RESOURCE}:read")
-        qs = scope_to_branches(request, _service().list())
+        qs = scope_to_permission_memberships(
+            request,
+            _service().list(),
+            permission=f"{_RESOURCE}:read",
+            branch_field="branch_id",
+        )
         qs = apply_filters(
             request,
             qs,
@@ -49,7 +54,12 @@ def rooms_collection_view(request: HttpRequest) -> HttpResponse:
         check_perm(request, f"{_RESOURCE}:write")
         body = read_json(request)
         branch_id = int_field(body, "branch", required=True)
-        assert_branch_id_in_scope(request, branch_id)
+        assert_permission_membership_scope(
+            request,
+            permission=f"{_RESOURCE}:write",
+            branch_id=branch_id,
+            enforce_department=False,
+        )
         name = str_field(body, "name")
         require_present({"name": name})
         dto = RoomCreateDTO(
@@ -72,13 +82,24 @@ def room_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
     room = _service().get(pk)
     if room is None:
         raise NotFoundException(code="not_found")
-    assert_in_branch_scope(request, room)
+    permission = f"{_RESOURCE}:read" if read else f"{_RESOURCE}:write"
+    assert_permission_membership_scope(
+        request,
+        permission=permission,
+        branch_id=room.branch_id,
+        enforce_department=False,
+    )
     if read:
         return success(room_to_dict(room))
     if request.method in ("PUT", "PATCH"):
         changes = _changes(read_json(request))
         if "branch" in changes:  # reassignment must land in a branch the caller can reach
-            assert_branch_id_in_scope(request, changes["branch"])
+            assert_permission_membership_scope(
+                request,
+                permission=f"{_RESOURCE}:write",
+                branch_id=changes["branch"],
+                enforce_department=False,
+            )
         return success(room_to_dict(_service().update(room, changes)))
     if request.method == "DELETE":
         _service().delete(room)
@@ -91,9 +112,10 @@ def _changes(body: dict[str, Any]) -> dict[str, Any]:
     if "branch" in body:
         changes["branch"] = int_field(body, "branch", required=True)
     if "name" in body:
-        changes["name"] = str_field(body, "name")
+        changes["name"] = trimmed_str_field(body, "name", required=True, max_length=100)
+        require_present({"name": changes["name"]})
     if "capacity" in body:
-        changes["capacity"] = int_field(body, "capacity", default=0)
+        changes["capacity"] = int_field(body, "capacity", required=True)
     if "equipment" in body:
         changes["equipment"] = _list_field(body, "equipment")
     if "is_active" in body:

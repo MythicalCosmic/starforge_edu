@@ -51,14 +51,9 @@ def _escalation_manager_ids(branch_id: int | None) -> list[int]:
     """Active users who handle penalties (penalty:waive) in the student's branch — the
     people who should know a student is accumulating demerits. Scoped to the branch so
     one branch's pattern doesn't ping another branch's managers."""
-    from apps.users.models import RoleMembership
-    from core.permissions import roles_with_permission
+    from core.permissions import role_memberships_with_permission
 
-    qs = RoleMembership.objects.filter(
-        role__in=roles_with_permission("penalty:waive"),
-        revoked_at__isnull=True,
-        user__is_active=True,
-    )
+    qs = role_memberships_with_permission("penalty:waive")
     if branch_id is not None:
         qs = qs.filter(branch_id=branch_id)
     return list(qs.values_list("user_id", flat=True).distinct())
@@ -142,19 +137,20 @@ def issue_staff_penalty(*, staff, points: int, reason: str, issued_by, branch, r
     (mirrors the loan/reward recipient guard). The branch is the issuing manager's branch
     context (validated at the view), which scopes who may later see/waive it. Staff
     penalties carry no point-threshold escalation (that is a student-intake signal)."""
-    from apps.users.models import RoleMembership
-    from core.permissions import Role
+    from apps.access.models import AccountType
+    from core.permissions import role_memberships_for_account_kinds
 
     if getattr(staff, "id", None) is not None and staff.id == getattr(issued_by, "id", None):
         raise UnprocessableEntity(_("You cannot penalise yourself."), code="self_penalty")
-    staff_roles = tuple(r for r in Role.ALL if r not in (Role.STUDENT, Role.PARENT))
     # The subject must be an active staff member OF THE PENALTY'S BRANCH — symmetric with
     # the student path (which forces student.branch into the manager's scope). Without the
     # branch filter a manager could file discipline against staff from another branch,
     # hidden from that staff member's real branch managers.
-    is_staff = RoleMembership.objects.filter(
-        user=staff, branch=branch, revoked_at__isnull=True, role__in=staff_roles
-    ).exists()
+    is_staff = (
+        role_memberships_for_account_kinds((AccountType.AccountKind.STAFF, AccountType.AccountKind.TEACHER))
+        .filter(user=staff, branch=branch)
+        .exists()
+    )
     if not is_staff:
         raise UnprocessableEntity(
             _("A staff penalty's subject must be an active staff member of that branch."),

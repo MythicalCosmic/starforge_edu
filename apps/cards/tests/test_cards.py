@@ -15,6 +15,7 @@ pytestmark = pytest.mark.django_db
 TYPES = "/api/v1/cards/types/"
 CARDS = "/api/v1/cards/"
 SCAN = "/api/v1/cards/scan/"
+SCANS = "/api/v1/cards/scans/"
 
 
 def _setup(tenant, user_in, as_user):
@@ -173,3 +174,49 @@ def test_revoke_with_junk_reason_is_a_clean_400_not_500(tenant_a, user_in, as_us
     # a non-dict JSON body must not 500 either
     bad_body = s["registrar"].post(f"{CARDS}{cid}/revoke/", ["lost"], format="json")
     assert bad_body.status_code in (400, 422)
+
+
+def test_type_and_card_detail_read_routes_are_wired_and_scoped(tenant_a, user_in, as_user):
+    from apps.students.tests.factories import StudentProfileFactory
+
+    s = _setup(tenant_a, user_in, as_user)
+    type_id = _card_type(s, "Video access")
+    assert s["registrar"].get(TYPES).status_code == 200
+    assert s["registrar"].get(f"{TYPES}{type_id}/").json()["data"]["name"] == "Video access"
+
+    own_card = _issue(s).json()["data"]
+    assert s["student_c"].get(f"{CARDS}{own_card['id']}/").status_code == 200
+    with schema_context(tenant_a.schema_name):
+        classmate = StudentProfileFactory.create(branch=s["branch"])
+    classmate_card = _issue(s, student=classmate.id).json()["data"]
+    # List and detail must enforce the same self-only boundary for a student.
+    assert s["student_c"].get(f"{CARDS}{classmate_card['id']}/").status_code == 404
+
+    assert s["registrar"].head(TYPES).status_code == 200
+    assert s["registrar"].head(f"{TYPES}{type_id}/").status_code == 200
+    assert s["student_c"].head(f"{CARDS}{own_card['id']}/").status_code == 200
+
+
+def test_scan_note_and_branch_scoped_audit_log(tenant_a, user_in, as_user):
+    from apps.org.tests.factories import BranchFactory
+
+    s = _setup(tenant_a, user_in, as_user)
+    card = _issue(s).json()["data"]
+    scanned = s["security"].post(SCAN, {"code": card["code"], "note": "  Side entrance  "}, format="json")
+    assert scanned.status_code == 200, scanned.content
+    assert scanned.json()["data"]["note"] == "Side entrance"
+
+    listed = s["security"].get(SCANS)
+    assert listed.status_code == 200, listed.content
+    row = listed.json()["data"][0]
+    assert row["card"] == card["id"]
+    assert row["student"] == s["student"].id
+    assert row["note"] == "Side entrance"
+    assert row["was_valid"] is True
+    assert s["security"].head(SCANS).status_code == 200
+    assert s["student_c"].get(SCANS).status_code == 403
+
+    with schema_context(tenant_a.schema_name):
+        other_branch = BranchFactory.create()
+    other_security = as_user(tenant_a, user_in(tenant_a, roles=[Role.SECURITY], branch=other_branch))
+    assert other_security.get(SCANS).json()["data"] == []

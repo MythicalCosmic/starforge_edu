@@ -5,7 +5,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from django.db import transaction
 from django.db.models import QuerySet
+from django.utils import timezone
 from django.utils.text import slugify
 from django.utils.translation import gettext_lazy as _
 
@@ -45,18 +47,49 @@ class TermService(ITermService):
     def get(self, *, pk: int) -> Term | None:
         return self.repository.get(pk=pk)
 
+    @staticmethod
+    def _validate_dates(*, start_date, end_date) -> None:
+        if end_date <= start_date:
+            raise _reject("end_date", "End date must be after start date.")
+
+    @staticmethod
+    def _unset_other_current_terms(*, exclude_pk: int | None = None) -> None:
+        current = Term.objects.select_for_update().filter(is_current=True)
+        if exclude_pk is not None:
+            current = current.exclude(pk=exclude_pk)
+        # Evaluate while SELECT FOR UPDATE is still present, then perform the update.
+        # This serializes normal current-term hand-offs; the partial unique constraint
+        # remains the final backstop for the empty-table concurrent-create case.
+        ids = list(current.values_list("pk", flat=True))
+        if ids:
+            Term.objects.filter(pk__in=ids).update(is_current=False, updated_at=timezone.now())
+
+    @transaction.atomic
     def create(self, *, data: dict[str, Any]) -> Term:
+        self._validate_dates(start_date=data["start_date"], end_date=data["end_date"])
         if self.repository.name_taken(academic_year=data["academic_year"], name=data["name"]):
             raise _reject("name", "A term with this name already exists for this academic year.")
+        if data.get("is_current", False):
+            self._unset_other_current_terms()
         return self.repository.add(data=data)
 
+    @transaction.atomic
     def update(self, term: Term, *, changes: dict[str, Any]) -> Term:
+        # Serialize writes to this term so two simultaneous switches cannot silently
+        # overwrite one another's state.
+        Term.objects.select_for_update().filter(pk=term.pk).exists()
         academic_year = changes.get("academic_year", term.academic_year)
         name = changes.get("name", term.name)
+        self._validate_dates(
+            start_date=changes.get("start_date", term.start_date),
+            end_date=changes.get("end_date", term.end_date),
+        )
         if ("academic_year" in changes or "name" in changes) and self.repository.name_taken(
             academic_year=academic_year, name=name, exclude_pk=term.pk
         ):
             raise _reject("name", "A term with this name already exists for this academic year.")
+        if changes.get("is_current") is True:
+            self._unset_other_current_terms(exclude_pk=term.pk)
         return self.repository.apply_changes(term, changes=changes)
 
     def delete(self, term: Term) -> None:

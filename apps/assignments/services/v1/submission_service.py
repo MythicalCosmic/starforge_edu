@@ -32,3 +32,13 @@ class SubmissionService(ISubmissionService):
         from apps.assignments.services import request_ai_feedback
 
         request_ai_feedback(submission=submission, requested_by=requested_by)
+
+    def return_for_revision(self, submission: Submission, *, actor) -> Submission:
+        from apps.assignments.services import return_submission
+
+        return return_submission(submission=submission, actor=actor)
+
+    def check_plagiarism(self, submission: Submission):
+        from apps.assignments.services import check_submission
+
+        return check_submission(submission)

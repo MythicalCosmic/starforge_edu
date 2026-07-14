@@ -143,8 +143,10 @@ class ExamService(IExamService):
                 out[field] = data[field]
         return out
 
-    def create(self, *, data: dict[str, Any], writable_cohort_ids) -> Exam:
-        return self.repository.add(data=self._resolve_write_fields(data, writable_cohort_ids))
+    def create(self, *, data: dict[str, Any], writable_cohort_ids, created_by=None) -> Exam:
+        resolved = self._resolve_write_fields(data, writable_cohort_ids)
+        resolved["created_by"] = created_by
+        return self.repository.add(data=resolved)
 
     def update(self, exam: Exam, *, changes: dict[str, Any], writable_cohort_ids) -> Exam:
         return self.repository.apply_changes(

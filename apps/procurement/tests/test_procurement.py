@@ -175,3 +175,26 @@ def test_fractional_line_totals_reconcile_to_amount(tenant_a, as_role):
 def test_role_without_procurement_is_denied(tenant_a, as_role):
     student, _ = as_role(Role.STUDENT)
     assert student.get(PO).status_code == 403
+
+
+def test_po_detail_scope_head_and_trimmed_description(tenant_a, as_role):
+    requester, _ = as_role(Role.REGISTRAR)
+    outsider, _ = as_role(Role.REGISTRAR)
+    director, _ = as_role(Role.DIRECTOR)
+    created = requester.post(
+        PO,
+        {
+            "title": "Supplies",
+            "supplier": "Acme",
+            "description": "  Needed next week  ",
+            "items": ITEMS,
+        },
+        format="json",
+    )
+    po_id = created.json()["data"]["id"]
+    detail = f"{PO}{po_id}/"
+    assert requester.get(detail).json()["data"]["description"] == "Needed next week"
+    assert outsider.get(detail).status_code == 404
+    assert director.get(detail).status_code == 200
+    assert requester.head(PO).status_code == 200
+    assert requester.head(detail).status_code == 200

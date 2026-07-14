@@ -77,8 +77,25 @@ class CardService(ICardService):
     def revoke(self, card: Card, *, actor, reason: str) -> Card:
         return domain.revoke_card(card_id=card.pk, actor=actor, reason=reason)
 
-    def scan(self, *, code: str, scanned_by) -> dict[str, Any]:
-        return domain.scan_card(code=code, scanned_by=scanned_by)
+    def scan(
+        self,
+        *,
+        code: str,
+        scanned_by,
+        note: str = "",
+        is_unscoped: bool,
+        branch_ids: set[int],
+    ) -> dict[str, Any]:
+        return domain.scan_card(
+            code=code,
+            scanned_by=scanned_by,
+            note=note,
+            is_unscoped=is_unscoped,
+            branch_ids=branch_ids,
+        )
+
+    def scoped_scans(self, *, is_director: bool, branch_ids: set[int]):
+        return self.repository.scoped_scans(is_director=is_director, branch_ids=branch_ids)
 
 
 class WalletService(IWalletService):
@@ -104,3 +121,12 @@ class WalletService(IWalletService):
 
     def spend(self, data: WalletAmountDTO, *, student, actor) -> WalletTransaction:
         return domain.spend(student=student, amount=data.amount, actor=actor, note=data.note)
+
+    def refund(self, data: WalletAmountDTO, *, student, actor) -> WalletTransaction:
+        return domain.top_up(
+            student=student,
+            amount=data.amount,
+            actor=actor,
+            note=data.note,
+            refund=True,
+        )

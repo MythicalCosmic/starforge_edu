@@ -7,25 +7,17 @@ from django.db.models import Q, QuerySet
 
 from apps.academics.models import Exam, Grade, Transcript
 from apps.org.selectors import get_center_settings
-from core.permissions import Role
-from core.scoping import role_membership_scope_q
+from core.permissions import PermissionRoleSet, Role
+from core.scoping import permission_membership_scope_q, role_membership_scope_q
 
 # Director is tenant-wide; HoD follows exact branch/department memberships;
 # teacher is limited to taught cohorts; student/parent remain self/children scoped.
 
 
 def _cohorts_taught_by(user) -> QuerySet:
-    from apps.cohorts.models import Cohort
+    from apps.cohorts.selectors import taught_cohorts
 
-    return (
-        Cohort.objects.filter(
-            Q(primary_teacher__user=user)
-            | Q(co_teachers__teacher__user=user)
-            | Q(lessons__teacher__user=user)
-        )
-        .values_list("id", flat=True)
-        .distinct()
-    )
+    return taught_cohorts(user=user).values_list("id", flat=True)
 
 
 def _grade_base() -> QuerySet[Grade]:
@@ -40,25 +32,30 @@ def scoped_grades(*, user, roles: set[str] | None = None) -> QuerySet[Grade]:
         roles = {m.role for m in user.role_memberships.filter(revoked_at__isnull=True)}
     if Role.DIRECTOR in roles:
         return qs
-    if Role.HEAD_OF_DEPT in roles:
-        return qs.filter(
-            role_membership_scope_q(
-                user=user,
-                roles={Role.HEAD_OF_DEPT},
-                branch_field="student__branch_id",
-                department_field="student__current_cohort__department_id",
-            )
+    visible = permission_membership_scope_q(
+        roles=roles,
+        permission="academics:read",
+        branch_field="student__branch_id",
+        department_field="student__current_cohort__department_id",
+        account_kinds={"staff"},
+    )
+    if not isinstance(roles, PermissionRoleSet) and Role.HEAD_OF_DEPT in roles:
+        visible |= role_membership_scope_q(
+            user=user,
+            roles={Role.HEAD_OF_DEPT},
+            branch_field="student__branch_id",
+            department_field="student__current_cohort__department_id",
         )
-    if Role.TEACHER in roles:  # all grades (incl. drafts) for cohorts they teach
-        return qs.filter(
+    if Role.TEACHER in roles:  # natural ownership: cohorts this teacher actually teaches
+        visible |= Q(
             student__cohort_memberships__end_date__isnull=True,
             student__cohort_memberships__cohort_id__in=_cohorts_taught_by(user),
-        ).distinct()
+        )
     if Role.PARENT in roles:  # published only, guardian-linked children
-        return qs.filter(is_published=True, student__guardians__parent__user=user).distinct()
+        visible |= Q(is_published=True, student__guardians__parent__user=user)
     if Role.STUDENT in roles:  # published only, self
-        return qs.filter(is_published=True, student__user=user)
-    return qs.none()
+        visible |= Q(is_published=True, student__user=user)
+    return qs.filter(visible).distinct()
 
 
 def scoped_transcripts(*, user, roles: set[str] | None = None) -> QuerySet[Transcript]:
@@ -69,20 +66,25 @@ def scoped_transcripts(*, user, roles: set[str] | None = None) -> QuerySet[Trans
         roles = {m.role for m in user.role_memberships.filter(revoked_at__isnull=True)}
     if Role.DIRECTOR in roles:
         return qs
-    if Role.HEAD_OF_DEPT in roles:
-        return qs.filter(
-            role_membership_scope_q(
-                user=user,
-                roles={Role.HEAD_OF_DEPT},
-                branch_field="student__branch_id",
-                department_field="student__current_cohort__department_id",
-            )
+    visible = permission_membership_scope_q(
+        roles=roles,
+        permission="academics:read",
+        branch_field="student__branch_id",
+        department_field="student__current_cohort__department_id",
+        account_kinds={"staff"},
+    )
+    if not isinstance(roles, PermissionRoleSet) and Role.HEAD_OF_DEPT in roles:
+        visible |= role_membership_scope_q(
+            user=user,
+            roles={Role.HEAD_OF_DEPT},
+            branch_field="student__branch_id",
+            department_field="student__current_cohort__department_id",
         )
     if Role.PARENT in roles:
-        return qs.filter(student__guardians__parent__user=user).distinct()
+        visible |= Q(student__guardians__parent__user=user)
     if Role.STUDENT in roles:
-        return qs.filter(student__user=user)
-    return qs.none()
+        visible |= Q(student__user=user)
+    return qs.filter(visible).distinct()
 
 
 def scoped_exams(*, user, roles: set[str] | None = None) -> QuerySet[Exam]:
@@ -97,18 +99,23 @@ def scoped_exams(*, user, roles: set[str] | None = None) -> QuerySet[Exam]:
         roles = {m.role for m in user.role_memberships.filter(revoked_at__isnull=True)}
     if Role.DIRECTOR in roles:
         return qs
-    if Role.HEAD_OF_DEPT in roles:
-        return qs.filter(
-            role_membership_scope_q(
-                user=user,
-                roles={Role.HEAD_OF_DEPT},
-                branch_field="cohort__branch_id",
-                department_field="cohort__department_id",
-            )
+    visible = permission_membership_scope_q(
+        roles=roles,
+        permission="academics:read",
+        branch_field="cohort__branch_id",
+        department_field="cohort__department_id",
+        account_kinds={"staff"},
+    )
+    if not isinstance(roles, PermissionRoleSet) and Role.HEAD_OF_DEPT in roles:
+        visible |= role_membership_scope_q(
+            user=user,
+            roles={Role.HEAD_OF_DEPT},
+            branch_field="cohort__branch_id",
+            department_field="cohort__department_id",
         )
     if Role.TEACHER in roles:
-        return qs.filter(cohort_id__in=_cohorts_taught_by(user))
-    return qs.none()
+        visible |= Q(cohort_id__in=_cohorts_taught_by(user))
+    return qs.filter(visible).distinct()
 
 
 def _report_scope(qs: QuerySet[Grade], *, user, roles: set[str] | None) -> QuerySet[Grade]:
@@ -122,21 +129,26 @@ def _report_scope(qs: QuerySet[Grade], *, user, roles: set[str] | None) -> Query
         roles = {m.role for m in user.role_memberships.filter(revoked_at__isnull=True)}
     if Role.DIRECTOR in roles:
         return qs
-    if Role.HEAD_OF_DEPT in roles:
-        return qs.filter(
-            role_membership_scope_q(
-                user=user,
-                roles={Role.HEAD_OF_DEPT},
-                branch_field="student__branch_id",
-                department_field="student__current_cohort__department_id",
-            )
+    visible = permission_membership_scope_q(
+        roles=roles,
+        permission="academics:read",
+        branch_field="student__branch_id",
+        department_field="student__current_cohort__department_id",
+        account_kinds={"staff"},
+    )
+    if not isinstance(roles, PermissionRoleSet) and Role.HEAD_OF_DEPT in roles:
+        visible |= role_membership_scope_q(
+            user=user,
+            roles={Role.HEAD_OF_DEPT},
+            branch_field="student__branch_id",
+            department_field="student__current_cohort__department_id",
         )
     if Role.TEACHER in roles:
-        return qs.filter(
+        visible |= Q(
             student__cohort_memberships__end_date__isnull=True,
             student__cohort_memberships__cohort_id__in=_cohorts_taught_by(user),
-        ).distinct()
-    return qs
+        )
+    return qs.filter(visible).distinct()
 
 
 def honor_roll(*, term_id: int, settings=None, user=None, roles: set[str] | None = None) -> QuerySet[Grade]:

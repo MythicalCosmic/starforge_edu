@@ -22,7 +22,7 @@ from apps.auth.dto.auth_dto import (
 )
 from apps.auth.interfaces.auth_service import IAuthService
 from apps.auth.interfaces.repositories import ISessionRepository, IUserRepository
-from apps.users.models import User
+from apps.users.models import Device, User
 from core.exceptions import AuthenticationException, ValidationException
 
 
@@ -51,19 +51,31 @@ class AuthService(IAuthService):
             raise AuthenticationException(_("Invalid username or password."), code="invalid_credentials")
 
         self._users.touch_last_seen(user)
+        normalized_device_id = credentials.device_id[:128]
+        was_known_device = bool(
+            normalized_device_id
+            and credentials.platform
+            and Device.objects.filter(
+                user=user,
+                device_id=normalized_device_id,
+                revoked_at__isnull=True,
+            ).exists()
+        )
+        device = register_device(
+            user=user,
+            device_id=normalized_device_id,
+            platform=credentials.platform,
+            user_agent=ctx.user_agent,
+        )
         login_succeeded.send(
             sender=User,
             username=username,
             user_id=user.pk,
             ip=ctx.ip,
             user_agent=ctx.user_agent,
+            device_id=device.device_id if device is not None else "",
+            is_new_device=device is not None and not was_known_device,
             schema_name=current_schema(),
-        )
-        register_device(
-            user=user,
-            device_id=credentials.device_id,
-            platform=credentials.platform,
-            user_agent=ctx.user_agent,
         )
         session = self._sessions.create_for(
             user, ip=ctx.ip, user_agent=ctx.user_agent, device_id=credentials.device_id
@@ -79,6 +91,7 @@ class AuthService(IAuthService):
             ip=ctx.ip,
             user_agent=ctx.user_agent,
             device_id=credentials.device_id,
+            platform=credentials.platform,
         )
 
     def logout(self, user: User) -> None:

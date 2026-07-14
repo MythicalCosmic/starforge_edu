@@ -14,12 +14,12 @@ class CohortMembershipInline(admin.TabularInline):
 
 
 class CohortTeacherInline(admin.TabularInline):
-    """Co-teachers / assistants assigned to this cohort."""
+    """Typed teachers assigned to this cohort."""
 
     model = CohortTeacher
     extra = 0
-    fields = ("teacher", "role")
-    autocomplete_fields = ("teacher",)
+    fields = ("teacher", "teacher_type")
+    autocomplete_fields = ("teacher", "teacher_type")
     show_change_link = True
 
 
@@ -28,7 +28,11 @@ class CohortAdmin(admin.ModelAdmin):
     list_display = ("name", "branch", "department", "is_archived", "start_date", "end_date")
     list_filter = ("is_archived", "branch")
     search_fields = ("name", "level")
-    autocomplete_fields = ("branch", "department", "primary_teacher", "default_room")
+    # ``primary_teacher`` is a read-compatible projection of the canonical typed
+    # assignments. Hiding it prevents two competing teacher editors in admin;
+    # Main Teacher and every additional type are managed through the inline.
+    exclude = ("primary_teacher",)
+    autocomplete_fields = ("branch", "department", "default_room")
     list_select_related = ("branch", "department")
     inlines = (CohortMembershipInline, CohortTeacherInline)
 
@@ -44,8 +48,9 @@ class CohortMembershipAdmin(admin.ModelAdmin):
 
 @admin.register(CohortTeacher)
 class CohortTeacherAdmin(admin.ModelAdmin):
-    list_display = ("cohort", "teacher", "role")
-    list_filter = ("role",)
+    list_display = ("cohort", "teacher", "teacher_type")
+    list_filter = ("teacher_type",)
     search_fields = ("cohort__name", "teacher__user__first_name", "teacher__user__last_name")
-    autocomplete_fields = ("cohort", "teacher")
-    list_select_related = ("cohort", "teacher")
+    autocomplete_fields = ("cohort", "teacher", "teacher_type")
+    exclude = ("role",)
+    list_select_related = ("cohort", "teacher", "teacher_type")

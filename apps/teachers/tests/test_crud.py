@@ -41,6 +41,55 @@ def test_director_create_list_retrieve_delete(tenant_a, as_role):
     assert client.get(f"{URL}{tid}/").status_code == 404
 
 
+def test_create_accepts_custom_teacher_account_type(tenant_a, as_role):
+    from apps.access.models import AccountType, AccountTypePermission
+    from apps.org.tests.factories import BranchFactory
+    from apps.teachers.models import TeacherProfile
+
+    client, _ = as_role(Role.DIRECTOR)
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        account_type = AccountType.objects.create(
+            name="Remote Instructor",
+            slug="remote-instructor",
+            account_kind=AccountType.AccountKind.TEACHER,
+        )
+        AccountTypePermission.objects.create(
+            account_type=account_type,
+            permission="content:read",
+        )
+
+    response = client.post(
+        URL,
+        {
+            "branch": branch.pk,
+            "account_type": account_type.pk,
+            "phone": "+998905550099",
+            "first_name": "Remote",
+        },
+        format="json",
+    )
+    assert response.status_code == 201, response.content
+    assignments = response.json()["data"]["account_type_assignments"]
+    assert [item["account_type_slug"] for item in assignments] == ["remote-instructor"]
+    assert all("user" not in item and "role" not in item for item in assignments)
+
+    with schema_context(tenant_a.schema_name):
+        teacher = TeacherProfile.objects.get(pk=response.json()["data"]["id"])
+        membership = teacher.user.role_memberships.get()
+        assert membership.account_type_id == account_type.pk
+
+    updated = client.patch(
+        f"{URL}{response.json()['data']['id']}/",
+        {"last_name": "Instructor"},
+        format="json",
+    )
+    assert updated.status_code == 200, updated.content
+    assert [item["account_type_slug"] for item in updated.json()["data"]["account_type_assignments"]] == [
+        "remote-instructor"
+    ]
+
+
 def test_create_requires_phone_or_email(tenant_a, as_role):
     from apps.org.tests.factories import BranchFactory
 

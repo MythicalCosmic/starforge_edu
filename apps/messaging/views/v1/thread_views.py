@@ -20,11 +20,13 @@ from apps.messaging.presenters import message_to_dict, thread_to_dict
 from core.api_auth import check_perm, require_auth
 from core.container import container
 from core.exceptions import NotFoundException, ValidationException
-from core.http import read_json, str_field
+from core.http import int_field, read_json, str_field
 from core.listing import apply_filters, paginate
 from core.responses import created, error, paginated, success
 
 _RESOURCE = "messaging"
+_MAX_PARTICIPANTS = 100
+_MAX_ATTACHMENTS = 10
 
 
 def _service() -> IThreadService:
@@ -104,13 +106,58 @@ def thread_read_view(request: HttpRequest, pk: int) -> HttpResponse:
     return success({"status": "ok"})
 
 
+@csrf_exempt
+@require_auth
+def attachment_upload_url_view(request: HttpRequest) -> HttpResponse:
+    if request.method != "POST":
+        return error("Method not allowed.", code="method_not_allowed", status=405)
+    check_perm(request, f"{_RESOURCE}:write")
+    body = read_json(request)
+    filename = str_field(body, "filename", max_length=255).strip()
+    if not filename:
+        raise ValidationException(
+            "filename is required.", code="validation_error", fields={"filename": ["Required."]}
+        )
+    size_bytes = int_field(body, "size_bytes", required=True)
+    if size_bytes is None or size_bytes < 1:
+        raise ValidationException(
+            "size_bytes must be positive.",
+            code="validation_error",
+            fields={"size_bytes": ["Must be at least 1."]},
+        )
+    content_type = str_field(body, "content_type", default="application/octet-stream", max_length=127).strip()
+    return success(
+        _service().presign_attachment(
+            filename=filename,
+            content_type=content_type,
+            size_bytes=size_bytes,
+            requested_by=request.user,
+        )
+    )
+
+
+@csrf_exempt
+@require_auth
+def thread_attachment_download_view(request: HttpRequest, pk: int) -> HttpResponse:
+    if request.method not in ("GET", "HEAD"):
+        return error("Method not allowed.", code="method_not_allowed", status=405)
+    check_perm(request, f"{_RESOURCE}:read")
+    thread = _get_thread(request, pk)
+    key = request.GET.get("key", "").strip()
+    if not key or len(key) > 512 or "\x00" in key:
+        raise ValidationException(
+            "key is required.", code="validation_error", fields={"key": ["Provide a valid attachment key."]}
+        )
+    return success({"url": _service().attachment_download_url(thread=thread, key=key), "expires_in": 300})
+
+
 # --- helpers ---------------------------------------------------------------
 def _create_thread(request: HttpRequest) -> HttpResponse:
     body = read_json(request)
     dto = CreateThreadDTO(
         participant_ids=_participant_ids(body),
-        subject=str_field(body, "subject", max_length=200),
-        first_body=str_field(body, "first_body"),
+        subject=str_field(body, "subject", max_length=200).strip(),
+        first_body=str_field(body, "first_body").strip(),
         attachments=_attachments(body),
     )
     thread = _service().create(dto, creator=request.user)
@@ -120,14 +167,15 @@ def _create_thread(request: HttpRequest) -> HttpResponse:
 
 def _send_message(request: HttpRequest, thread) -> HttpResponse:
     body = read_json(request)
-    text = str_field(body, "body")
-    if not text.strip():  # old SendMessageSerializer body was required + non-blank
+    text = str_field(body, "body").strip()
+    attachments = _attachments(body)
+    if not text and not attachments:
         raise ValidationException(
-            "A message body is required.",
+            "A message needs text or an attachment.",
             code="validation_error",
-            fields={"body": ["This field may not be blank."]},
+            fields={"body": ["Provide text or at least one attachment."]},
         )
-    message = _service().post(thread=thread, sender=request.user, body=text, attachments=_attachments(body))
+    message = _service().post(thread=thread, sender=request.user, body=text, attachments=attachments)
     return created(message_to_dict(message))
 
 
@@ -141,6 +189,12 @@ def _participant_ids(body: dict[str, Any]) -> list[int]:
             "participant_ids must be a non-empty list.",
             code="validation_error",
             fields={"participant_ids": ["Provide at least one participant id."]},
+        )
+    if len(raw) > _MAX_PARTICIPANTS:
+        raise ValidationException(
+            "Too many participants.",
+            code="validation_error",
+            fields={"participant_ids": [f"At most {_MAX_PARTICIPANTS} participants are allowed."]},
         )
     ids: list[int] = []
     for value in raw:
@@ -166,16 +220,34 @@ def _bad_ids() -> ValidationException:
     )
 
 
-def _attachments(body: dict[str, Any]) -> list:
-    """The attachments field (S3 keys). Absent/null -> []; a non-list -> 400 (the column
-    is a list of keys)."""
-    raw = body.get("attachments")
-    if raw is None:
+def _attachments(body: dict[str, Any]) -> list[str]:
+    """Validated, unique messaging upload-grant keys; explicit null is invalid."""
+    if "attachments" not in body:
         return []
+    raw = body["attachments"]
     if not isinstance(raw, list):
         raise ValidationException(
             "attachments must be a list.",
             code="validation_error",
             fields={"attachments": ["Must be a list of keys."]},
         )
-    return raw
+    if len(raw) > _MAX_ATTACHMENTS:
+        raise ValidationException(
+            "Too many attachments.",
+            code="validation_error",
+            fields={"attachments": [f"At most {_MAX_ATTACHMENTS} attachments are allowed."]},
+        )
+    if any(not isinstance(key, str) or not key.strip() or len(key) > 512 for key in raw):
+        raise ValidationException(
+            "Invalid attachment key.",
+            code="validation_error",
+            fields={"attachments": ["Each key must be non-empty text of at most 512 characters."]},
+        )
+    keys = [key.strip() for key in raw]
+    if len(keys) != len(set(keys)):
+        raise ValidationException(
+            "Duplicate attachment key.",
+            code="validation_error",
+            fields={"attachments": ["Attachment keys must be unique."]},
+        )
+    return keys

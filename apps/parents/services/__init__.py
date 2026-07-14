@@ -11,8 +11,7 @@ from django.db import transaction
 from django.utils.translation import gettext_lazy as _
 
 from apps.parents.models import Guardian, ParentProfile
-from apps.users.models import RoleMembership
-from apps.users.services import create_role_user_bridge, prepare_role_identity
+from apps.users.services import create_role_user_bridge, ensure_role_membership, prepare_role_identity
 from core.exceptions import ValidationException
 from core.permissions import Role
 
@@ -78,10 +77,11 @@ def link_guardian(
         is_primary=is_primary,
         custody_notes=custody_notes,
     )
-    RoleMembership.objects.get_or_create(
-        user=parent.user,
+    ensure_role_membership(
+        parent,
         branch=student.branch,
         department=None,
         role=Role.PARENT,
+        replace_scope=False,
     )
     return guardian

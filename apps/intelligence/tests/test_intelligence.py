@@ -149,9 +149,11 @@ def test_overdue_flag_hidden_from_non_finance_role(tenant_a, as_role):
     teacher_client, _t = as_role(Role.TEACHER)
     with schema_context(tenant_a.schema_name):
         from apps.cohorts.tests.factories import CohortFactory
+        from apps.teachers.tests.factories import TeacherProfileFactory
 
         teacher_branch = _t.role_memberships.get(role=Role.TEACHER).branch
-        cohort = CohortFactory.create(branch=teacher_branch)
+        teacher_profile = TeacherProfileFactory.create(user=_t, branch=teacher_branch)
+        cohort = CohortFactory.create(branch=teacher_branch, primary_teacher=teacher_profile)
         student = StudentProfileFactory.create(branch=teacher_branch, current_cohort=cohort)
         exam = ExamFactory.create(is_published=True, cohort=cohort)
         ExamResultFactory.create(exam=exam, student=student, score=Decimal("30"))
@@ -262,3 +264,72 @@ def test_cohort_filter(tenant_a, as_role):
     ids = {r["student"] for r in director.get(f"{RISK}?cohort={c1.id}").json()["data"]["results"]}
     assert s1.id in ids
     assert s2.id not in ids
+
+
+def test_teacher_risk_scope_is_taught_cohorts_not_the_whole_branch(tenant_a, user_in, as_user):
+    from apps.academics.tests.factories import ExamFactory, ExamResultFactory
+    from apps.cohorts.tests.factories import CohortFactory
+    from apps.org.tests.factories import BranchFactory
+    from apps.students.tests.factories import StudentProfileFactory
+    from apps.teachers.tests.factories import TeacherProfileFactory
+
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory.create()
+    teacher_user = user_in(tenant_a, roles=[Role.TEACHER], branch=branch)
+    with schema_context(tenant_a.schema_name):
+        teacher = TeacherProfileFactory.create(user=teacher_user, branch=branch)
+        taught = CohortFactory.create(branch=branch, primary_teacher=teacher)
+        untaught = CohortFactory.create(branch=branch)
+        visible = StudentProfileFactory.create(branch=branch, current_cohort=taught)
+        hidden = StudentProfileFactory.create(branch=branch, current_cohort=untaught)
+        for cohort, student in ((taught, visible), (untaught, hidden)):
+            exam = ExamFactory.create(is_published=True, cohort=cohort)
+            ExamResultFactory.create(exam=exam, student=student, score=Decimal("10"))
+
+    client = as_user(tenant_a, teacher_user)
+    ids = {row["student"] for row in client.get(RISK).json()["data"]["results"]}
+    assert visible.id in ids
+    assert hidden.id not in ids
+    assert client.get(f"{RISK}{hidden.id}/").status_code == 404
+
+
+def test_future_attendance_does_not_inflate_current_risk(tenant_a):
+    from apps.attendance.models import AttendanceRecord
+    from apps.intelligence.selectors import student_risk
+    from apps.students.models import StudentProfile
+    from apps.students.tests.factories import StudentProfileFactory
+
+    with schema_context(tenant_a.schema_name):
+        student = StudentProfileFactory.create()
+        # The helper offsets from ``now - days_ago``; a negative value is in future.
+        _attendance(student, [AttendanceRecord.Status.ABSENT] * 4, days_ago=-2)
+        rows = student_risk(StudentProfile.objects.filter(pk=student.pk))
+    assert all(row["student"] != student.id for row in rows)
+
+
+def test_risk_pagination_invalid_filter_and_head(tenant_a, as_role):
+    from apps.academics.tests.factories import ExamFactory, ExamResultFactory
+    from apps.students.tests.factories import StudentProfileFactory
+
+    director, _ = as_role(Role.DIRECTOR)
+    with schema_context(tenant_a.schema_name):
+        for _ in range(2):
+            student = StudentProfileFactory.create()
+            exam = ExamFactory.create(is_published=True)
+            ExamResultFactory.create(exam=exam, student=student, score=Decimal("10"))
+
+    body = director.get(f"{RISK}?page_size=1").json()["data"]
+    assert body["count"] == 2
+    assert len(body["results"]) == 1
+    assert body["page"] == 1
+    assert body["page_size"] == 1
+    assert body["total_pages"] == 2
+    invalid = director.get(f"{RISK}?cohort=not-an-integer")
+    assert invalid.status_code == 400
+    assert "cohort" in invalid.json()["errors"]
+    assert director.head(RISK).status_code == 200
+    assert director.head(f"{RISK}{student.id}/").status_code == 200
+    assert director.head("/api/v1/intelligence/branches/").status_code == 200
+    assert director.head("/api/v1/intelligence/families/").status_code == 200
+    assert director.head("/api/v1/intelligence/teachers/").status_code == 200
+    assert director.head(RULES).status_code == 200

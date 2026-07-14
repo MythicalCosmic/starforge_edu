@@ -14,7 +14,10 @@ TD-13 — the active RoleMemberships are fetched once per request and memoized o
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass
+from typing import Any
 
+from django.db.models import Q
 from django.http import HttpRequest
 from rest_framework.permissions import BasePermission
 from rest_framework.request import Request
@@ -24,6 +27,41 @@ from rest_framework.views import APIView
 # a DRF Request, the layered plain views pass a Django HttpRequest. Both expose the
 # `.user` (and cache attrs) these helpers read.
 AnyRequest = HttpRequest | Request
+
+
+@dataclass(frozen=True)
+class MembershipGrantScope:
+    branch_id: int
+    department_id: int | None
+    role: str
+    account_kind: str
+    grants: frozenset[str]
+    is_legacy_fallback: bool = False
+
+
+class PermissionRoleSet(set[str]):
+    """Legacy role names plus canonical grants loaded for their memberships.
+
+    The set behavior preserves every existing row-scope check. Authorization
+    additionally reads ``canonical_grants`` for linked active AccountTypes and
+    consults the static matrix only for ``fallback_roles`` whose old membership
+    has not yet been backfilled.
+    """
+
+    def __init__(
+        self,
+        roles: Iterable[str] = (),
+        *,
+        canonical_grants: Iterable[str] = (),
+        fallback_roles: Iterable[str] = (),
+        account_kinds: Iterable[str] = (),
+        membership_scopes: Iterable[MembershipGrantScope] = (),
+    ) -> None:
+        super().__init__(roles)
+        self.canonical_grants = frozenset(canonical_grants)
+        self.fallback_roles = frozenset(fallback_roles)
+        self.account_kinds = frozenset(account_kinds)
+        self.membership_scopes = tuple(membership_scopes)
 
 
 class Role:
@@ -381,6 +419,13 @@ ROLE_PERMISSION_MATRIX: dict[str, set[str]] = {
     Role.SUPPORT: {"users:read", "audit:read", "tasks:read", "rewards:read", "penalty:read"},
 }
 
+# Every authenticated tenant account manages its own notification preferences.
+# Keep this invariant additive for new named roles; the director already holds
+# the master wildcard and does not need a redundant literal grant.
+for _notification_role in Role.ALL:
+    if _notification_role != Role.DIRECTOR:
+        ROLE_PERMISSION_MATRIX[_notification_role].add("notifications:read")
+
 
 DEFAULT_VERB_FOR_ACTION: dict[str, str] = {
     "list": "read",
@@ -481,34 +526,158 @@ def roles_with_permission(code: str, overrides: dict[str, dict[str, str]] | None
     return out
 
 
+def role_memberships_with_permission(code: str):
+    """Active memberships that *individually* grant ``code``.
+
+    Recipient discovery must not first resolve a user's aggregate permissions and
+    then filter a different membership by branch: that lets a grant in Branch A
+    borrow an unrelated membership in Branch B. Canonical AccountType grants and
+    legacy/null fallbacks are therefore matched in the same queryset row.
+    """
+    from apps.users.models import RoleMembership
+
+    resource, separator, _verb = code.partition(":")
+    covering_grants = {code, "*:*"}
+    if separator:
+        covering_grants.add(f"{resource}:*")
+    legacy_roles = roles_with_permission(code)
+    return (
+        RoleMembership.objects.filter(revoked_at__isnull=True, user__is_active=True)
+        .filter(
+            Q(
+                account_type__is_active=True,
+                account_type__permission_rows__permission__in=covering_grants,
+            )
+            | Q(account_type__isnull=True, role__in=legacy_roles)
+        )
+        .select_related("account_type")
+        .distinct()
+    )
+
+
+def role_memberships_for_account_kinds(account_kinds: Iterable[str]):
+    """Active principal memberships for canonical account kinds.
+
+    The null-AccountType branch is migration compatibility only. New/custom
+    account types are classified by ``account_kind`` rather than by the legacy
+    compatibility role stored on RoleMembership.
+    """
+    from apps.access.models import AccountType
+    from apps.users.models import RoleMembership
+
+    kind_set = set(account_kinds)
+    legacy_roles: set[str] = set()
+    if AccountType.AccountKind.STAFF in kind_set:
+        legacy_roles.update(
+            role for role in Role.ALL if role not in (Role.TEACHER, Role.STUDENT, Role.PARENT)
+        )
+    if AccountType.AccountKind.TEACHER in kind_set:
+        legacy_roles.add(Role.TEACHER)
+    if AccountType.AccountKind.STUDENT in kind_set:
+        legacy_roles.add(Role.STUDENT)
+    if AccountType.AccountKind.PARENT in kind_set:
+        legacy_roles.add(Role.PARENT)
+
+    return (
+        RoleMembership.objects.filter(revoked_at__isnull=True, user__is_active=True)
+        .filter(
+            Q(account_type__is_active=True, account_type__account_kind__in=kind_set)
+            | Q(account_type__isnull=True, role__in=legacy_roles)
+        )
+        .select_related("account_type")
+        .distinct()
+    )
+
+
 def has_permission_code(
     roles: Iterable[str], code: str, overrides: dict[str, dict[str, str]] | None = None
 ) -> bool:
+    evaluated_roles: Iterable[str] = roles
+    if isinstance(roles, PermissionRoleSet):
+        if _code_allowed(set(roles.canonical_grants), set(), code):
+            return True
+        # AccountType permissions are canonical. The legacy matrix/override
+        # resolver is consulted only for memberships not linked by migration or
+        # deliberately created as compatibility fixtures.
+        evaluated_roles = roles.fallback_roles
+        if not evaluated_roles:
+            return False
     if overrides is None:
         overrides = _load_tenant_overrides()
-    for role in roles:
+    for role in evaluated_roles:
         granted, revoked = _role_grant_revoke(role, overrides)
         if _code_allowed(granted, revoked, code):
             return True
     return False
 
 
-def get_role_memberships(request: AnyRequest) -> list:
-    """Active RoleMemberships for the request user, fetched once and memoized."""
+def get_role_memberships(request: AnyRequest) -> list[Any]:
+    """Authorization-active memberships, fetched once and memoized.
+
+    A legacy null ``account_type`` remains active as a compatibility fallback;
+    a linked inactive type revokes both its permissions and its scope immediately.
+    """
     cached = getattr(request, "_role_memberships_cache", None)
     if cached is not None:
         return cached
     user = getattr(request, "user", None)
     if not user or not user.is_authenticated:
-        memberships: list = []
+        memberships: list[Any] = []
     else:
-        memberships = list(user.role_memberships.filter(revoked_at__isnull=True))
+        memberships = list(
+            user.role_memberships.filter(revoked_at__isnull=True)
+            .filter(Q(account_type__isnull=True) | Q(account_type__is_active=True))
+            .select_related("account_type")
+        )
     request._role_memberships_cache = memberships  # type: ignore[union-attr]
     return memberships
 
 
-def get_user_roles(request: AnyRequest) -> set[str]:
-    return {m.role for m in get_role_memberships(request)}
+def get_user_roles(request: AnyRequest) -> PermissionRoleSet:
+    cached = getattr(request, "_user_roles_cache", None)
+    if cached is not None:
+        return cached
+    memberships = get_role_memberships(request)
+    account_type_ids = {m.account_type_id for m in memberships if m.account_type_id is not None}
+    grants: set[str] = set()
+    grants_by_type: dict[int, set[str]] = {account_type_id: set() for account_type_id in account_type_ids}
+    if account_type_ids:
+        from apps.access.models import AccountTypePermission
+
+        for account_type_id, permission in AccountTypePermission.objects.filter(
+            account_type_id__in=account_type_ids
+        ).values_list("account_type_id", "permission"):
+            grants.add(permission)
+            grants_by_type[account_type_id].add(permission)
+    legacy_kind_by_role = {
+        Role.TEACHER: "teacher",
+        Role.STUDENT: "student",
+        Role.PARENT: "parent",
+    }
+    membership_scopes = [
+        MembershipGrantScope(
+            branch_id=m.branch_id,
+            department_id=m.department_id,
+            role=m.role,
+            account_kind=(
+                m.account_type.account_kind
+                if m.account_type_id is not None
+                else legacy_kind_by_role.get(m.role, "staff")
+            ),
+            grants=frozenset(grants_by_type.get(m.account_type_id, set())),
+            is_legacy_fallback=m.account_type_id is None,
+        )
+        for m in memberships
+    ]
+    roles = PermissionRoleSet(
+        (m.role for m in memberships),
+        canonical_grants=grants,
+        fallback_roles=(m.role for m in memberships if m.account_type_id is None),
+        account_kinds=(scope.account_kind for scope in membership_scopes),
+        membership_scopes=membership_scopes,
+    )
+    request._user_roles_cache = roles  # type: ignore[union-attr]
+    return roles
 
 
 class RolePermission(BasePermission):
@@ -528,7 +697,9 @@ class RolePermission(BasePermission):
             if resource is None or verb is None:
                 return False  # TD-4: deny, never fall through to permissive default
             required = f"{resource}:{verb}"
-        return has_permission_code(get_user_roles(request), required, _request_overrides(request))
+        roles = get_user_roles(request)
+        overrides = _request_overrides(request) if roles.fallback_roles else {}
+        return has_permission_code(roles, required, overrides)
 
 
 SAFE_METHODS = ("GET", "HEAD", "OPTIONS")

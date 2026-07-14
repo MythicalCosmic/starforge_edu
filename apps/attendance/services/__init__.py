@@ -22,37 +22,41 @@ from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
 from apps.attendance.models import AttendanceRecord
-from apps.attendance.signals import student_marked_absent
+from apps.attendance.signals import student_marked_absent, student_marked_late
 from apps.cohorts.models import CohortMembership
 from apps.org.selectors import get_center_settings
 from apps.schedule.models import Lesson
 from core.exceptions import PermissionException, UnprocessableEntity
-from core.permissions import Role
-from core.scoping import role_memberships_allow
+from core.permissions import Role, role_memberships_with_permission
 from core.utils import current_schema
 
 
-def _roles_of(user) -> set[str]:
-    return {m.role for m in user.role_memberships.filter(revoked_at__isnull=True)}
+def _is_owner(user) -> bool:
+    return (
+        user.role_memberships.filter(revoked_at__isnull=True)
+        .filter(
+            Q(account_type__is_active=True, account_type__is_system=True, account_type__slug=Role.DIRECTOR)
+            | Q(account_type__isnull=True, role=Role.DIRECTOR)
+        )
+        .exists()
+    )
 
 
-def _assert_can_mark(lesson: Lesson, actor, roles: set[str]) -> None:
+def _assert_can_mark(lesson: Lesson, actor) -> None:
     """Actor must teach the lesson or manage its exact branch/department scope."""
-    if actor.is_superuser or Role.DIRECTOR in roles:
+    if actor.is_superuser or _is_owner(actor):
         return
-    if Role.HEAD_OF_DEPT in roles:
-        memberships = actor.role_memberships.filter(
-            revoked_at__isnull=True,
-            role=Role.HEAD_OF_DEPT,
-        ).only("role", "branch_id", "department_id")
-        if role_memberships_allow(
-            memberships,
-            roles={Role.HEAD_OF_DEPT},
-            branch_id=lesson.cohort.branch_id,
-            department_id=lesson.cohort.department_id,
-        ):
-            return
     if lesson.teacher.user_id == actor.id:
+        return
+    permission_scope = (
+        role_memberships_with_permission("attendance:write")
+        .filter(
+            user=actor,
+            branch_id=lesson.cohort.branch_id,
+        )
+        .filter(Q(department__isnull=True) | Q(department_id=lesson.cohort.department_id))
+    )
+    if permission_scope.exists():
         return
     raise PermissionException(
         _("Only the lesson's teacher can mark its attendance."), code="not_lesson_teacher"
@@ -124,10 +128,10 @@ def mark_present_from_scan(*, student, at=None, marked_by=None) -> AttendanceRec
         return None  # a concurrent mark won the (student, lesson) unique race
 
 
-def _assert_within_correction_window(lesson: Lesson, actor, roles: set[str], settings) -> None:
+def _assert_within_correction_window(lesson: Lesson, actor, settings) -> None:
     """Edits past `attendance_correction_window_hours` after the lesson ends are
     rejected — only a director may correct beyond the window (D2-B-3)."""
-    if actor.is_superuser or Role.DIRECTOR in roles:
+    if actor.is_superuser or _is_owner(actor):
         return
     window = dt.timedelta(hours=settings.attendance_correction_window_hours)
     if timezone.now() > lesson.ends_at + window:
@@ -170,6 +174,18 @@ def _emit_absent(record: AttendanceRecord, *, auto: bool, schema: str) -> None:
     )
 
 
+def _emit_late(record: AttendanceRecord, *, schema: str) -> None:
+    transaction.on_commit(
+        lambda: student_marked_late.send(
+            sender=AttendanceRecord,
+            record_id=record.pk,
+            student_id=record.student_id,
+            lesson_id=record.lesson_id,
+            schema_name=schema,
+        )
+    )
+
+
 @transaction.atomic
 def mark_attendance(*, lesson: Lesson, entries: list[dict], actor) -> dict:
     """Upsert attendance for `lesson`. `entries` are dicts with `student` (a
@@ -180,10 +196,14 @@ def mark_attendance(*, lesson: Lesson, entries: list[dict], actor) -> dict:
             _("Attendance can only be marked for a scheduled lesson."),
             code="lesson_not_scheduled",
         )
+    if timezone.now() < lesson.starts_at:
+        raise UnprocessableEntity(
+            _("Attendance cannot be marked before the lesson starts."),
+            code="lesson_not_started",
+        )
     settings = get_center_settings()
-    roles = _roles_of(actor)
-    _assert_can_mark(lesson, actor, roles)
-    _assert_within_correction_window(lesson, actor, roles, settings)
+    _assert_can_mark(lesson, actor)
+    _assert_within_correction_window(lesson, actor, settings)
 
     student_ids = [e["student"].pk for e in entries]
     # F2-6: membership is checked AS OF THE LESSON DATE, not "right now". A student
@@ -238,7 +258,13 @@ def mark_attendance(*, lesson: Lesson, entries: list[dict], actor) -> dict:
         records.append(record)
         if status_value == AttendanceRecord.Status.ABSENT:
             _emit_absent(record, auto=False, schema=schema)
-        elif status_value not in _ABSENT_LIKE and prior_status.get(entry["student"].pk) in _ABSENT_LIKE:
+        elif (
+            status_value == AttendanceRecord.Status.LATE
+            and prior_status.get(entry["student"].pk) != AttendanceRecord.Status.LATE
+        ):
+            _emit_late(record, schema=schema)
+
+        if status_value not in _ABSENT_LIKE and prior_status.get(entry["student"].pk) in _ABSENT_LIKE:
             # Correction: this record was absent/excused and is now present/late. Retire
             # any approved single-use absence-deduction credit tied to it (no-op if none,
             # or if the credit was already applied to an invoice).

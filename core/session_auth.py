@@ -1,9 +1,11 @@
 """Custom session authentication — no JWT library.
 
-The opaque ``Session.key`` is the Bearer token. A session row lives in the tenant
+The opaque key returned by :func:`create_session` is the Bearer token. Only a
+one-way SHA-256 digest is stored on ``Session``. A session row lives in the tenant
 schema that created it, so a key only authenticates against that center (tenant
 binding is automatic — no signed claim to forge or check cross-schema). Validation
-is one indexed lookup (key + not-revoked + not-expired); revocation is a row update.
+is one indexed digest lookup (plus a temporary legacy-key fallback while old rows
+are upgraded); revocation is a row update.
 Roles are read LIVE per request by the permission layer, so a role change takes
 effect immediately — there is no stale-token window and no token_version dance.
 
@@ -31,6 +33,30 @@ _ROLE_MODEL_LABELS = {
     "parent": "parents.ParentProfile",
     "staff": "org.StaffProfile",
 }
+_SESSION_HASH_PREFIX = "sha256$"
+_MAX_SESSION_KEY_LENGTH = 256
+
+
+def hash_session_key(key: str) -> str:
+    """Return the non-reversible representation persisted for a Bearer key.
+
+    Session keys contain 320 bits of CSPRNG entropy, so a fast digest is suitable:
+    unlike a human password there is no feasible dictionary to brute-force. The
+    prefix makes stored digests unambiguous and, critically, prevents a digest
+    copied from the database from being accepted by the legacy plaintext fallback.
+    """
+    from core.utils import stable_hash
+
+    return f"{_SESSION_HASH_PREFIX}{stable_hash(key)}"
+
+
+def _looks_like_stored_session_hash(value: str) -> bool:
+    digest = value.removeprefix(_SESSION_HASH_PREFIX)
+    return (
+        value.startswith(_SESSION_HASH_PREFIX)
+        and len(digest) == 64
+        and all(char in "0123456789abcdef" for char in digest)
+    )
 
 
 def _session_ttl() -> timedelta:
@@ -47,16 +73,19 @@ def create_session(
     principal_kind: str = "",
     principal_id: int | None = None,
 ):
-    """Issue a fresh session for ``user`` and return the row (``.key`` is the token).
+    """Issue a fresh session and return its row (``.key`` is available once).
 
     For role-native login, pass ``principal_kind`` (student/teacher/parent/staff) +
     ``principal_id`` (the role account's pk); ``user`` is still the account's linked User
-    so all downstream authz/audit is unchanged."""
+    so all downstream authz/audit is unchanged. The raw key is attached only to
+    this in-memory instance; database reads expose ``key_hash`` and never recover it.
+    """
     from apps.users.models import Session
 
-    return Session.objects.create(
+    raw_key = secrets.token_urlsafe(40)
+    session = Session.objects.create(
         user=user,
-        key=secrets.token_urlsafe(40),
+        key_hash=hash_session_key(raw_key),
         principal_kind=(principal_kind or "")[:16],
         principal_id=principal_id,
         ip_address=(ip or "")[:64],
@@ -65,6 +94,8 @@ def create_session(
         read_only=read_only,
         expires_at=timezone.now() + _session_ttl(),
     )
+    session._issued_key = raw_key
+    return session
 
 
 def validate_session_key(key: str):
@@ -74,16 +105,29 @@ def validate_session_key(key: str):
     ``last_used_at`` at most once a minute (one cheap throttled UPDATE, no signals)."""
     from apps.users.models import Session
 
-    if not key:
-        return None
-    session = (
-        Session.objects.select_related("user")
-        .filter(key=key, revoked_at__isnull=True, expires_at__gt=timezone.now())
-        .first()
-    )
-    if session is None or not session.user.is_active or not _has_live_role_principal(session):
+    if not key or len(key) > _MAX_SESSION_KEY_LENGTH:
         return None
     now = timezone.now()
+    key_hash = hash_session_key(key)
+    session = (
+        Session.objects.select_related("user")
+        .filter(key_hash=key_hash, revoked_at__isnull=True, expires_at__gt=now)
+        .first()
+    )
+    # Safe dual-read during rollout: old rows may still contain their raw key.
+    # Never run this branch for a value shaped like a stored digest, otherwise a
+    # read-only database leak would itself become a usable Bearer credential.
+    if session is None and not _looks_like_stored_session_hash(key):
+        session = (
+            Session.objects.select_related("user")
+            .filter(key_hash=key, revoked_at__isnull=True, expires_at__gt=now)
+            .first()
+        )
+        if session is not None:
+            Session.objects.filter(pk=session.pk, key_hash=key).update(key_hash=key_hash)
+            session.key_hash = key_hash
+    if session is None or not session.user.is_active or not _has_live_role_principal(session):
+        return None
     if (now - session.last_used_at) > _LAST_USED_STALE:
         Session.objects.filter(pk=session.pk).update(last_used_at=now)
     return session
@@ -120,7 +164,12 @@ def _has_live_role_principal(session) -> bool:
 def revoke_session(key: str) -> None:
     from apps.users.models import Session
 
-    Session.objects.filter(key=key, revoked_at__isnull=True).update(revoked_at=timezone.now())
+    if not key or len(key) > _MAX_SESSION_KEY_LENGTH:
+        return
+    candidates = [hash_session_key(key)]
+    if not _looks_like_stored_session_hash(key):
+        candidates.append(key)  # legacy plaintext row during rollout
+    Session.objects.filter(key_hash__in=candidates, revoked_at__isnull=True).update(revoked_at=timezone.now())
 
 
 def revoke_all_for_user(user_id: int) -> int:
@@ -132,7 +181,7 @@ def revoke_all_for_user(user_id: int) -> int:
 
 
 class SessionAuthentication(BaseAuthentication):
-    """DRF authenticator: ``Authorization: Bearer <session.key>`` -> (user, session).
+    """DRF authenticator: ``Authorization: Bearer <issued-key>`` -> (user, session).
 
     No header -> ``None`` (anonymous; ``IsAuthenticated`` then 401s). A Bearer key
     that is unknown/expired/revoked -> ``AuthenticationException`` (401)."""

@@ -72,3 +72,40 @@ def test_send_lesson_reminders_skips_inactive_center(tenant_a, tenant_b, monkeyp
         assert set(captured) == active
     finally:
         Center.objects.filter(schema_name=tenant_b.schema_name).update(is_active=True)
+
+
+@pytest.mark.parametrize(
+    ("module_name", "dispatcher_name", "body_name"),
+    [
+        ("finance_tasks", "late_payment_reminders", "late_payment_reminders_for_schema"),
+        ("finance_tasks", "refresh_fx_rates", "refresh_fx_rate_for_schema"),
+        ("billing_tasks", "run_nightly_metering", "meter_center_task"),
+    ],
+)
+def test_money_and_metering_dispatchers_isolate_each_tenant(
+    tenant_a,
+    tenant_b,
+    monkeypatch,
+    module_name,
+    dispatcher_name,
+    body_name,
+):
+    """Periodic money work must enqueue independent retryable tenant bodies."""
+    from django_tenants.utils import get_public_schema_name
+
+    from apps.tenancy.models import Center
+    from celery_tasks import billing_tasks, finance_tasks
+
+    module = {"finance_tasks": finance_tasks, "billing_tasks": billing_tasks}[module_name]
+    dispatcher = getattr(module, dispatcher_name)
+    body = getattr(module, body_name)
+    result, captured = _run_dispatcher_capturing_schema_names(dispatcher, body, monkeypatch)
+
+    active = set(
+        Center.objects.filter(is_active=True)
+        .exclude(schema_name=get_public_schema_name())
+        .values_list("schema_name", flat=True)
+    )
+    assert result == len(active)
+    assert set(captured) == active
+    assert {tenant_a.schema_name, tenant_b.schema_name} <= active

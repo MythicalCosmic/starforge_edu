@@ -75,7 +75,7 @@ def test_branch_write_denied_for_teacher(as_role, tenant_a):
     assert resp.json()["code"] == "forbidden"
 
 
-def test_transfers_are_read_only(as_role, tenant_a):
+def test_transfer_history_is_readable_but_has_no_generic_update(as_role, tenant_a):
     from apps.org.services import record_transfer
     from apps.org.tests.factories import BranchFactory
     from apps.users.tests.factories import UserFactory
@@ -90,8 +90,9 @@ def test_transfers_are_read_only(as_role, tenant_a):
     assert "pagination" in listed
     assert len(listed["data"]) >= 1
     assert listed["data"][0]["from_branch"] == a.id
-    # Read-only: writes are 405.
-    assert client.post("/api/v1/org/transfers/", {}, format="json").status_code == 405
+    # The collection's only write is the dedicated student-transfer POST; generic
+    # detail/list updates remain unavailable.
+    assert client.put("/api/v1/org/transfers/", {}, format="json").status_code == 405
 
 
 def test_department_list_surfaces_readable_fk_names(as_role, tenant_a):
@@ -133,3 +134,193 @@ def test_department_list_and_detail_branch_scoped(tenant_a, user_in, as_user):
     assert theirs.id not in ids
     # And a cross-branch detail read is 403 (out of scope), never a leak.
     assert client.get(f"/api/v1/org/departments/{theirs.id}/").status_code == 403
+
+
+def test_branch_payload_does_not_embed_cross_branch_departments(tenant_a, user_in, as_user):
+    from apps.org.tests.factories import BranchFactory, DepartmentFactory
+
+    with schema_context(tenant_a.schema_name):
+        mine = BranchFactory()
+        other = BranchFactory()
+        DepartmentFactory(branch=other, name="Private department")
+    client = as_user(tenant_a, user_in(tenant_a, roles=[Role.TEACHER], branch=mine))
+
+    branches = client.get("/api/v1/org/branches/").json()["data"]
+    other_row = next(row for row in branches if row["id"] == other.id)
+    assert other_row["departments"] == []
+
+
+def test_transfer_audit_is_scoped_to_permission_membership(tenant_a, user_in, as_user):
+    from apps.org.services import record_transfer
+    from apps.org.tests.factories import BranchFactory
+    from apps.users.tests.factories import UserFactory
+
+    with schema_context(tenant_a.schema_name):
+        mine = BranchFactory()
+        other = BranchFactory()
+        third = BranchFactory()
+        visible = record_transfer(user=UserFactory(), from_branch=mine, to_branch=other, reason="visible")
+        hidden = record_transfer(user=UserFactory(), from_branch=other, to_branch=third, reason="hidden")
+    client = as_user(tenant_a, user_in(tenant_a, roles=[Role.TEACHER], branch=mine))
+
+    response = client.get("/api/v1/org/transfers/")
+    assert response.status_code == 200
+    ids = {row["id"] for row in response.json()["data"]}
+    assert visible.id in ids
+    assert hidden.id not in ids
+    assert client.get(f"/api/v1/org/transfers/{hidden.id}/").status_code == 404
+
+
+def test_student_transfer_updates_scope_cohorts_and_visible_audit(as_role, tenant_a):
+    from apps.access.models import AccountType
+    from apps.cohorts.models import CohortMembership
+    from apps.cohorts.tests.factories import CohortFactory
+    from apps.org.models import BranchTransfer
+    from apps.org.tests.factories import BranchFactory
+    from apps.students.tests.factories import StudentProfileFactory
+    from apps.users.models import RoleMembership
+    from apps.users.services import ensure_role_membership
+
+    client, actor = as_role(Role.DIRECTOR)
+    with schema_context(tenant_a.schema_name):
+        source = BranchFactory(name="Source")
+        target = BranchFactory(name="Target")
+        first = CohortFactory(branch=source, name="First")
+        second = CohortFactory(branch=source, name="Second")
+        student = StudentProfileFactory(branch=source, current_cohort=first)
+        CohortMembership.objects.create(cohort=first, student=student, start_date="2026-01-01")
+        CohortMembership.objects.create(cohort=second, student=student, start_date="2026-02-01")
+        canonical = ensure_role_membership(student, branch=source, role=Role.STUDENT)
+        assert canonical.account_type.account_kind == AccountType.AccountKind.STUDENT
+
+    response = client.post(
+        "/api/v1/org/transfers/",
+        {"student": student.pk, "to_branch": target.pk, "reason": "family moved"},
+        format="json",
+    )
+    assert response.status_code == 201, response.content
+    payload = response.json()["data"]
+    assert payload["user"] == student.user_id
+    assert payload["from_branch"] == source.pk
+    assert payload["to_branch"] == target.pk
+    assert payload["actor"] == actor.pk
+
+    with schema_context(tenant_a.schema_name):
+        student.refresh_from_db()
+        canonical.refresh_from_db()
+        assert student.branch_id == target.pk
+        assert student.current_cohort_id is None
+        assert canonical.branch_id == target.pk
+        assert canonical.department_id is None
+        ended = CohortMembership.objects.filter(student=student).order_by("pk")
+        assert ended.count() == 2
+        assert all(row.end_date is not None for row in ended)
+        assert {row.moved_reason for row in ended} == {"family moved"}
+        assert (
+            not RoleMembership.objects.filter(
+                user_id=student.user_id,
+                revoked_at__isnull=True,
+                account_type__account_kind=AccountType.AccountKind.STUDENT,
+            )
+            .exclude(branch=target)
+            .exists()
+        )
+        transfer = BranchTransfer.objects.get(pk=payload["id"])
+
+    history = client.get("/api/v1/org/transfers/")
+    assert history.status_code == 200
+    assert transfer.pk in {row["id"] for row in history.json()["data"]}
+
+
+@pytest.mark.parametrize("grant_target", [False, True])
+def test_student_transfer_requires_write_scope_on_both_branches(
+    tenant_a,
+    as_user,
+    grant_target,
+):
+    from apps.access.models import AccountType, AccountTypePermission
+    from apps.org.models import BranchTransfer
+    from apps.org.tests.factories import BranchFactory
+    from apps.students.tests.factories import StudentProfileFactory
+    from apps.users.models import RoleMembership
+    from apps.users.tests.factories import UserFactory
+
+    with schema_context(tenant_a.schema_name):
+        source = BranchFactory()
+        target = BranchFactory()
+        student = StudentProfileFactory(branch=source)
+        operator = UserFactory()
+        mover = AccountType.objects.create(
+            name=f"Scoped mover {grant_target}",
+            slug=f"scoped-mover-{str(grant_target).lower()}",
+            account_kind=AccountType.AccountKind.STAFF,
+        )
+        AccountTypePermission.objects.create(account_type=mover, permission="org:read")
+        AccountTypePermission.objects.create(account_type=mover, permission="org:write")
+        RoleMembership.objects.create(
+            user=operator,
+            branch=target if grant_target else source,
+            role=Role.SUPPORT,
+            account_type=mover,
+        )
+        operator.refresh_from_db()
+    client = as_user(tenant_a, operator)
+
+    response = client.post(
+        "/api/v1/org/transfers/",
+        {"student": student.pk, "to_branch": target.pk, "reason": "not permitted"},
+        format="json",
+    )
+    assert response.status_code == 403
+    assert response.json()["code"] == "out_of_scope"
+    with schema_context(tenant_a.schema_name):
+        student.refresh_from_db()
+        assert student.branch_id == source.pk
+        assert not BranchTransfer.objects.filter(user_id=student.user_id).exists()
+
+
+def test_student_transfer_rolls_back_every_change_when_audit_write_fails(tenant_a, monkeypatch):
+    from apps.cohorts.models import CohortMembership
+    from apps.cohorts.tests.factories import CohortFactory
+    from apps.org.models import BranchTransfer
+    from apps.org.services import transfer_student
+    from apps.org.tests.factories import BranchFactory
+    from apps.students.tests.factories import StudentProfileFactory
+    from apps.users.services import ensure_role_membership
+    from apps.users.tests.factories import UserFactory
+
+    with schema_context(tenant_a.schema_name):
+        source = BranchFactory()
+        target = BranchFactory()
+        cohort = CohortFactory(branch=source)
+        student = StudentProfileFactory(branch=source, current_cohort=cohort)
+        membership = CohortMembership.objects.create(
+            cohort=cohort,
+            student=student,
+            start_date="2026-01-01",
+        )
+        canonical = ensure_role_membership(student, branch=source, role=Role.STUDENT)
+        actor = UserFactory()
+
+        def _fail_audit(**_kwargs):
+            raise RuntimeError("simulated audit storage failure")
+
+        monkeypatch.setattr("apps.org.services.record_transfer", _fail_audit)
+        with pytest.raises(RuntimeError, match="simulated audit storage failure"):
+            transfer_student(
+                student_id=student.pk,
+                to_branch_id=target.pk,
+                reason="rollback",
+                actor=actor,
+                allowed_branch_ids=None,
+            )
+
+        student.refresh_from_db()
+        membership.refresh_from_db()
+        canonical.refresh_from_db()
+        assert student.branch_id == source.pk
+        assert student.current_cohort_id == cohort.pk
+        assert membership.end_date is None
+        assert membership.moved_reason == ""
+        assert canonical.branch_id == source.pk
+        assert not BranchTransfer.objects.filter(user_id=student.user_id).exists()

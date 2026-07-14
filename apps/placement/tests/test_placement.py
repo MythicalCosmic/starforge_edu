@@ -213,6 +213,55 @@ def test_remove_question_while_draft(tenant_a, user_in, as_user):
     assert s["teacher"].get(f"{TESTS}{tid}/", format="json").json()["data"]["questions"] == []
 
 
+def test_stale_draft_object_cannot_remove_question_after_state_change(tenant_a, user_in):
+    """The service must authorize against the locked database row, not a stale
+    object fetched while the test was still editable."""
+    from apps.placement import services
+    from apps.placement.models import PlacementQuestion, PlacementTest
+    from core.exceptions import UnprocessableEntity
+
+    builder = user_in(tenant_a, roles=[Role.TEACHER])
+    with schema_context(tenant_a.schema_name):
+        test = services.create_test(title="Race-safe test", created_by=builder)
+        question = services.add_question(
+            test=test,
+            prompt="2+2?",
+            question_type="single_choice",
+            options=["3", "4"],
+            correct_answer="4",
+        )
+        PlacementTest.objects.filter(pk=test.pk).update(status=PlacementTest.Status.PENDING)
+
+        with pytest.raises(UnprocessableEntity) as exc:
+            services.remove_question(question=question)
+
+        assert exc.value.code == "test_not_draft"
+        assert PlacementQuestion.objects.filter(pk=question.pk).exists()
+
+
+def test_stale_draft_object_cannot_be_submitted_twice(tenant_a, user_in):
+    from apps.placement import services
+    from apps.placement.models import PlacementTest
+    from core.exceptions import UnprocessableEntity
+
+    builder = user_in(tenant_a, roles=[Role.TEACHER])
+    with schema_context(tenant_a.schema_name):
+        test = services.create_test(title="Race-safe submit", created_by=builder)
+        services.add_question(
+            test=test,
+            prompt="2+2?",
+            question_type="single_choice",
+            options=["3", "4"],
+            correct_answer="4",
+        )
+        PlacementTest.objects.filter(pk=test.pk).update(status=PlacementTest.Status.PENDING)
+
+        with pytest.raises(UnprocessableEntity) as exc:
+            services.submit_for_review(test=test)
+
+        assert exc.value.code == "test_not_draft"
+
+
 def test_branch_scoping_on_create_and_read(tenant_a, user_in, as_user):
     from apps.org.tests.factories import BranchFactory
 

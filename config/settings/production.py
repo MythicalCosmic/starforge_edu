@@ -10,6 +10,13 @@ from .base import CORS_ALLOWED_ORIGINS, CSRF_TRUSTED_ORIGINS, FIELD_ENCRYPTION_K
 
 DEBUG = False
 
+# Only platform-owned suffixes may skip customer DNS verification. This is
+# deliberately empty unless the operator names the deployment's own base domain.
+DOMAIN_VERIFICATION_TRUSTED_SUFFIXES = env.list(
+    "DOMAIN_VERIFICATION_TRUSTED_SUFFIXES",
+    default=[],
+)
+
 # Fail fast on insecure defaults — base.py ships dev-friendly fallbacks
 # (`dev-only-CHANGE-ME`, ALLOWED_HOSTS=["*"]) that must NEVER reach production:
 # the default SECRET_KEY would let anyone forge signed data/sessions, and a wildcard

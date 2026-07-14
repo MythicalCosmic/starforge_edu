@@ -18,7 +18,7 @@ from apps.billing import selectors as billing_selectors
 from apps.tenancy import services as domain
 from apps.tenancy.interfaces.repositories import ICenterRepository
 from apps.tenancy.interfaces.services import ICenterService
-from apps.tenancy.models import Center, Domain
+from apps.tenancy.models import Center, Domain, DomainClaim
 
 
 class CenterService(ICenterService):
@@ -35,8 +35,9 @@ class CenterService(ICenterService):
     def usage(self, *, center: Center, days: int) -> dict[str, Any]:
         return billing_selectors.usage_series(center=center, days=days)
 
-    def list_domains(self, *, center: Center) -> list[Domain]:
-        return list(center.domains.all())
+    def list_domains(self, *, center: Center) -> list[Domain | DomainClaim]:
+        claims = center.domain_claims.filter(domain_record__isnull=True)
+        return [*center.domains.all(), *claims]
 
     def resolve(self, *, slug: str) -> dict[str, Any]:
         return domain.resolve_tenant(slug=slug)
@@ -53,11 +54,18 @@ class CenterService(ICenterService):
         # Re-fetch so the response presenter renders the prefetched domains.
         return self._centers.get(center.pk) or center
 
-    def update_contact(self, *, center: Center, changes: dict[str, Any]) -> Center:
+    def update_contact(self, *, center: Center, changes: dict[str, Any], actor: Any) -> Center:
+        domain._assert_operable_center(center)
         for field, value in changes.items():
             setattr(center, field, value)
         if changes:
             center.save(update_fields=[*changes.keys(), "updated_at"])
+            domain.record_platform_event(
+                actor=actor,
+                center=center,
+                event=domain.PlatformEvent.Event.CENTER_CONTACT_UPDATED,
+                payload={"fields": sorted(changes)},
+            )
         return self._centers.get(center.pk) or center
 
     def suspend(self, *, center: Center, actor: Any, reason: str) -> Center:
@@ -69,11 +77,16 @@ class CenterService(ICenterService):
     def extend_trial(self, *, center: Center, days: int, actor: Any) -> Center:
         return domain.extend_trial(center, days=days, actor=actor)
 
-    def add_domain(self, *, center: Center, domain_name: str, is_primary: bool) -> Domain:
-        return domain.add_domain(center, domain=domain_name, is_primary=is_primary)
+    def add_domain(
+        self, *, center: Center, domain_name: str, is_primary: bool, actor: Any
+    ) -> Domain | DomainClaim:
+        return domain.add_domain(center, domain=domain_name, is_primary=is_primary, actor=actor)
 
-    def set_primary_domain(self, *, center: Center, domain_id: int) -> Domain:
-        return domain.set_primary_domain(center, domain_id)
+    def set_primary_domain(self, *, center: Center, domain_id: int, actor: Any) -> Domain:
+        return domain.set_primary_domain(center, domain_id, actor=actor)
+
+    def verify_domain(self, *, center: Center, claim_id: Any, actor: Any) -> Domain:
+        return domain.verify_domain(center, claim_id=claim_id, actor=actor)
 
     def impersonate(self, *, center: Center, user_id: int, impersonator: Any) -> dict[str, Any]:
         return domain.mint_impersonation_token(center=center, user_id=user_id, impersonator=impersonator)

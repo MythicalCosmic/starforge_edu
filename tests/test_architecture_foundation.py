@@ -121,6 +121,10 @@ def test_response_envelopes_have_the_standard_shape():
 
 # --- base repository -------------------------------------------------------
 def test_base_repository_crud_runs_through_the_orm(tenant_a):
+    from datetime import timedelta
+
+    from django.utils import timezone
+
     from apps.org.models import Branch
 
     class _BranchRepo(BaseRepository[Branch]):
@@ -132,8 +136,13 @@ def test_base_repository_crud_runs_through_the_orm(tenant_a):
         assert repo.get_by_id(branch.pk).name == "North"
         assert repo.exists(slug="north-x") is True
         assert repo.count(slug="north-x") == 1
+        stale = timezone.now() - timedelta(days=1)
+        Branch.objects.filter(pk=branch.pk).update(updated_at=stale)
+        branch.refresh_from_db()
         repo.update(branch, name="South")
-        assert repo.get_by_id(branch.pk).name == "South"
+        updated = repo.get_by_id(branch.pk)
+        assert updated.name == "South"
+        assert updated.updated_at > stale
         again, made = repo.get_or_create(slug="north-x", defaults={"name": "South"})
         assert made is False
         assert again.pk == branch.pk

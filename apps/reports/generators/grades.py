@@ -9,12 +9,14 @@ from __future__ import annotations
 
 from typing import Any
 
+from django.db.models import Q
+
 from apps.academics.models import Grade
 from apps.reports.generators.base import (
     ReportGenerator,
     enforce_report_row_cap,
     is_full_scope,
-    membership_branch_ids,
+    staff_report_scope_q,
     teacher_cohort_ids,
 )
 
@@ -39,14 +41,19 @@ class GradesGenerator(ReportGenerator):
         if params.get("branch_id"):
             qs = qs.filter(student__branch_id=params["branch_id"])
 
-        if not full and "teacher" not in roles:
-            qs = qs.filter(student__branch_id__in=membership_branch_ids(user))
-        if "teacher" in roles:
-            cohort_ids = teacher_cohort_ids(user)
-            qs = qs.filter(
-                student__cohort_memberships__cohort_id__in=cohort_ids,
-                student__cohort_memberships__end_date__isnull=True,
-            ).distinct()
+        if not full:
+            visible = staff_report_scope_q(
+                roles=roles,
+                user=user,
+                branch_field="student__branch_id",
+                department_field="student__current_cohort__department_id",
+            )
+            if "teacher" in roles:
+                visible |= Q(
+                    student__cohort_memberships__cohort_id__in=teacher_cohort_ids(user),
+                    student__cohort_memberships__end_date__isnull=True,
+                )
+            qs = qs.filter(visible).distinct()
 
         enforce_report_row_cap(qs)
         rows = [

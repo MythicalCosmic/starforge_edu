@@ -9,6 +9,7 @@ from __future__ import annotations
 from django.urls import path
 
 from apps.assignments.views.v1.assignment_views import (
+    assignment_close_view,
     assignment_detail_view,
     assignment_publish_view,
     assignment_submissions_view,
@@ -17,6 +18,8 @@ from apps.assignments.views.v1.assignment_views import (
     submission_ai_feedback_view,
     submission_detail_view,
     submission_grade_view,
+    submission_plagiarism_view,
+    submission_return_view,
     submissions_collection_view,
 )
 
@@ -25,6 +28,12 @@ urlpatterns = [
     path("submissions/", submissions_collection_view, name="submissions-collection"),
     path("submissions/<int:pk>/", submission_detail_view, name="submissions-detail"),
     path("submissions/<int:pk>/grade/", submission_grade_view, name="submissions-grade"),
+    path("submissions/<int:pk>/return/", submission_return_view, name="submissions-return"),
+    path(
+        "submissions/<int:pk>/plagiarism/",
+        submission_plagiarism_view,
+        name="submissions-plagiarism",
+    ),
     path(
         "submissions/<int:pk>/request-ai-feedback/",
         submission_ai_feedback_view,
@@ -36,5 +45,6 @@ urlpatterns = [
     path("", assignments_collection_view, name="assignments-collection"),
     path("<int:pk>/", assignment_detail_view, name="assignments-detail"),
     path("<int:pk>/publish/", assignment_publish_view, name="assignments-publish"),
+    path("<int:pk>/close/", assignment_close_view, name="assignments-close"),
     path("<int:pk>/submissions/", assignment_submissions_view, name="assignments-submissions"),
 ]

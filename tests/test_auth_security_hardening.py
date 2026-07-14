@@ -170,6 +170,137 @@ def test_role_session_revalidates_profile_and_bridge_on_every_request(tenant_a):
         assert validate_session_key(session.key) is None
 
 
+def test_session_bearer_key_is_hashed_at_rest_and_digest_is_not_a_credential(tenant_a, user_in):
+    from apps.users.models import Session
+    from core.session_auth import (
+        create_session,
+        hash_session_key,
+        revoke_session,
+        validate_session_key,
+    )
+
+    user = user_in(tenant_a, roles=["teacher"])
+    with schema_context(tenant_a.schema_name):
+        issued = create_session(user)
+        raw_key = issued.key
+        stored = Session.objects.get(pk=issued.pk)
+
+        assert raw_key
+        assert stored.key == ""  # raw credentials are issuance-only
+        assert stored.key_hash == hash_session_key(raw_key)
+        assert raw_key not in stored.key_hash
+        assert validate_session_key(raw_key).pk == issued.pk
+        # A database-only leak must not turn the stored digest into a Bearer token.
+        assert validate_session_key(stored.key_hash) is None
+
+        revoke_session(raw_key)
+        assert validate_session_key(raw_key) is None
+
+
+def test_legacy_plaintext_session_is_dual_read_then_lazily_hashed(tenant_a, user_in):
+    import secrets
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from apps.users.models import Session
+    from core.session_auth import hash_session_key, validate_session_key
+
+    user = user_in(tenant_a, roles=["teacher"])
+    with schema_context(tenant_a.schema_name):
+        legacy_key = secrets.token_urlsafe(40)
+        legacy = Session.objects.create(
+            user=user,
+            key_hash=legacy_key,
+            expires_at=timezone.now() + timedelta(hours=1),
+        )
+
+        assert validate_session_key(legacy_key).pk == legacy.pk
+        legacy.refresh_from_db()
+        assert legacy.key_hash == hash_session_key(legacy_key)
+
+
+def test_hash_session_keys_command_is_batched_idempotent_and_supports_dry_run(tenant_a, user_in):
+    import secrets
+    from datetime import timedelta
+    from io import StringIO
+
+    from django.core.management import call_command
+    from django.utils import timezone
+
+    from apps.users.models import Session
+    from core.session_auth import create_session, hash_session_key
+
+    user = user_in(tenant_a, roles=["teacher"])
+    raw_keys = [secrets.token_urlsafe(40), secrets.token_urlsafe(40)]
+    with schema_context(tenant_a.schema_name):
+        legacy_ids = [
+            Session.objects.create(
+                user=user,
+                key_hash=raw_key,
+                expires_at=timezone.now() + timedelta(hours=1),
+            ).pk
+            for raw_key in raw_keys
+        ]
+        already_hashed = create_session(user)
+        original_hash = already_hashed.key_hash
+
+    dry_output = StringIO()
+    call_command(
+        "hash_session_keys",
+        schema_names=[tenant_a.schema_name],
+        batch_size=1,
+        dry_run=True,
+        stdout=dry_output,
+    )
+    assert not any(raw_key in dry_output.getvalue() for raw_key in raw_keys)
+    with schema_context(tenant_a.schema_name):
+        assert (
+            list(Session.objects.filter(pk__in=legacy_ids).order_by("pk").values_list("key_hash", flat=True))
+            == raw_keys
+        )
+
+    output = StringIO()
+    call_command(
+        "hash_session_keys",
+        schema_names=[tenant_a.schema_name],
+        batch_size=1,
+        stdout=output,
+    )
+    call_command(
+        "hash_session_keys",
+        schema_names=[tenant_a.schema_name],
+        batch_size=1,
+        stdout=output,
+    )
+    with schema_context(tenant_a.schema_name):
+        stored = list(
+            Session.objects.filter(pk__in=legacy_ids).order_by("pk").values_list("key_hash", flat=True)
+        )
+        assert stored == [hash_session_key(raw_key) for raw_key in raw_keys]
+        already_hashed.refresh_from_db()
+        assert already_hashed.key_hash == original_hash
+
+
+def test_session_hash_bulk_cutover_is_post_readiness_not_a_schema_migration():
+    import importlib
+    from pathlib import Path
+
+    from django.db import migrations
+
+    migration = importlib.import_module("apps.users.migrations.0007_hash_session_keys_at_rest")
+    assert not any(
+        isinstance(operation, migrations.RunPython) for operation in migration.Migration.operations
+    )
+
+    root = Path(__file__).resolve().parent.parent
+    deploy_script = (root / "scripts" / "deploy_production.sh").read_text(encoding="utf-8")
+    readiness_gate = deploy_script.index('if [[ "$healthy" != "1" ]]')
+    cutover = deploy_script.index("python manage.py hash_session_keys")
+    release_marker = deploy_script.index("printf '%s\\n' \"$sha\"")
+    assert readiness_gate < cutover < release_marker
+
+
 def test_profile_delete_disables_bridge_grants_devices_and_sessions(tenant_a):
     from apps.org.tests.factories import BranchFactory
     from apps.students.tests.factories import StudentProfileFactory

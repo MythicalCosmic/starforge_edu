@@ -124,6 +124,40 @@ def test_compute_percent_of_collected_tuition(tenant_a):
         assert result["amount_uzs"] == Decimal("160000.00")  # 40% of 400,000
 
 
+def test_percent_payout_uses_custom_typed_cohort_assignment(tenant_a):
+    from apps.cohorts.models import CohortTeacher
+    from apps.cohorts.tests.factories import CohortFactory
+    from apps.finance.models import PaymentAllocation
+    from apps.finance.tests.factories import InvoiceFactory
+    from apps.students.tests.factories import StudentProfileFactory
+    from apps.teachers.services import compute_payout, set_payout_policy
+    from apps.teachers.tests.factories import TeacherTypeFactory
+
+    teacher, branch = _teacher(tenant_a)
+    with schema_context(tenant_a.schema_name):
+        cohort = CohortFactory(branch=branch)
+        CohortTeacher.objects.create(
+            cohort=cohort,
+            teacher=teacher,
+            teacher_type=TeacherTypeFactory(name="Workshop Lead", slug="workshop-lead"),
+        )
+        student = StudentProfileFactory(branch=branch)
+        invoice = InvoiceFactory(student=student, cohort=cohort)
+        PaymentAllocation.objects.create(
+            invoice=invoice,
+            payment_id=1,
+            amount_uzs=Decimal("200000.00"),
+        )
+        set_payout_policy(
+            teacher=teacher,
+            method="percent_of_collected_tuition",
+            tuition_percent=Decimal("25"),
+        )
+        start_d, end_d = _wide_period()
+        result = compute_payout(teacher=teacher, period_start=start_d, period_end=end_d)
+        assert result["amount_uzs"] == Decimal("50000.00")
+
+
 def test_percent_only_counts_the_teachers_own_cohort_tuition(tenant_a):
     """Regression (self-review): tuition a student paid for ANOTHER teacher's course must
     NOT count toward this teacher — the sum is scoped per cohort (Invoice.cohort), so the

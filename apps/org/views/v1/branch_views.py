@@ -26,7 +26,7 @@ from apps.org.views.v1._shared import require_present, require_slug
 from core.api_auth import check_perm, require_auth
 from core.container import container
 from core.exceptions import NotFoundException, ValidationException
-from core.http import bool_field, int_field, read_json, str_field
+from core.http import bool_field, int_field, read_json, str_field, trimmed_str_field
 from core.listing import apply_filters, paginate
 from core.responses import created, error, no_content, paginated, success
 
@@ -146,9 +146,16 @@ def branch_delete_holiday_view(request: HttpRequest, pk: int, holiday_id: int) -
 # --- helpers ---------------------------------------------------------------
 def _branch_changes(body: dict[str, Any]) -> dict[str, Any]:
     changes: dict[str, Any] = {}
-    for f in ("name", "slug", "address", "phone", "timezone"):
+    if "name" in body:
+        changes["name"] = trimmed_str_field(body, "name", required=True, max_length=200)
+        require_present({"name": changes["name"]})
+    if "slug" in body:
+        changes["slug"] = trimmed_str_field(body, "slug", required=True, max_length=100)
+        require_present({"slug": changes["slug"]})
+        require_slug("slug", changes["slug"])
+    for f, max_length in (("address", 512), ("phone", 32), ("timezone", 64)):
         if f in body:
-            changes[f] = str_field(body, f)
+            changes[f] = trimmed_str_field(body, f, max_length=max_length)
     if "is_active" in body:
         changes["is_active"] = bool_field(body, "is_active", default=True)
     for f in ("max_students", "max_teachers"):

@@ -44,11 +44,10 @@ from core.listing import apply_filters, paginate
 from core.permissions import Role, get_user_roles, has_permission_code
 from core.responses import created, error, no_content, paginated, success
 from core.scoping import (
-    assert_branch_id_in_scope,
-    assert_in_branch_scope,
-    branch_ids,
+    assert_permission_membership_scope,
     is_unscoped,
-    scope_to_branches,
+    permission_membership_scope_q,
+    scope_to_permission_memberships,
 )
 from core.utils import stable_hash
 
@@ -160,12 +159,23 @@ def _resolve_cohort(request: HttpRequest, raw: Any):
     obj = Cohort.objects.filter(pk=raw).first()
     if obj is None:
         raise _reject("cohort", "Invalid cohort.")
-    assert_branch_id_in_scope(request, obj.branch_id)
+    assert_permission_membership_scope(
+        request,
+        permission="finance:write",
+        branch_id=obj.branch_id,
+        department_id=obj.department_id,
+        account_kinds={"staff"},
+    )
     return obj
 
 
 def _roles(request: HttpRequest) -> set[str]:
     return get_user_roles(request)
+
+
+def _student_department_id(student: Any) -> int | None:
+    cohort = student.current_cohort
+    return cohort.department_id if cohort is not None else None
 
 
 # --- fee schedules (CRUD) --------------------------------------------------
@@ -204,7 +214,14 @@ def fee_schedules_collection_view(request: HttpRequest) -> HttpResponse:
         schedules = _service().fee_schedules()
         if not is_unscoped(request):
             schedules = schedules.filter(
-                Q(cohort__isnull=True) | Q(cohort__branch_id__in=branch_ids(request))
+                Q(cohort__isnull=True)
+                | permission_membership_scope_q(
+                    roles=_roles(request),
+                    permission="finance:read",
+                    branch_field="cohort__branch_id",
+                    department_field="cohort__department_id",
+                    account_kinds={"staff"},
+                )
             )
         qs = apply_filters(
             request,
@@ -223,13 +240,19 @@ def fee_schedules_collection_view(request: HttpRequest) -> HttpResponse:
     return _method_not_allowed()
 
 
-def _get_fee_schedule(request: HttpRequest, pk: int) -> FeeSchedule:
+def _get_fee_schedule(request: HttpRequest, pk: int, *, permission: str) -> FeeSchedule:
     fs = _service().fee_schedule(pk)
     if fs is None:
         raise NotFoundException(code="not_found")
     cohort = fs.cohort
     if cohort is not None:
-        assert_branch_id_in_scope(request, cohort.branch_id)
+        assert_permission_membership_scope(
+            request,
+            permission=permission,
+            branch_id=cohort.branch_id,
+            department_id=cohort.department_id,
+            account_kinds={"staff"},
+        )
     return fs
 
 
@@ -238,17 +261,19 @@ def _get_fee_schedule(request: HttpRequest, pk: int) -> FeeSchedule:
 def fee_schedule_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method in ("GET", "HEAD"):
         check_perm(request, "finance:read")
-        return success(fee_schedule_to_dict(_get_fee_schedule(request, pk)))
+        return success(fee_schedule_to_dict(_get_fee_schedule(request, pk, permission="finance:read")))
     if request.method in ("PUT", "PATCH"):
         check_perm(request, "finance:write")
-        fs = _get_fee_schedule(request, pk)
+        fs = _get_fee_schedule(request, pk, permission="finance:write")
         # PUT requires the required fields; PATCH is partial.
         changes = _fee_data(request, require_required=(request.method == "PUT"))
         fs = _service().update_fee_schedule(fee_schedule=fs, changes=changes)
         return success(fee_schedule_to_dict(fs))
     if request.method == "DELETE":
         check_perm(request, "finance:write")
-        _service().delete_fee_schedule(fee_schedule=_get_fee_schedule(request, pk))
+        _service().delete_fee_schedule(
+            fee_schedule=_get_fee_schedule(request, pk, permission="finance:write")
+        )
         return no_content()
     return _method_not_allowed()
 
@@ -306,16 +331,30 @@ def invoices_collection_view(request: HttpRequest) -> HttpResponse:
         if student_id is not None:
             from apps.students.models import StudentProfile
 
-            student_branch = (
-                StudentProfile.objects.filter(pk=student_id).values_list("branch_id", flat=True).first()
+            student_scope = (
+                StudentProfile.objects.filter(pk=student_id)
+                .values_list("branch_id", "current_cohort__department_id")
+                .first()
             )
-            if student_branch is not None:
-                assert_branch_id_in_scope(request, student_branch)
+            if student_scope is not None:
+                assert_permission_membership_scope(
+                    request,
+                    permission="finance:write",
+                    branch_id=student_scope[0],
+                    department_id=student_scope[1],
+                    account_kinds={"staff"},
+                )
         if fee_schedule_id is not None:
             schedule = FeeSchedule.objects.select_related("cohort").filter(pk=fee_schedule_id).first()
             schedule_cohort = schedule.cohort if schedule is not None else None
             if schedule_cohort is not None:
-                assert_branch_id_in_scope(request, schedule_cohort.branch_id)
+                assert_permission_membership_scope(
+                    request,
+                    permission="finance:write",
+                    branch_id=schedule_cohort.branch_id,
+                    department_id=schedule_cohort.department_id,
+                    account_kinds={"staff"},
+                )
         period = str_field(data, "period", max_length=16)
         invoice = _service().issue_invoice(
             student_id=student_id,  # type: ignore[arg-type]
@@ -329,10 +368,18 @@ def invoices_collection_view(request: HttpRequest) -> HttpResponse:
     return _method_not_allowed()
 
 
-def _get_invoice(request: HttpRequest, pk: int):
+def _get_invoice(request: HttpRequest, pk: int, *, permission: str = "finance:read"):
     inv = _service().invoice(pk=pk, user=request.user, roles=_roles(request))
     if inv is None:
         raise NotFoundException(code="not_found")
+    if permission != "finance:read":
+        assert_permission_membership_scope(
+            request,
+            permission=permission,
+            branch_id=inv.student.branch_id,
+            department_id=_student_department_id(inv.student),
+            account_kinds={"staff"},
+        )
     return inv
 
 
@@ -351,7 +398,7 @@ def invoice_void_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method != "POST":
         return _method_not_allowed()
     check_perm(request, "finance:write")
-    invoice = _get_invoice(request, pk)
+    invoice = _get_invoice(request, pk, permission="finance:write")
     _service().void_invoice(invoice=invoice, actor=request.user)
     fresh = _service().reload_invoice(pk=invoice.pk, user=request.user, roles=_roles(request))
     return success(invoice_to_dict(fresh or invoice))
@@ -391,7 +438,7 @@ def invoice_payment_plan_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method != "POST":
         return _method_not_allowed()
     check_perm(request, "finance:write")
-    invoice = _get_invoice(request, pk)
+    invoice = _get_invoice(request, pk, permission="finance:write")
     plan = _service().create_payment_plan(
         invoice=invoice, installments=_installments(read_json(request)), created_by=request.user
     )
@@ -408,7 +455,14 @@ def discounts_collection_view(request: HttpRequest) -> HttpResponse:
         check_perm(request, "finance:read")
         qs = apply_filters(
             request,
-            scope_to_branches(request, _service().discounts(), field="student__branch_id"),
+            scope_to_permission_memberships(
+                request,
+                _service().discounts(),
+                permission="finance:read",
+                branch_field="student__branch_id",
+                department_field="student__current_cohort__department_id",
+                account_kinds={"staff"},
+            ),
             filter_fields=("student", "discount_type", "is_active"),
             ordering_fields=("created_at",),
             default_ordering="-created_at",
@@ -434,7 +488,13 @@ def discount_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
     d = _service().discount(pk)
     if d is None:
         raise NotFoundException(code="not_found")
-    assert_branch_id_in_scope(request, d.student.branch_id)
+    assert_permission_membership_scope(
+        request,
+        permission="finance:read",
+        branch_id=d.student.branch_id,
+        department_id=_student_department_id(d.student),
+        account_kinds={"staff"},
+    )
     return success(discount_to_dict(d))
 
 
@@ -447,7 +507,13 @@ def discount_deactivate_view(request: HttpRequest, pk: int) -> HttpResponse:
     d = _service().discount(pk)
     if d is None:
         raise NotFoundException(code="not_found")
-    assert_branch_id_in_scope(request, d.student.branch_id)
+    assert_permission_membership_scope(
+        request,
+        permission="finance:write",
+        branch_id=d.student.branch_id,
+        department_id=_student_department_id(d.student),
+        account_kinds={"staff"},
+    )
     d = _service().deactivate_discount(discount=d)
     return success(discount_to_dict(d))
 
@@ -548,7 +614,13 @@ def expenses_collection_view(request: HttpRequest) -> HttpResponse:
         check_perm(request, "finance:read")
         qs = apply_filters(
             request,
-            scope_to_branches(request, _service().expenses()),
+            scope_to_permission_memberships(
+                request,
+                _service().expenses(),
+                permission="finance:read",
+                branch_field="branch_id",
+                account_kinds={"staff"},
+            ),
             filter_fields=("status", "branch", "category"),
             ordering_fields=("created_at", "amount_uzs"),
             default_ordering="-created_at",
@@ -561,7 +633,13 @@ def expenses_collection_view(request: HttpRequest) -> HttpResponse:
         branch = Branch.objects.filter(pk=_int_required(data, "branch"), archived_at__isnull=True).first()
         if branch is None:
             raise _reject("branch", "Invalid branch.")
-        assert_branch_id_in_scope(request, branch.pk)
+        assert_permission_membership_scope(
+            request,
+            permission="approvals:write",
+            branch_id=branch.pk,
+            enforce_department=False,
+            account_kinds={"staff", "teacher"},
+        )
         expense = _service().create_expense(
             branch=branch,
             description=_str_required(_require(data, "description"), "description", max_length=255),
@@ -573,11 +651,17 @@ def expenses_collection_view(request: HttpRequest) -> HttpResponse:
     return _method_not_allowed()
 
 
-def _get_expense(request: HttpRequest, pk: int):
+def _get_expense(request: HttpRequest, pk: int, *, permission: str):
     e = _service().expense(pk)
     if e is None:
         raise NotFoundException(code="not_found")
-    assert_in_branch_scope(request, e)
+    assert_permission_membership_scope(
+        request,
+        permission=permission,
+        branch_id=e.branch_id,
+        enforce_department=False,
+        account_kinds={"staff"},
+    )
     return e
 
 
@@ -587,7 +671,7 @@ def expense_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method not in ("GET", "HEAD"):
         return _method_not_allowed()
     check_perm(request, "finance:read")
-    return success(expense_to_dict(_get_expense(request, pk)))
+    return success(expense_to_dict(_get_expense(request, pk, permission="finance:read")))
 
 
 @csrf_exempt
@@ -596,7 +680,10 @@ def expense_approve_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method != "POST":
         return _method_not_allowed()
     check_perm(request, "approvals:approve")
-    expense = _service().approve_expense(expense_id=_get_expense(request, pk).pk, actor=request.user)
+    expense = _service().approve_expense(
+        expense_id=_get_expense(request, pk, permission="approvals:approve").pk,
+        actor=request.user,
+    )
     return success(expense_to_dict(expense))
 
 
@@ -606,7 +693,7 @@ def expense_reject_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method != "POST":
         return _method_not_allowed()
     check_perm(request, "approvals:approve")
-    expense = _get_expense(request, pk)
+    expense = _get_expense(request, pk, permission="approvals:approve")
     reason = str_field(read_json(request), "reason", max_length=255)
     expense = _service().reject_expense(expense_id=expense.pk, reason=reason, actor=request.user)
     return success(expense_to_dict(expense))
@@ -618,7 +705,7 @@ def expense_pay_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method != "POST":
         return _method_not_allowed()
     check_perm(request, "approvals:disburse")
-    expense = _get_expense(request, pk)
+    expense = _get_expense(request, pk, permission="approvals:disburse")
     pm_id = int_field(read_json(request), "payment_method", required=True)
     expense = _service().pay_expense(expense_id=expense.pk, payment_method_id=pm_id, actor=request.user)  # type: ignore[arg-type]
     return success(expense_to_dict(expense))
@@ -627,11 +714,18 @@ def expense_pay_view(request: HttpRequest, pk: int) -> HttpResponse:
 # --- refunds ---------------------------------------------------------------
 
 
-def _get_refund(request: HttpRequest, pk: int):
+def _get_refund(request: HttpRequest, pk: int, *, permission: str):
     refund = _service().refund(pk)
     if refund is None:
         raise NotFoundException(code="not_found")
-    assert_branch_id_in_scope(request, refund.invoice.student.branch_id)
+    student = refund.invoice.student
+    assert_permission_membership_scope(
+        request,
+        permission=permission,
+        branch_id=student.branch_id,
+        department_id=_student_department_id(student),
+        account_kinds={"staff"},
+    )
     return refund
 
 
@@ -641,10 +735,13 @@ def refunds_collection_view(request: HttpRequest) -> HttpResponse:
     if request.method not in ("GET", "HEAD"):
         return _method_not_allowed()
     check_perm(request, "finance:read")
-    qs = scope_to_branches(
+    qs = scope_to_permission_memberships(
         request,
         _service().refunds(),
-        field="invoice__student__branch_id",
+        permission="finance:read",
+        branch_field="invoice__student__branch_id",
+        department_field="invoice__student__current_cohort__department_id",
+        account_kinds={"staff"},
     )
     qs = apply_filters(
         request,
@@ -668,7 +765,7 @@ def refund_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method not in ("GET", "HEAD"):
         return _method_not_allowed()
     check_perm(request, "finance:read")
-    return success(refund_to_dict(_get_refund(request, pk)))
+    return success(refund_to_dict(_get_refund(request, pk, permission="finance:read")))
 
 
 @csrf_exempt
@@ -677,7 +774,7 @@ def refund_approve_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method != "POST":
         return _method_not_allowed()
     check_perm(request, "approvals:approve")
-    refund = _get_refund(request, pk)
+    refund = _get_refund(request, pk, permission="approvals:approve")
     refund = _service().approve_refund(refund_id=refund.pk, actor=request.user)
     return success(refund_to_dict(refund))
 
@@ -690,7 +787,13 @@ def refund_approve_view(request: HttpRequest, pk: int) -> HttpResponse:
 def cashier_shifts_collection_view(request: HttpRequest) -> HttpResponse:
     if request.method in ("GET", "HEAD"):
         check_perm(request, "finance:read")
-        shifts = scope_to_branches(request, _service().cashier_shifts())
+        shifts = scope_to_permission_memberships(
+            request,
+            _service().cashier_shifts(),
+            permission="finance:read",
+            branch_field="branch_id",
+            account_kinds={"staff"},
+        )
         roles = _roles(request)
         if Role.CASHIER in roles and not ({Role.DIRECTOR, Role.ACCOUNTANT} & roles):
             shifts = shifts.filter(cashier=request.user)
@@ -722,7 +825,13 @@ def cashier_shift_open_view(request: HttpRequest) -> HttpResponse:
     ).first()
     if branch is None:
         raise _reject("branch", "Invalid branch.")
-    assert_branch_id_in_scope(request, branch.pk)
+    assert_permission_membership_scope(
+        request,
+        permission="payments:write",
+        branch_id=branch.pk,
+        enforce_department=False,
+        account_kinds={"staff"},
+    )
     shift = _service().open_cashier_shift(
         cashier=request.user,
         branch=branch,
@@ -732,11 +841,17 @@ def cashier_shift_open_view(request: HttpRequest) -> HttpResponse:
     return created(cashier_shift_to_dict(shift))
 
 
-def _get_shift(request: HttpRequest, pk: int):
+def _get_shift(request: HttpRequest, pk: int, *, permission: str):
     s = _service().cashier_shift(pk)
     if s is None:
         raise NotFoundException(code="not_found")
-    assert_in_branch_scope(request, s)
+    assert_permission_membership_scope(
+        request,
+        permission=permission,
+        branch_id=s.branch_id,
+        enforce_department=False,
+        account_kinds={"staff"},
+    )
     roles = _roles(request)
     if (
         Role.CASHIER in roles
@@ -753,7 +868,7 @@ def cashier_shift_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method not in ("GET", "HEAD"):
         return _method_not_allowed()
     check_perm(request, "finance:read")
-    return success(cashier_shift_to_dict(_get_shift(request, pk)))
+    return success(cashier_shift_to_dict(_get_shift(request, pk, permission="finance:read")))
 
 
 @csrf_exempt
@@ -762,7 +877,7 @@ def cashier_shift_close_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method != "POST":
         return _method_not_allowed()
     check_perm(request, "payments:write")
-    shift = _get_shift(request, pk)
+    shift = _get_shift(request, pk, permission="payments:write")
     data = read_json(request)
     shift = _service().close_cashier_shift(
         shift=shift,
@@ -779,7 +894,7 @@ def cashier_shift_report_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method not in ("GET", "HEAD"):
         return _method_not_allowed()
     check_perm(request, "finance:read")
-    return success(_service().cashier_shift_report(shift=_get_shift(request, pk)))
+    return success(_service().cashier_shift_report(shift=_get_shift(request, pk, permission="finance:read")))
 
 
 # --- outstanding balance (parent-scoped) -----------------------------------
@@ -845,10 +960,20 @@ def statement_request_view(request: HttpRequest, student_id: int) -> HttpRespons
     check_perm(request, "finance:read")
     from apps.students.models import StudentProfile
 
-    student_branch = StudentProfile.objects.filter(pk=student_id).values_list("branch_id", flat=True).first()
-    if student_branch is None:
+    student_scope = (
+        StudentProfile.objects.filter(pk=student_id)
+        .values_list("branch_id", "current_cohort__department_id")
+        .first()
+    )
+    if student_scope is None:
         raise NotFoundException("Student not found.", code="student_not_found")
-    assert_branch_id_in_scope(request, student_branch)
+    assert_permission_membership_scope(
+        request,
+        permission="finance:read",
+        branch_id=student_scope[0],
+        department_id=student_scope[1],
+        account_kinds={"staff"},
+    )
     from core.ratelimit import check_rate
     from core.utils import current_schema
 

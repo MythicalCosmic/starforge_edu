@@ -136,10 +136,12 @@ async def test_notifications_bearer_subprotocol_is_echoed(tenant_a, user_in):
 @pytest.mark.channels
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_notifications_authed_joins_user_and_branch_groups(tenant_a, user_in):
-    """A connect joins {schema}.user.{id} AND {schema}.branch.{b} per active
-    membership — proven behaviorally: a group_send to each group is relayed to
-    the socket."""
+async def test_notifications_authed_joins_only_private_user_group(tenant_a, user_in):
+    """Notification sockets subscribe only to the recipient-specific group.
+
+    There is no branch notification producer; joining a broad branch group both
+    wastes a membership query/heartbeat work and creates a future privacy trap.
+    """
 
     @sync_to_async
     def _mint():
@@ -167,13 +169,12 @@ async def test_notifications_authed_joins_user_and_branch_groups(tenant_a, user_
     assert user_frame["type"] == "notification"
     assert user_frame["payload"]["id"] == 1
 
-    # Branch group reaches the socket too.
+    # A broad branch-group send must not reach this private notification feed.
     await _group_send(
         f"{tenant_a.schema_name}.branch.{branch_id}",
         {"type": "notification.message", "id": 2, "title": "b", "body": "b"},
     )
-    branch_frame = await comm.receive_json_from(timeout=5)
-    assert branch_frame["payload"]["id"] == 2
+    assert await comm.receive_nothing(timeout=0.3)
     await comm.disconnect()
 
 
@@ -620,13 +621,17 @@ def test_group_send_producer_uniqueness():
     + infrastructure/websocket/. dispatch is the single producer (TD-15)."""
     pattern = re.compile(r"from\s+infrastructure\.websocket\.channel_layer\s+import\s+group_send")
     offenders: list[str] = []
-    for py in REPO_ROOT.rglob("*.py"):
-        rel = py.relative_to(REPO_ROOT).as_posix()
-        if "/tests/" in rel or rel.startswith("tests/"):
-            continue
-        if rel.startswith("apps/notifications/") or rel.startswith("infrastructure/websocket/"):
-            continue
-        text = py.read_text(encoding="utf-8", errors="ignore")
-        if pattern.search(text):
-            offenders.append(rel)
+    # Restrict the static check to project source. REPO_ROOT.rglob also traverses
+    # .venv and tool caches, turning this tiny invariant into a multi-minute scan
+    # (and potentially inspecting unrelated installed packages).
+    for source_dir in ("apps", "celery_tasks", "config", "core", "infrastructure"):
+        for py in (REPO_ROOT / source_dir).rglob("*.py"):
+            rel = py.relative_to(REPO_ROOT).as_posix()
+            if "/tests/" in rel:
+                continue
+            if rel.startswith("apps/notifications/") or rel.startswith("infrastructure/websocket/"):
+                continue
+            text = py.read_text(encoding="utf-8", errors="ignore")
+            if pattern.search(text):
+                offenders.append(rel)
     assert offenders == [], f"group_send imported outside the producer scope: {offenders}"

@@ -255,6 +255,16 @@ def test_unknown_question_rejected(tenant_a, user_in, as_user):
     assert r.json()["code"] == "unknown_question"
 
 
+def test_boolean_question_id_is_not_accepted_as_integer(tenant_a, user_in, as_user):
+    s = _setup(tenant_a, user_in, as_user)
+    aid = _assign(s)
+    r = s["lead_c"].post(
+        f"{ATTEMPTS}{aid}/submit/", {"answers": [{"question": True, "response": "4"}]}, format="json"
+    )
+    assert r.status_code == 400
+    assert r.json()["code"] == "unknown_question"
+
+
 def test_another_lead_cannot_see_or_submit(tenant_a, user_in, as_user):
     from apps.students.models import StudentProfile
     from apps.students.tests.factories import StudentProfileFactory

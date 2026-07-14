@@ -76,6 +76,34 @@ def audit_log(
     Missing/anonymous actors are recorded as system events. AuditLog exists in
     both public and tenant schemas so platform mutations are never discarded.
     """
+    row = _build_audit_log(
+        actor=actor,
+        action=action,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        before=before,
+        after=after,
+        request=request,
+        ip=ip,
+        user_agent=user_agent,
+    )
+    row.save(force_insert=True)
+    return row
+
+
+def _build_audit_log(
+    *,
+    actor: Any = None,
+    action: str,
+    resource_type: str = "",
+    resource_id: str | int = "",
+    before: dict[str, Any] | None = None,
+    after: dict[str, Any] | None = None,
+    request: Request | None = None,
+    ip: str | None = None,
+    user_agent: str | None = None,
+) -> AuditLog:
+    """Build one unsaved, centrally masked audit row."""
     resolved_ip = ip
     resolved_ua = user_agent
     if request is not None:
@@ -83,8 +111,7 @@ def audit_log(
             resolved_ip = client_ip(request) or None
         if resolved_ua is None:
             resolved_ua = _user_agent(request)
-
-    return AuditLog.objects.create(
+    return AuditLog(
         actor=_actor_instance(actor),
         actor_repr=_actor_repr(actor),
         action=action,
@@ -172,3 +199,14 @@ def audit_log_on_commit(**kwargs: Any) -> None:
     the surrounding mutation commits.
     """
     transaction.on_commit(lambda: audit_log(**kwargs))
+
+
+def audit_logs_bulk_on_commit(entries: list[dict[str, Any]]) -> None:
+    """Insert many audit events in one query after their mutation commits."""
+    frozen_entries = [dict(entry) for entry in entries]
+
+    def write() -> None:
+        if frozen_entries:
+            AuditLog.objects.bulk_create([_build_audit_log(**entry) for entry in frozen_entries])
+
+    transaction.on_commit(write)

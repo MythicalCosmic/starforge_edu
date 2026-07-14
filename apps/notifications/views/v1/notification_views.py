@@ -149,7 +149,10 @@ def template_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
     if read:
         return success(template_to_dict(template))
     if request.method in ("PUT", "PATCH"):
-        result = _template_service().update(template, _template_changes(read_json(request)))
+        result = _template_service().update(
+            template,
+            _template_changes(read_json(request), partial=request.method == "PATCH"),
+        )
         return success(template_to_dict(result))
     if request.method == "DELETE":
         _template_service().delete(template)
@@ -166,19 +169,27 @@ def announcement_view(request: HttpRequest) -> HttpResponse:
     check_perm(request, f"{_RESOURCE}:write")
     actor: Any = request.user
     dto = _announcement_dto(read_json(request))
+    # Resolve the object before consuming the rate-limit budget. An unscoped
+    # writer must not receive a misleading 202/zero-recipient response for a
+    # cohort that does not exist.
+    from apps.cohorts.models import Cohort
+
+    cohort_branch_id = Cohort.objects.filter(pk=dto.cohort_id).values_list("branch_id", flat=True).first()
+    if cohort_branch_id is None:
+        raise ValidationException(
+            "cohort does not exist.",
+            code="validation_error",
+            fields={"cohort": ["Object does not exist."]},
+        )
     # Object-level scope: an announcement fans out to every member of the target cohort, so a
     # branch-scoped writer (if a center A-2-grants notifications:write to one, e.g. a registrar)
     # must not blast ANOTHER branch's cohort. Mirrors the achievements/cards/sales student-write
     # guards; a no-op for a director/superuser. A non-existent cohort resolves the same 403 as a
     # foreign one, so it is not a cohort-existence oracle across the branch boundary.
-    if not is_unscoped(request):
-        from apps.cohorts.models import Cohort
-
-        cohort_branch_id = Cohort.objects.filter(pk=dto.cohort_id).values_list("branch_id", flat=True).first()
-        if cohort_branch_id is None or cohort_branch_id not in branch_ids(request):
-            raise PermissionException(
-                "You can only announce to a cohort in your own branch.", code="branch_out_of_scope"
-            )
+    if not is_unscoped(request) and cohort_branch_id not in branch_ids(request):
+        raise PermissionException(
+            "You can only announce to a cohort in your own branch.", code="branch_out_of_scope"
+        )
     # Mass messaging is expensive (per-recipient fan-out); cap per (schema, user).
     check_rate(scope="announcement", key=f"{current_schema()}:{actor.pk}", limit=10, window=60)
     result = _service().announce(dto, actor=request.user)
@@ -234,31 +245,42 @@ def _template_dto(body: dict[str, Any]) -> CreateTemplateDTO:
         channel=_choice(body, "channel", _CHANNELS),
         locale=_choice(body, "locale", _LOCALES),
         body=template_body,
-        subject=str_field(body, "subject", max_length=255),
+        subject=_optional_string(body, "subject", default="", max_length=255),
         is_active=bool_field(body, "is_active", default=True),
     )
 
 
-def _template_changes(body: dict[str, Any]) -> dict[str, Any]:
+def _template_changes(body: dict[str, Any], *, partial: bool) -> dict[str, Any]:
     changes: dict[str, Any] = {}
-    if "event_type" in body:
+    if not partial or "event_type" in body:
         changes["event_type"] = _choice(body, "event_type", _EVENT_TYPES)
-    if "channel" in body:
+    if not partial or "channel" in body:
         changes["channel"] = _choice(body, "channel", _CHANNELS)
-    if "locale" in body:
+    if not partial or "locale" in body:
         changes["locale"] = _choice(body, "locale", _LOCALES)
-    if "subject" in body:
-        changes["subject"] = str_field(body, "subject", max_length=255)
-    if "body" in body:
+    if not partial or "subject" in body:
+        changes["subject"] = _optional_string(body, "subject", default="", max_length=255)
+    if not partial or "body" in body:
         template_body = str_field(body, "body").strip()
         if not template_body:
             raise ValidationException(
                 "body may not be blank.", code="validation_error", fields={"body": ["May not be blank."]}
             )
         changes["body"] = template_body
-    if "is_active" in body:
-        changes["is_active"] = bool_field(body, "is_active")
+    if not partial or "is_active" in body:
+        changes["is_active"] = bool_field(body, "is_active", default=True)
     return changes
+
+
+def _optional_string(body: dict[str, Any], name: str, *, default: str, max_length: int) -> str:
+    """Optional string that still rejects explicit JSON null."""
+    if name in body and body[name] is None:
+        raise ValidationException(
+            f"{name} may not be null.",
+            code="validation_error",
+            fields={name: ["May not be null."]},
+        )
+    return str_field(body, name, default=default, max_length=max_length)
 
 
 def _announcement_dto(body: dict[str, Any]) -> AnnouncementDTO:

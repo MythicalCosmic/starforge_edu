@@ -212,6 +212,11 @@ def submit_response(*, form: Form, respondent, answers: list[dict]) -> FormRespo
     """Validate and persist a response. `answers` is `[{"field": <id>, "value": <v>}]`.
     Anonymous forms drop the respondent; non-anonymous single-response forms reject
     a second submission from the same person."""
+    # Serialize submission against close/publish and field edits. The caller's
+    # form instance may have been fetched before a concurrent close; re-reading
+    # under the same row lock used by every lifecycle mutation prevents a stale
+    # published instance from accepting a response after close commits.
+    form = _locked_form(form)
     now = timezone.now()
     if form.status != Form.Status.PUBLISHED:
         raise UnprocessableEntity(_("This form is not open for responses."), code="form_not_open")

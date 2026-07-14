@@ -418,3 +418,204 @@ def test_published_and_closed_forms_cannot_be_deleted(tenant_a, as_role):
     # closing it doesn't make it deletable either
     director.post(f"{FORMS}{fid}/close/", {}, format="json")
     assert director.delete(f"{FORMS}{fid}/").status_code == 422
+
+
+def test_branch_builder_can_answer_but_not_manage_centre_wide_form(tenant_a, user_in, as_user, as_role):
+    from apps.org.tests.factories import BranchFactory
+
+    director, _ = as_role(Role.DIRECTOR)
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+    teacher = as_user(tenant_a, user_in(tenant_a, roles=[Role.TEACHER], branch=branch))
+    fid, (choice, rating, _text) = _build_published_form(director)
+
+    assert fid in {row["id"] for row in _rows(teacher.get(FORMS).json())}
+    submitted = teacher.post(
+        f"{FORMS}{fid}/submit/",
+        {
+            "answers": [
+                {"field": choice, "value": "yes"},
+                {"field": rating, "value": 4},
+            ]
+        },
+        format="json",
+    )
+    assert submitted.status_code == 201, submitted.content
+
+    # forms:write does not turn centre-wide read access into response/lifecycle
+    # management for a branch-scoped builder.
+    assert teacher.get(f"{FORMS}{fid}/responses/").status_code == 404
+    assert teacher.get(f"{FORMS}{fid}/summary/").status_code == 404
+    assert teacher.patch(f"{FORMS}{fid}/", {"title": "hijack"}, format="json").status_code == 404
+    assert teacher.post(f"{FORMS}{fid}/close/", {}, format="json").status_code == 404
+
+
+def test_form_put_is_full_replacement_while_patch_is_sparse(tenant_a, as_role):
+    director, _ = as_role(Role.DIRECTOR)
+    created = director.post(
+        FORMS,
+        {
+            "title": "Original",
+            "description": "Keep me",
+            "is_anonymous": True,
+            "allow_multiple": True,
+            "audience_roles": [Role.TEACHER],
+            "audience_user_ids": [7],
+        },
+        format="json",
+    ).json()["data"]
+    url = f"{FORMS}{created['id']}/"
+
+    patched = director.patch(url, {"title": "Patched"}, format="json")
+    assert patched.status_code == 200
+    assert patched.json()["data"]["description"] == "Keep me"
+    assert patched.json()["data"]["is_anonymous"] is True
+
+    replaced = director.put(url, {"title": "Replacement"}, format="json")
+    assert replaced.status_code == 200, replaced.content
+    data = replaced.json()["data"]
+    assert data["description"] == ""
+    assert data["is_anonymous"] is False
+    assert data["allow_multiple"] is False
+    assert data["audience_roles"] == []
+    assert data["audience_user_ids"] == []
+    assert data["opens_at"] is None
+    assert data["closes_at"] is None
+    assert director.put(url, {"description": "missing title"}, format="json").status_code == 400
+    assert director.patch(url, {"description": None}, format="json").status_code == 400
+
+
+def test_form_boolean_parsing_is_strict(tenant_a, as_role):
+    director, _ = as_role(Role.DIRECTOR)
+    accepted = director.post(
+        FORMS,
+        {"title": "Strict bool", "is_anonymous": "on", "allow_multiple": "false"},
+        format="json",
+    )
+    assert accepted.status_code == 201
+    assert accepted.json()["data"]["is_anonymous"] is True
+    assert accepted.json()["data"]["allow_multiple"] is False
+    assert director.post(FORMS, {"title": "Typo", "is_anonymous": "treu"}, format="json").status_code == 400
+    assert director.post(FORMS, {"title": "Null", "is_anonymous": None}, format="json").status_code == 400
+
+
+def test_form_collection_detail_filters_pagination_ordering_and_head(tenant_a, as_role):
+    director, _ = as_role(Role.DIRECTOR)
+    alpha = director.post(FORMS, {"title": "Alpha", "is_anonymous": True}, format="json").json()["data"]
+    director.post(FORMS, {"title": "Beta"}, format="json")
+
+    filtered = director.get(
+        f"{FORMS}?status=draft&is_anonymous=true&search=Alpha&ordering=title&page=1&page_size=1"
+    )
+    assert filtered.status_code == 200
+    assert [row["id"] for row in filtered.json()["data"]] == [alpha["id"]]
+    assert director.get(f"{FORMS}?ordering=--created_at").status_code == 200
+    detail = director.get(f"{FORMS}{alpha['id']}/")
+    assert detail.status_code == 200
+    assert detail.json()["data"]["title"] == "Alpha"
+    assert director.head(FORMS).status_code == 200
+    assert director.head(f"{FORMS}{alpha['id']}/").status_code == 200
+
+    field = director.post(
+        f"{FORMS}{alpha['id']}/fields/",
+        {"label": "Question", "field_type": "text"},
+        format="json",
+    )
+    assert field.status_code == 201
+    director.post(f"{FORMS}{alpha['id']}/publish/", {}, format="json")
+    assert director.head(f"{FORMS}{alpha['id']}/responses/").status_code == 200
+    assert director.head(f"{FORMS}{alpha['id']}/summary/").status_code == 200
+
+
+def test_field_validation_rejects_blank_junk_options_and_negative_order(tenant_a, as_role):
+    director, _ = as_role(Role.DIRECTOR)
+    fid = director.post(FORMS, {"title": "Fields"}, format="json").json()["data"]["id"]
+    url = f"{FORMS}{fid}/fields/"
+    assert director.post(url, {"label": "   ", "field_type": "text"}, format="json").status_code == 400
+    assert (
+        director.post(
+            url,
+            {"label": "Text", "field_type": "text", "options": ["junk"]},
+            format="json",
+        ).status_code
+        == 400
+    )
+    assert (
+        director.post(
+            url,
+            {"label": "Ordered", "field_type": "text", "order": -1},
+            format="json",
+        ).status_code
+        == 400
+    )
+
+
+def test_archived_membership_branch_cannot_auto_create_centre_wide_form(tenant_a, user_in, as_user):
+    from apps.org.tests.factories import BranchFactory
+
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        teacher_user = user_in(tenant_a, roles=[Role.TEACHER], branch=branch)
+        branch.archived_at = timezone.now()
+        branch.save(update_fields=["archived_at"])
+    teacher = as_user(tenant_a, teacher_user)
+
+    response = teacher.post(FORMS, {"title": "Must stay scoped"}, format="json")
+    assert response.status_code == 400
+    assert response.json()["code"] == "branch_required"
+
+
+def test_stale_form_instances_cannot_mutate_or_submit_after_lifecycle_change(tenant_a, as_role):
+    from apps.forms.models import Form
+    from apps.forms.services import close_form, publish_form, submit_response, update_form
+    from core.exceptions import UnprocessableEntity
+
+    director, director_user = as_role(Role.DIRECTOR)
+    fid = director.post(FORMS, {"title": "Racy"}, format="json").json()["data"]["id"]
+    director.post(
+        f"{FORMS}{fid}/fields/",
+        {"label": "Question", "field_type": "text"},
+        format="json",
+    )
+    with schema_context(tenant_a.schema_name):
+        stale_draft = Form.objects.get(pk=fid)
+        publish_form(form=Form.objects.get(pk=fid))
+
+        with pytest.raises(UnprocessableEntity) as update_exc:
+            update_form(form=stale_draft, title="Stale overwrite")
+        assert update_exc.value.code == "form_not_draft"
+
+        stale_for_submit = Form.objects.get(pk=fid)
+        close_form(form=Form.objects.get(pk=fid))
+        with pytest.raises(UnprocessableEntity) as submit_exc:
+            submit_response(form=stale_for_submit, respondent=director_user, answers=[])
+        assert submit_exc.value.code == "form_not_open"
+
+
+def test_form_summary_query_count_does_not_scale_with_fields_or_answers(
+    tenant_a, django_assert_max_num_queries
+):
+    from apps.forms.models import Form, FormAnswer, FormField, FormResponse
+    from apps.forms.services import form_summary
+
+    with schema_context(tenant_a.schema_name):
+        form = Form.objects.create(title="Large summary", status=Form.Status.PUBLISHED)
+        fields = FormField.objects.bulk_create(
+            [
+                FormField(form=form, label=f"Rating {i}", field_type=FormField.FieldType.RATING, order=i)
+                for i in range(20)
+            ]
+        )
+        responses = FormResponse.objects.bulk_create([FormResponse(form=form) for _ in range(30)])
+        FormAnswer.objects.bulk_create(
+            [
+                FormAnswer(response=response, field=field, value=4)
+                for response in responses
+                for field in fields
+            ]
+        )
+
+        with django_assert_max_num_queries(3):
+            summary = form_summary(form)
+    assert summary["response_count"] == 30
+    assert len(summary["fields"]) == 20

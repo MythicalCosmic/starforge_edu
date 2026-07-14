@@ -19,10 +19,6 @@ from apps.tasks.interfaces.repositories import ITaskRepository
 from apps.tasks.interfaces.services import ITaskService
 from apps.tasks.models import Task
 from core.exceptions import PermissionException, ValidationException
-from core.permissions import Role
-
-# Who may be tasked: staff, i.e. everyone except students and parents.
-_TASKABLE_ROLES = tuple(r for r in Role.ALL if r not in (Role.STUDENT, Role.PARENT))
 
 
 def _assert_scope(is_unscoped: bool, branch, department, branch_ids: set[int]) -> None:
@@ -82,7 +78,7 @@ class TaskService(ITaskService):
         # Default a single-branch (non-superuser) creator to their own branch — matches
         # the old view's create() convenience.
         if branch is None and not is_superuser and len(branch_ids) == 1:
-            branch = self._branch_by_id(next(iter(branch_ids)))
+            branch = self._resolve_branch(next(iter(branch_ids)))
         _assert_scope(is_unscoped, branch, department, branch_ids)
         return create_task(
             title=data.title,
@@ -119,7 +115,7 @@ class TaskService(ITaskService):
             kwargs["department"] = department
         return assign_task(task=task, actor=actor, actor_roles=actor_roles, **kwargs)
 
-    def transition(self, task: Task, *, to_status: str, actor) -> Task:
+    def transition(self, task: Task, *, to_status: str, actor, can_transition_any: bool = False) -> Task:
         from apps.tasks.services import transition_task
 
         if to_status not in Task.Status.values:  # mirrors the old ChoiceField
@@ -128,7 +124,12 @@ class TaskService(ITaskService):
                 code="validation_error",
                 fields={"status": [f"Must be one of {', '.join(Task.Status.values)}."]},
             )
-        return transition_task(task=task, to_status=to_status, actor=actor)
+        return transition_task(
+            task=task,
+            to_status=to_status,
+            actor=actor,
+            can_transition_any=can_transition_any,
+        )
 
     def auto_assign(
         self,
@@ -154,16 +155,20 @@ class TaskService(ITaskService):
     def _resolve_assignee(assignee_id: int | None):
         if assignee_id is None:
             return None
+        from apps.access.models import AccountType
         from apps.users.models import User
+        from core.permissions import role_memberships_for_account_kinds
 
         # Only staff (an active staff RoleMembership in this centre) can be tasked — never
         # a student/parent, nor a membership-less user (mirrors the old serializer queryset).
+        staff_memberships = role_memberships_for_account_kinds(
+            (AccountType.AccountKind.STAFF, AccountType.AccountKind.TEACHER)
+        )
         assignee = (
             User.objects.filter(
                 pk=assignee_id,
                 is_active=True,
-                role_memberships__revoked_at__isnull=True,
-                role_memberships__role__in=_TASKABLE_ROLES,
+                role_memberships__in=staff_memberships,
             )
             .distinct()
             .first()
@@ -209,9 +214,3 @@ class TaskService(ITaskService):
                 _("Invalid branch."), code="validation_error", fields={"branch": ["Not found."]}
             )
         return branch
-
-    @staticmethod
-    def _branch_by_id(branch_id: int):
-        from apps.org.models import Branch
-
-        return Branch.objects.filter(pk=branch_id).first()

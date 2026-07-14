@@ -7,19 +7,18 @@ from decimal import Decimal
 from django.db.models import DecimalField, Q, QuerySet, Sum, Value
 from django.db.models.functions import Coalesce
 
+from apps.access.models import AccountType
 from apps.approvals.models import ApprovalRequest
 from apps.approvals.services import KIND_LOAN
 from apps.loans.interfaces.repositories import ILoanRepository
 from apps.loans.models import LoanRepayment
 from apps.org.models import Branch
 from apps.users.models import User
-from core.permissions import Role
+from core.permissions import role_memberships_for_account_kinds
 from core.repositories import BaseRepository
 
+
 # A staff loan goes to staff — never a student/parent (mirrors the old serializer).
-_STAFF_ROLES = tuple(r for r in Role.ALL if r not in (Role.STUDENT, Role.PARENT))
-
-
 class LoanRepository(BaseRepository[ApprovalRequest], ILoanRepository):
     model = ApprovalRequest
 
@@ -70,12 +69,14 @@ class LoanRepository(BaseRepository[ApprovalRequest], ILoanRepository):
         return Branch.objects.filter(pk=branch_id, archived_at__isnull=True).first()
 
     def get_staff_borrower(self, *, user_id: int) -> User | None:
+        staff_memberships = role_memberships_for_account_kinds(
+            (AccountType.AccountKind.STAFF, AccountType.AccountKind.TEACHER)
+        )
         return (
             User.objects.filter(
                 pk=user_id,
                 is_active=True,
-                role_memberships__revoked_at__isnull=True,
-                role_memberships__role__in=_STAFF_ROLES,
+                role_memberships__in=staff_memberships,
             )
             .distinct()
             .first()

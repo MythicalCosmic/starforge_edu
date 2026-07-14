@@ -44,7 +44,7 @@ urlpatterns = [
     # rooms
     path("rooms/", rooms_collection_view, name="rooms-collection"),
     path("rooms/<int:pk>/", room_detail_view, name="rooms-detail"),
-    # transfers (read-only audit)
+    # student branch transfers + scoped audit history
     path("transfers/", transfers_collection_view, name="transfers-collection"),
     path("transfers/<int:pk>/", transfer_detail_view, name="transfers-detail"),
 ]

@@ -25,7 +25,7 @@ from apps.reports.generators import get_generator
 from apps.reports.models import Report, ReportFormat, ReportRun, ReportSchedule
 from core.exceptions import ConflictException, PermissionException, ThrottledException, ValidationException
 from core.job_limits import lock_tenant_job_queue, release_job_execution, try_acquire_job_execution
-from core.permissions import Role
+from core.permissions import PermissionRoleSet, Role, _code_allowed, has_permission_code
 from core.utils import current_schema
 
 logger = logging.getLogger("starforge.reports")
@@ -55,11 +55,27 @@ _PARAMS_BY_REPORT: dict[str, set[str]] = {
 # tenant-wide access.  Keep them director-only until their source rows carry a
 # branch dimension.
 _DIRECTOR_ONLY_REPORTS = {"ai_usage", "storage_usage"}
+_REPORT_DOMAIN_PERMISSION = {
+    "enrollment": "students:read",
+    "attendance": "attendance:read",
+    "grades": "academics:read",
+    "finance": "finance:read",
+}
 
 
-def _active_branch_ids(user) -> set[int]:
+def _active_branch_ids(user, roles: set[str]) -> set[int]:
     if user is None:
         return set()
+    if isinstance(roles, PermissionRoleSet):
+        branch_ids: set[int] = set()
+        for membership in roles.membership_scopes:
+            if membership.is_legacy_fallback:
+                allowed = has_permission_code({membership.role}, "reports:write")
+            else:
+                allowed = _code_allowed(set(membership.grants), set(), "reports:write")
+            if allowed:
+                branch_ids.add(membership.branch_id)
+        return branch_ids
     return set(user.role_memberships.filter(revoked_at__isnull=True).values_list("branch_id", flat=True))
 
 
@@ -169,7 +185,7 @@ def _normalize_params(*, report_key: str, params: dict[str, Any], user, roles: s
         target_branch = cohort_branch
 
     full_scope = bool(getattr(user, "is_superuser", False) or Role.DIRECTOR in roles)
-    membership_branches = _active_branch_ids(user)
+    membership_branches = _active_branch_ids(user, roles)
     if not full_scope:
         if not membership_branches:
             raise PermissionException(code="report_forbidden")
@@ -224,7 +240,14 @@ def can_run_report(*, report: Report, roles: set[str], is_superuser: bool = Fals
     if report.key in _DIRECTOR_ONLY_REPORTS:
         return False
     allowed = set(report.allowed_roles or [])
-    return bool(roles & allowed)
+    legacy_roles = roles.fallback_roles if isinstance(roles, PermissionRoleSet) else roles
+    if legacy_roles & allowed:
+        return True
+    return bool(
+        isinstance(roles, PermissionRoleSet)
+        and has_permission_code(roles, "reports:write", {})
+        and has_permission_code(roles, _REPORT_DOMAIN_PERMISSION.get(report.key, "*:*"), {})
+    )
 
 
 def _admit_report_run(

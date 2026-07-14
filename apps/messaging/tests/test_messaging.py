@@ -3,7 +3,11 @@ student↔staff safeguarding, unread counts, and realtime notify."""
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
+from botocore.exceptions import ClientError
+from django.utils import timezone
 from django_tenants.utils import schema_context
 
 from core.permissions import Role
@@ -11,6 +15,7 @@ from core.permissions import Role
 pytestmark = pytest.mark.django_db
 
 THREADS = "/api/v1/messaging/threads/"
+UPLOAD = "/api/v1/messaging/attachments/upload-url/"
 
 
 def _rows(body):
@@ -22,6 +27,25 @@ def _rows(body):
         if "results" in body:
             return body["results"]
     return body
+
+
+def _attachment_key(client, monkeypatch, *, filename="photo.jpg", size=3, content_type="image/jpeg"):
+    monkeypatch.setattr(
+        "apps.messaging.services.presign_post_upload",
+        lambda key, **kwargs: {"url": "https://storage.invalid/upload", "fields": {"key": key}},
+    )
+    response = client.post(
+        UPLOAD,
+        {"filename": filename, "size_bytes": size, "content_type": content_type},
+        format="json",
+    )
+    assert response.status_code == 200, response.content
+    key = response.json()["data"]["key"]
+    monkeypatch.setattr(
+        "apps.messaging.services.head_object",
+        lambda stored_key: {"ContentLength": size, "ContentType": content_type},
+    )
+    return key
 
 
 def test_create_thread_and_exchange_messages(tenant_a, as_role):
@@ -190,18 +214,19 @@ def test_membershipless_participant_rejected(tenant_a, as_role):
     assert r.json()["code"] == "unknown_participant"
 
 
-def test_attachment_only_message_allowed(tenant_a, as_role):
+def test_attachment_only_message_allowed(tenant_a, as_role, monkeypatch):
     teacher_client, _t = as_role(Role.TEACHER)
     _sc, student = as_role(Role.STUDENT)
+    key = _attachment_key(teacher_client, monkeypatch)
     created = teacher_client.post(
         THREADS,
-        {"participant_ids": [student.id], "attachments": ["s3://uploads/photo.jpg"]},
+        {"participant_ids": [student.id], "attachments": [key]},
         format="json",
     )
     assert created.status_code == 201, created.content
     msgs = _rows(teacher_client.get(f"{THREADS}{created.json()['data']['id']}/messages/").json())
     assert len(msgs) == 1
-    assert msgs[0]["attachments"] == ["s3://uploads/photo.jpg"]
+    assert msgs[0]["attachments"] == [key]
     assert msgs[0]["body"] == ""
 
 
@@ -215,3 +240,192 @@ def test_unread_excludes_your_own_messages(tenant_a, as_role):
     student_client.post(f"{THREADS}{tid}/messages/", {"body": "my reply"}, format="json")
     rows = _rows(student_client.get(THREADS).json())
     assert next(t["unread_count"] for t in rows if t["id"] == tid) == 0  # own message isn't unread
+
+
+def test_attachment_grant_is_owner_bound_and_single_use(tenant_a, as_role, monkeypatch):
+    owner_client, _owner = as_role(Role.TEACHER)
+    other_client, other = as_role(Role.TEACHER)
+    key = _attachment_key(owner_client, monkeypatch)
+    tid = owner_client.post(
+        THREADS,
+        {"participant_ids": [other.id], "first_body": "shared thread"},
+        format="json",
+    ).json()["data"]["id"]
+
+    stolen = other_client.post(
+        f"{THREADS}{tid}/messages/",
+        {"attachments": [key]},
+        format="json",
+    )
+    assert stolen.status_code == 422
+    assert stolen.json()["code"] == "invalid_attachment_key"
+
+    sent = owner_client.post(
+        f"{THREADS}{tid}/messages/",
+        {"attachments": [f"  {key}  "]},
+        format="json",
+    )
+    assert sent.status_code == 201, sent.content
+    assert sent.json()["data"]["attachments"] == [key]
+
+    replay = owner_client.post(
+        f"{THREADS}{tid}/messages/",
+        {"attachments": [key]},
+        format="json",
+    )
+    assert replay.status_code == 422
+    assert replay.json()["code"] == "invalid_attachment_grant"
+
+
+def test_expired_attachment_grant_is_rejected(tenant_a, as_role, monkeypatch):
+    from apps.messaging.models import MessageAttachmentUploadGrant
+
+    teacher_client, _teacher = as_role(Role.TEACHER)
+    _student_client, student = as_role(Role.STUDENT)
+    key = _attachment_key(teacher_client, monkeypatch)
+    with schema_context(tenant_a.schema_name):
+        MessageAttachmentUploadGrant.objects.filter(key=key).update(
+            expires_at=timezone.now() - timedelta(seconds=1)
+        )
+
+    response = teacher_client.post(
+        THREADS,
+        {"participant_ids": [student.id], "attachments": [key]},
+        format="json",
+    )
+    assert response.status_code == 422
+    assert response.json()["code"] == "invalid_attachment_grant"
+
+
+@pytest.mark.parametrize(
+    ("metadata", "expected_code"),
+    [
+        ({"ContentLength": 4, "ContentType": "image/jpeg"}, "attachment_size_mismatch"),
+        ({"ContentLength": 3, "ContentType": "image/png"}, "attachment_type_mismatch"),
+    ],
+)
+def test_uploaded_attachment_metadata_must_match_grant(
+    tenant_a, as_role, monkeypatch, metadata, expected_code
+):
+    teacher_client, _teacher = as_role(Role.TEACHER)
+    _student_client, student = as_role(Role.STUDENT)
+    key = _attachment_key(teacher_client, monkeypatch)
+    monkeypatch.setattr("apps.messaging.services.head_object", lambda stored_key: metadata)
+
+    response = teacher_client.post(
+        THREADS,
+        {"participant_ids": [student.id], "attachments": [key]},
+        format="json",
+    )
+    assert response.status_code == 422
+    assert response.json()["code"] == expected_code
+
+
+def test_attachment_must_be_uploaded_before_message(tenant_a, as_role, monkeypatch):
+    teacher_client, _teacher = as_role(Role.TEACHER)
+    _student_client, student = as_role(Role.STUDENT)
+    key = _attachment_key(teacher_client, monkeypatch)
+
+    def missing(stored_key):
+        raise ClientError({"Error": {"Code": "NoSuchKey"}}, "HeadObject")
+
+    monkeypatch.setattr("apps.messaging.services.head_object", missing)
+    response = teacher_client.post(
+        THREADS,
+        {"participant_ids": [student.id], "attachments": [key]},
+        format="json",
+    )
+    assert response.status_code == 422
+    assert response.json()["code"] == "attachment_not_uploaded"
+
+
+def test_attachment_download_requires_thread_participation(tenant_a, as_role, monkeypatch):
+    teacher_client, _teacher = as_role(Role.TEACHER)
+    student_client, student = as_role(Role.STUDENT)
+    outsider_client, _outsider = as_role(Role.TEACHER)
+    key = _attachment_key(teacher_client, monkeypatch)
+    created = teacher_client.post(
+        THREADS,
+        {"participant_ids": [student.id], "attachments": [key]},
+        format="json",
+    )
+    tid = created.json()["data"]["id"]
+    monkeypatch.setattr(
+        "apps.messaging.services.presign_download",
+        lambda stored_key, **kwargs: f"https://storage.invalid/download/{stored_key}",
+    )
+    url = f"{THREADS}{tid}/attachments/download/"
+
+    participant = student_client.get(url, {"key": key})
+    assert participant.status_code == 200
+    assert participant.json()["data"]["url"].endswith(key)
+    assert student_client.head(url, {"key": key}).status_code == 200
+    assert outsider_client.get(url, {"key": key}).status_code == 404
+
+
+def test_attachment_null_and_excess_are_clean_400s(tenant_a, as_role):
+    teacher_client, _teacher = as_role(Role.TEACHER)
+    _student_client, student = as_role(Role.STUDENT)
+    assert (
+        teacher_client.post(
+            THREADS,
+            {"participant_ids": [student.id], "first_body": "x", "attachments": None},
+            format="json",
+        ).status_code
+        == 400
+    )
+    assert (
+        teacher_client.post(
+            THREADS,
+            {"participant_ids": [student.id], "attachments": [f"key-{i}" for i in range(11)]},
+            format="json",
+        ).status_code
+        == 400
+    )
+
+
+def test_thread_detail_pagination_ordering_and_head(tenant_a, as_role):
+    teacher_client, _teacher = as_role(Role.TEACHER)
+    _student_client, student = as_role(Role.STUDENT)
+    created = teacher_client.post(
+        THREADS,
+        {"subject": "  Homework  ", "participant_ids": [student.id], "first_body": "  first  "},
+        format="json",
+    )
+    assert created.status_code == 201, created.content
+    data = created.json()["data"]
+    tid = data["id"]
+    assert data["subject"] == "Homework"
+    assert data["last_message_at"] is not None
+    teacher_client.post(f"{THREADS}{tid}/messages/", {"body": "second"}, format="json")
+
+    detail = teacher_client.get(f"{THREADS}{tid}/")
+    assert detail.status_code == 200
+    assert detail.json()["data"]["id"] == tid
+    page = teacher_client.get(f"{THREADS}{tid}/messages/?page=2&page_size=1")
+    assert page.status_code == 200
+    assert [row["body"] for row in page.json()["data"]] == ["second"]
+    assert teacher_client.get(f"{THREADS}?ordering=-created_at&page_size=1").status_code == 200
+    # Invalid ordering syntax is ignored like DRF's OrderingFilter; critically it
+    # remains a clean response instead of reaching ORM order_by("--field") as a 500.
+    assert teacher_client.get(f"{THREADS}?ordering=--created_at").status_code == 200
+    assert teacher_client.head(THREADS).status_code == 200
+    assert teacher_client.head(f"{THREADS}{tid}/").status_code == 200
+    assert teacher_client.head(f"{THREADS}{tid}/messages/").status_code == 200
+
+
+def test_thread_create_role_lookup_query_count_is_bounded(tenant_a, user_in, django_assert_max_num_queries):
+    from apps.messaging.services import create_thread
+    from apps.users.tests.factories import RoleMembershipFactory, UserFactory
+
+    creator = user_in(tenant_a, roles=[Role.TEACHER])
+    with schema_context(tenant_a.schema_name):
+        participants = []
+        for _ in range(40):
+            participant = UserFactory()
+            RoleMembershipFactory(user=participant, role=Role.TEACHER)
+            participants.append(participant)
+
+        with django_assert_max_num_queries(6):
+            thread = create_thread(creator=creator, participants=participants)
+        assert thread.participants.count() == 41

@@ -16,7 +16,7 @@ from django_tenants.utils import schema_context
 
 from apps.attendance.models import AttendanceRecord
 from apps.attendance.services import auto_mark_absent, mark_attendance
-from apps.attendance.signals import student_marked_absent
+from apps.attendance.signals import student_marked_absent, student_marked_late
 from apps.attendance.tests.factories import AttendanceRecordFactory
 from apps.cohorts.tests.factories import CohortFactory, CohortMembershipFactory
 from apps.org.models import CenterSettings
@@ -115,6 +115,37 @@ def test_student_not_in_cohort_rejected(tenant_a, user_in):
         assert outsider.pk in (exc.value.fields or {})["students"]
 
 
+def test_future_lesson_cannot_be_pre_marked_service_or_api(tenant_a, user_in, as_user):
+    teacher_user = user_in(tenant_a, roles=["teacher"])
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        profile = TeacherProfileFactory(user=teacher_user, branch=branch)
+        lesson = _make_lesson(
+            branch=branch,
+            teacher=profile,
+            starts_at=timezone.now() + timedelta(hours=1),
+        )
+        (student,) = _enroll(lesson.cohort, branch=branch)
+
+        with pytest.raises(UnprocessableEntity) as exc:
+            mark_attendance(
+                lesson=lesson,
+                entries=[{"student": student, "status": Status.PRESENT}],
+                actor=teacher_user,
+            )
+        assert exc.value.code == "lesson_not_started"
+
+    response = as_user(tenant_a, teacher_user).post(
+        f"/api/v1/attendance/lessons/{lesson.pk}/mark/",
+        [{"student": student.pk, "status": Status.PRESENT}],
+        format="json",
+    )
+    assert response.status_code == 422
+    assert response.json()["code"] == "lesson_not_started"
+    with schema_context(tenant_a.schema_name):
+        assert not AttendanceRecord.objects.filter(lesson=lesson, student=student).exists()
+
+
 @pytest.mark.parametrize(
     ("minutes_late", "expected"),
     [(10, Status.PRESENT), (11, Status.LATE)],  # threshold default 10: == present, +1 = late
@@ -139,6 +170,41 @@ def test_late_threshold_boundary(tenant_a, user_in, minutes_late, expected):
             actor=teacher_user,
         )
         assert result["records"][0].status == expected
+
+
+def test_late_signal_emits_only_when_record_becomes_late(
+    tenant_a, user_in, django_capture_on_commit_callbacks
+):
+    teacher_user = user_in(tenant_a, roles=["teacher"])
+    seen: list[dict] = []
+
+    def capture(sender, **kwargs):
+        seen.append(kwargs)
+
+    student_marked_late.connect(capture, dispatch_uid="test.capture_late")
+    try:
+        with schema_context(tenant_a.schema_name):
+            branch = BranchFactory()
+            profile = TeacherProfileFactory(user=teacher_user, branch=branch)
+            starts_at = timezone.now() - timedelta(hours=1)
+            lesson = _make_lesson(branch=branch, teacher=profile, starts_at=starts_at)
+            (student,) = _enroll(lesson.cohort, branch=branch)
+            entry = {
+                "student": student,
+                "status": Status.PRESENT,
+                "arrived_at": starts_at + timedelta(minutes=11),
+            }
+
+            with django_capture_on_commit_callbacks(execute=True):
+                mark_attendance(lesson=lesson, entries=[entry], actor=teacher_user)
+            with django_capture_on_commit_callbacks(execute=True):
+                mark_attendance(lesson=lesson, entries=[entry], actor=teacher_user)
+    finally:
+        student_marked_late.disconnect(dispatch_uid="test.capture_late")
+
+    assert len(seen) == 1
+    assert seen[0]["student_id"] == student.pk
+    assert seen[0]["lesson_id"] == lesson.pk
 
 
 @pytest.mark.parametrize("submitted", [Status.EXCUSED, Status.ABSENT])

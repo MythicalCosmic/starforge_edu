@@ -14,6 +14,7 @@ from apps.notifications.models import (
     Channel,
     EventType,
     Notification,
+    NotificationTemplate,
 )
 from core.permissions import Role
 
@@ -152,7 +153,7 @@ def test_template_create_director_ok(tenant_a, as_role):
         TEMPLATES_URL,
         {
             "event_type": EventType.ATTENDANCE_LATE,
-            "channel": Channel.IN_APP,
+            "channel": Channel.SMS,
             "locale": "en",
             "subject": "Late",
             "body": "Late: $lesson_id",
@@ -176,6 +177,90 @@ def test_template_create_parent_denied(tenant_a, as_role):
 def test_template_list_director_ok(tenant_a, as_role):
     client, _ = as_role(Role.DIRECTOR, tenant_a)
     assert client.get(TEMPLATES_URL).status_code == 200
+
+
+def test_template_detail_patch_put_delete_and_head(tenant_a, as_role):
+    client, _ = as_role(Role.DIRECTOR, tenant_a)
+    with schema_context(tenant_a.schema_name):
+        template = NotificationTemplate.objects.create(
+            event_type=EventType.ATTENDANCE_LATE,
+            channel=Channel.SMS,
+            locale="en",
+            subject="Old subject",
+            body="Old body",
+            is_active=False,
+        )
+    url = f"{TEMPLATES_URL}{template.pk}/"
+
+    assert client.get(url).json()["data"]["body"] == "Old body"
+    assert client.head(url).status_code == 200
+    patched = client.patch(url, {"body": "Patched body"}, format="json")
+    assert patched.status_code == 200
+    assert patched.json()["data"]["subject"] == "Old subject"
+    assert patched.json()["data"]["is_active"] is False
+
+    # PUT is a full replacement: all required fields are present, while omitted
+    # optional fields return to their serializer defaults.
+    replaced = client.put(
+        url,
+        {
+            "event_type": EventType.ATTENDANCE_LATE,
+            "channel": Channel.SMS,
+            "locale": "en",
+            "body": "Replacement body",
+        },
+        format="json",
+    )
+    assert replaced.status_code == 200, replaced.content
+    assert replaced.json()["data"]["subject"] == ""
+    assert replaced.json()["data"]["is_active"] is True
+    assert client.delete(url).status_code == 204
+    assert client.get(url).status_code == 404
+
+
+def test_template_put_requires_full_body_and_nulls_are_rejected(tenant_a, as_role):
+    client, _ = as_role(Role.DIRECTOR, tenant_a)
+    assert (
+        client.post(
+            TEMPLATES_URL,
+            {
+                "event_type": EventType.ATTENDANCE_LATE,
+                "channel": Channel.SMS,
+                "locale": "ru",
+                "subject": None,
+                "body": "Body",
+            },
+            format="json",
+        ).status_code
+        == 400
+    )
+    with schema_context(tenant_a.schema_name):
+        template = NotificationTemplate.objects.create(
+            event_type=EventType.ATTENDANCE_LATE,
+            channel=Channel.SMS,
+            locale="en",
+            body="Old body",
+        )
+    url = f"{TEMPLATES_URL}{template.pk}/"
+
+    assert client.put(url, {"body": "Only body"}, format="json").status_code == 400
+    assert client.patch(url, {"subject": None}, format="json").status_code == 400
+    assert client.patch(url, {"body": None}, format="json").status_code == 400
+    assert client.patch(url, {"is_active": None}, format="json").status_code == 400
+    assert client.patch(url, {"is_active": "treu"}, format="json").status_code == 400
+
+
+def test_template_collection_filters_ordering_pagination_and_head(tenant_a, as_role):
+    client, _ = as_role(Role.DIRECTOR, tenant_a)
+    response = client.get(
+        f"{TEMPLATES_URL}?event_type={EventType.COVER_REQUESTED}"
+        f"&channel={Channel.IN_APP}&locale=en&page=1&page_size=1&ordering=locale"
+    )
+    assert response.status_code == 200
+    assert len(response.json()["data"]) == 1
+    assert response.json()["data"][0]["event_type"] == EventType.COVER_REQUESTED
+    assert client.get(f"{TEMPLATES_URL}?ordering=--event_type").status_code == 200
+    assert client.head(TEMPLATES_URL).status_code == 200
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +298,17 @@ def test_announce_blank_title_rejected(tenant_a, as_role):
     client, _ = as_role(Role.DIRECTOR, tenant_a)
     resp = client.post(ANNOUNCE_URL, {"cohort": 1, "title": "   ", "body": "   "}, format="json")
     assert resp.status_code == 400
+
+
+def test_announce_nonexistent_cohort_is_clean_400(tenant_a, as_role):
+    client, _ = as_role(Role.DIRECTOR, tenant_a)
+    response = client.post(
+        ANNOUNCE_URL,
+        {"cohort": 999_999_999, "title": "Notice", "body": "Please read"},
+        format="json",
+    )
+    assert response.status_code == 400
+    assert "cohort" in response.json()["errors"]
 
 
 def test_announce_branch_scoped_for_a2_granted_scoped_role(tenant_a, user_in, as_user):

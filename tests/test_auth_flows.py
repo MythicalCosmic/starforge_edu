@@ -93,7 +93,7 @@ def test_role_login_student_signs_in_as_their_role(tenant_a, client_for):
     me = authed.get(ME_URL)
     assert me.status_code == 200
     assert me.json()["data"]["id"] == student_id
-    assert me.json()["data"]["account_type"] == "student"
+    assert me.json()["data"]["principal_kind"] == "student"
 
 
 def test_role_login_wrong_password_401(tenant_a, client_for):
@@ -260,6 +260,37 @@ def test_password_reset_unknown_identifier_silent_202(tenant_a, client_for, sms_
     assert len(sms_outbox) == 0
 
 
+def test_password_reset_confirm_does_not_reveal_account_existence(
+    tenant_a,
+    client_for,
+    user_in,
+    sms_outbox,
+):
+    user = _password_user(tenant_a, user_in)
+    client = client_for(tenant_a)
+    client.post(RESET_REQUEST_URL, {"identifier": user.phone}, format="json")
+    issued_code = _code_from(sms_outbox[-1]["text"])
+    wrong_code = str((int(issued_code) + 1) % (10**settings.OTP_LENGTH)).zfill(settings.OTP_LENGTH)
+
+    known = client.post(
+        RESET_CONFIRM_URL,
+        {"identifier": user.phone, "code": wrong_code, "new_password": NEW_PASSWORD},
+        format="json",
+    )
+    unknown = client.post(
+        RESET_CONFIRM_URL,
+        {
+            "identifier": "+998905550099",
+            "code": wrong_code,
+            "new_password": NEW_PASSWORD,
+        },
+        format="json",
+    )
+
+    assert known.status_code == unknown.status_code == 400
+    assert known.json() == unknown.json()
+
+
 @override_settings(OTP_IDENTIFIER_RATE_LIMIT=2, OTP_IDENTIFIER_RATE_WINDOW_SECONDS=60)
 def test_password_reset_identifier_rate_limit_is_distributed(tenant_a, client_for):
     client = client_for(tenant_a)
@@ -326,8 +357,10 @@ def test_password_reset_wrong_code_5x_invalidates(tenant_a, client_for, user_in,
         {"identifier": user.phone, "code": code, "new_password": NEW_PASSWORD},
         format="json",
     )
-    assert resp.status_code == 429
-    assert resp.json()["code"] == "throttled"
+    # Confirm failures are deliberately indistinguishable from an unknown
+    # identifier; the endpoint's IP limiter still bounds brute-force traffic.
+    assert resp.status_code == 400
+    assert resp.json()["code"] == "validation_error"
 
 
 def test_reset_request_cooldown_silently_202_no_resend(tenant_a, client_for, user_in, sms_outbox):

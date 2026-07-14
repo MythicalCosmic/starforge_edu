@@ -15,7 +15,7 @@ from apps.cohorts.tests.factories import CohortFactory
 from apps.org.models import BranchHoliday
 from apps.org.tests.factories import BranchFactory, RoomFactory
 from apps.schedule import selectors, services
-from apps.schedule.models import Lesson
+from apps.schedule.models import Lesson, Term
 from apps.schedule.tests.factories import TermFactory
 from apps.teachers.tests.factories import TeacherProfileFactory
 from core.exceptions import ConflictException, ValidationException
@@ -102,6 +102,46 @@ def test_materialize_idempotent(tenant_a):
         second = set(rule.lessons.values_list("starts_at", flat=True))
         assert first == second
         assert rule.lessons.count() == 8
+
+
+@pytest.mark.parametrize(
+    ("rrule", "expected_code"),
+    [
+        ("FREQ=SECONDLY", "rrule_frequency_too_frequent"),
+        ("FREQ=DAILY;BYSECOND=0,1", "rrule_time_component_not_allowed"),
+        ("FREQ=DAILY\nRDATE:20990101T000000", "invalid_rrule"),
+    ],
+)
+def test_recurrence_rejects_resource_amplification(rrule, expected_code):
+    with pytest.raises(ValidationException) as exc:
+        services.validate_rrule(rrule, start_date=date(2030, 1, 1), start_time=time(9))
+    assert exc.value.code == expected_code
+
+
+def test_recurrence_occurrence_count_is_bounded(tenant_a):
+    with schema_context(tenant_a.schema_name):
+        ctx = _setup(term_end=_anchor_monday() + timedelta(days=1500))
+        with pytest.raises(ValidationException) as exc:
+            _make_rule(
+                ctx,
+                rrule="FREQ=DAILY",
+                end=ctx["anchor"] + timedelta(days=services.MAX_RULE_OCCURRENCES + 5),
+            )
+        assert exc.value.code == "rrule_too_many_occurrences"
+
+
+def test_daily_recurrence_materialization_has_bounded_query_count(tenant_a, django_assert_max_num_queries):
+    with schema_context(tenant_a.schema_name):
+        ctx = _setup()
+        # Constant overhead includes model full_clean constraint probes and cascade
+        # bookkeeping, but does not grow with the 91 occurrences.
+        with django_assert_max_num_queries(25):
+            rule = _make_rule(
+                ctx,
+                rrule="FREQ=DAILY",
+                end=ctx["anchor"] + timedelta(days=90),
+            )
+        assert rule.lessons.count() == 91
 
 
 def test_detached_lesson_survives_rematerialize(tenant_a):
@@ -212,6 +252,16 @@ def test_bulk_reschedule_atomic_rollback_on_conflict(tenant_a):
             services.bulk_reschedule(rule, shift_minutes=24 * 60)
         after = list(rule.lessons.order_by("starts_at").values_list("starts_at", flat=True))
         assert before == after  # nothing moved
+
+
+def test_bulk_reschedule_one_week_moves_sibling_slots_together(tenant_a):
+    """A batch shift excludes every sibling in the moving set from pre-checks."""
+    with schema_context(tenant_a.schema_name):
+        rule = _make_rule(_setup())
+        before = list(rule.lessons.order_by("starts_at").values_list("starts_at", flat=True))
+        assert services.bulk_reschedule(rule, shift_minutes=7 * 24 * 60) == len(before)
+        after = list(rule.lessons.order_by("starts_at").values_list("starts_at", flat=True))
+        assert after == [starts_at + timedelta(days=7) for starts_at in before]
 
 
 def test_bulk_reschedule_emits_one_rescheduled_per_moved_lesson(tenant_a, django_capture_on_commit_callbacks):
@@ -687,6 +737,72 @@ def test_ical_token_expired_rejected(tenant_a, user_in, monkeypatch):
 
 
 # --- API surface ---
+
+
+def test_switching_current_term_is_atomic_and_unique(tenant_a, as_role):
+    from core.permissions import Role
+
+    client, _ = as_role(Role.DIRECTOR)
+    with schema_context(tenant_a.schema_name):
+        first = Term.objects.create(
+            name="First current",
+            academic_year="2028-2029",
+            start_date=date(2028, 1, 1),
+            end_date=date(2028, 6, 1),
+            is_current=True,
+        )
+
+    created = client.post(
+        "/api/v1/schedule/terms/",
+        {
+            "name": "Second current",
+            "academic_year": "2029-2030",
+            "start_date": "2029-01-01",
+            "end_date": "2029-06-01",
+            "is_current": True,
+        },
+        format="json",
+    )
+    assert created.status_code == 201, created.content
+
+    with schema_context(tenant_a.schema_name):
+        first.refresh_from_db()
+        second = Term.objects.get(pk=created.json()["data"]["id"])
+        assert first.is_current is False
+        assert second.is_current is True
+        assert Term.objects.filter(is_current=True).count() == 1
+
+    patched = client.patch(
+        f"/api/v1/schedule/terms/{first.id}/",
+        {"is_current": True},
+        format="json",
+    )
+    assert patched.status_code == 200, patched.content
+    with schema_context(tenant_a.schema_name):
+        first.refresh_from_db()
+        second.refresh_from_db()
+        assert first.is_current is True
+        assert second.is_current is False
+        assert Term.objects.filter(is_current=True).count() == 1
+
+
+def test_database_rejects_two_current_terms(tenant_a):
+    with schema_context(tenant_a.schema_name):
+        Term.objects.create(
+            name="Current A",
+            academic_year="2031-2032",
+            start_date=date(2031, 1, 1),
+            end_date=date(2031, 6, 1),
+            is_current=True,
+        )
+        with pytest.raises(IntegrityError), transaction.atomic():
+            Term.objects.create(
+                name="Current B",
+                academic_year="2032-2033",
+                start_date=date(2032, 1, 1),
+                end_date=date(2032, 6, 1),
+                is_current=True,
+            )
 
 
 def test_rules_create_requires_write(tenant_a, as_role):

@@ -25,4 +25,9 @@ urlpatterns = [
         views.center_set_primary_domain_view,
         name="center-set-primary",
     ),
+    path(
+        "centers/<int:pk>/domains/<uuid:claim_id>/verify/",
+        views.center_verify_domain_view,
+        name="center-verify-domain",
+    ),
 ]

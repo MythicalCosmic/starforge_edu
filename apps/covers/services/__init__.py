@@ -65,10 +65,9 @@ def create_cover_request(*, lesson, requester, reason: str = "") -> CoverRequest
 def _recipients_with_perm(cover: CoverRequest, perm: str) -> list[int]:
     """Active users in the cover's branch whose role grants `perm` (the notification
     audience for that permission)."""
-    from apps.users.models import RoleMembership
-    from core.permissions import roles_with_permission
+    from core.permissions import role_memberships_with_permission
 
-    qs = RoleMembership.objects.filter(role__in=roles_with_permission(perm), revoked_at__isnull=True)
+    qs = role_memberships_with_permission(perm)
     if cover.branch_id:
         qs = qs.filter(branch_id=cover.branch_id)
     return list(qs.values_list("user_id", flat=True).distinct())
@@ -104,9 +103,8 @@ def _reassign_lesson(lesson, cover_teacher) -> None:
     from apps.schedule.models import Lesson
 
     # The lesson may have left SCHEDULED (cancelled/completed) between request and
-    # approval — re-check under the cover lock so we never rewrite history or a
-    # lesson the time-overlap constraint no longer protects. `lesson` is loaded
-    # fresh via the locked cover, so its status is current.
+    # approval — re-check under the lesson row lock so we never rewrite history or
+    # a lesson the time-overlap constraint no longer protects.
     if lesson.status != Lesson.Status.SCHEDULED:
         raise UnprocessableEntity(
             _("This lesson can no longer be covered."), code="cover_lesson_not_schedulable"
@@ -133,7 +131,12 @@ def _approve(cover: CoverRequest, *, cover_teacher, actor) -> CoverRequest:
             _("The cover teacher must belong to the lesson's branch."),
             code="cover_teacher_out_of_branch",
         )
-    _reassign_lesson(cover.lesson, cover_teacher)
+    # The cover row alone cannot serialize a concurrent lesson cancel/move. Lock and
+    # re-read the lesson itself before checking SCHEDULED and changing its teacher.
+    from apps.schedule.models import Lesson
+
+    lesson = Lesson.objects.select_for_update().get(pk=cover.lesson_id)
+    _reassign_lesson(lesson, cover_teacher)
     cover.cover_teacher = cover_teacher
     cover.status = CoverRequest.Status.APPROVED
     cover.decided_by = actor

@@ -12,7 +12,8 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
-from django.db.models import QuerySet
+from django.db import transaction
+from django.db.models import Q, QuerySet
 from django.utils.translation import gettext_lazy as _
 
 from apps.assignments.dto.assignment_dto import CreateAssignmentDTO
@@ -20,8 +21,8 @@ from apps.assignments.interfaces.repositories import IAssignmentRepository, ISub
 from apps.assignments.interfaces.services import IAssignmentService
 from apps.assignments.models import Assignment, Submission
 from core.exceptions import UnprocessableEntity, ValidationException
-from core.permissions import Role
-from core.scoping import role_membership_scope_q
+from core.permissions import PermissionRoleSet, Role
+from core.scoping import permission_membership_scope_q, role_membership_scope_q
 
 _DEFAULT_MAX_SCORE = Decimal("100")
 _MUTABLE = ("title", "description", "due_at", "attachments", "rubric", "max_score", "max_resubmits")
@@ -38,11 +39,16 @@ class AssignmentService(IAssignmentService):
     def get_visible(self, *, user, roles: set[str], pk: int) -> Assignment | None:
         return self._assignments.get_scoped(user=user, roles=roles, pk=pk)
 
+    @transaction.atomic
     def create(self, data: CreateAssignmentDTO, *, creator, user, roles: set[str]) -> Assignment:
         cohort = self._resolve_writable_cohort(data.cohort_id, user, roles)
         self._validate_rubric(data.rubric)
         max_score = data.max_score if data.max_score is not None else _DEFAULT_MAX_SCORE
+        self._validate_numeric_limits(max_score=max_score, max_resubmits=data.max_resubmits)
         self._assert_rubric_cap(data.rubric, max_score)
+        from apps.assignments.services import consume_assignment_attachments
+
+        consume_assignment_attachments(keys=data.attachments, actor=creator)
         fields: dict[str, Any] = {
             "cohort": cohort,
             "created_by": creator,
@@ -57,6 +63,7 @@ class AssignmentService(IAssignmentService):
             fields["max_score"] = data.max_score
         return Assignment.objects.create(**fields)
 
+    @transaction.atomic
     def update(self, assignment: Assignment, changes: dict[str, Any], *, user, roles: set[str]) -> Assignment:
         if "rubric" in changes:
             self._validate_rubric(changes["rubric"])
@@ -65,6 +72,19 @@ class AssignmentService(IAssignmentService):
         for field in _MUTABLE:
             if field in changes:
                 setattr(assignment, field, changes[field])
+        self._validate_numeric_limits(
+            max_score=assignment.max_score,
+            max_resubmits=assignment.max_resubmits,
+        )
+        if "attachments" in changes:
+            from apps.assignments.services import consume_assignment_attachments
+
+            existing = set(
+                Assignment.objects.filter(pk=assignment.pk).values_list("attachments", flat=True).get() or []
+            )
+            consume_assignment_attachments(keys=assignment.attachments, actor=None)
+            new_keys = [key for key in assignment.attachments if key not in existing]
+            consume_assignment_attachments(keys=new_keys, actor=user)
         # Re-check the sum-cap against the effective (possibly-updated) rubric + max_score.
         self._assert_rubric_cap(assignment.rubric or [], assignment.max_score)
         assignment.save()
@@ -77,6 +97,11 @@ class AssignmentService(IAssignmentService):
         from apps.assignments.services import publish_assignment
 
         return publish_assignment(assignment=assignment, actor=actor)
+
+    def close(self, assignment: Assignment, *, actor) -> Assignment:
+        from apps.assignments.services import close_assignment
+
+        return close_assignment(assignment=assignment, actor=actor)
 
     def submissions_of(self, assignment: Assignment, *, user, roles: set[str]) -> QuerySet[Submission]:
         return self._submissions.scoped(user=user, roles=roles).filter(assignment=assignment)
@@ -114,6 +139,21 @@ class AssignmentService(IAssignmentService):
 
         if getattr(user, "is_superuser", False) or (roles & STAFF_ROLES):
             cohort = Cohort.objects.filter(pk=cohort_id).first()
+        elif isinstance(roles, PermissionRoleSet):
+            cohort = (
+                Cohort.objects.filter(
+                    permission_membership_scope_q(
+                        roles=roles,
+                        permission="assignments:write",
+                        branch_field="branch_id",
+                        department_field="department_id",
+                        account_kinds={"staff"},
+                    )
+                    | (Q(pk__in=_cohorts_taught_by(user)) if Role.TEACHER in roles else Q(pk__in=[]))
+                )
+                .filter(pk=cohort_id)
+                .first()
+            )
         elif Role.HEAD_OF_DEPT in roles:
             cohort = (
                 Cohort.objects.filter(
@@ -183,4 +223,19 @@ class AssignmentService(IAssignmentService):
                 _("The rubric's total points exceed the assignment's max score."),
                 code="rubric_exceeds_max_score",
                 fields={"rubric": [f"Σ max_points {rubric_cap} > max_score {max_score}."]},
+            )
+
+    @staticmethod
+    def _validate_numeric_limits(*, max_score, max_resubmits) -> None:
+        if max_score is None or max_score <= 0:
+            raise ValidationException(
+                _("Invalid max score."),
+                code="validation_error",
+                fields={"max_score": ["Must be greater than zero."]},
+            )
+        if max_resubmits is not None and max_resubmits < 0:
+            raise ValidationException(
+                _("Invalid resubmission limit."),
+                code="validation_error",
+                fields={"max_resubmits": ["Must be greater than or equal to zero."]},
             )

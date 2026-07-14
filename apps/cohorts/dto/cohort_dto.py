@@ -47,7 +47,18 @@ class CohortRemoveDTO:
 
 @dataclass(frozen=True)
 class CohortTeacherDTO:
-    """Assign a co-teacher/assistant to a cohort (F4)."""
+    """Create a typed teacher assignment on a cohort."""
 
     teacher_id: int
-    role: str
+    teacher_type_id: int | None = None
+    legacy_role: str = ""
+
+
+@dataclass(frozen=True)
+class TeacherTypeCreateDTO:
+    name: str
+    slug: str
+    description: str = ""
+    is_active: bool = True
+    is_default: bool = False
+    sort_order: int = 100

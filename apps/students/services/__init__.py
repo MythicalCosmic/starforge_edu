@@ -15,8 +15,7 @@ from django.utils.translation import gettext_lazy as _
 from apps.org.selectors import get_center_settings
 from apps.org.services import validate_student_id_pattern
 from apps.students.models import EnrollmentEvent, StudentIdCounter, StudentProfile
-from apps.users.models import RoleMembership
-from apps.users.services import create_role_user_bridge, prepare_role_identity
+from apps.users.services import create_role_user_bridge, ensure_role_membership, prepare_role_identity
 from core.exceptions import ValidationException
 from core.permissions import Role
 from core.utils import current_schema
@@ -167,8 +166,8 @@ def create_student(
         )
         for from_status, to_status in itertools.pairwise(chain)
     )
-    RoleMembership.objects.get_or_create(
-        user=user,
+    ensure_role_membership(
+        student,
         branch=branch,
         department=None,
         role=Role.STUDENT,

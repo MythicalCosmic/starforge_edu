@@ -92,7 +92,7 @@ def check_perm(request: HttpRequest, *codes: str) -> None:
     if getattr(req.user, "is_superuser", False):
         return
     roles = get_user_roles(req)
-    overrides = _request_overrides(req)
+    overrides = _request_overrides(req) if roles.fallback_roles else {}
     if not any(has_permission_code(roles, code, overrides) for code in codes):
         raise PermissionException("You do not have permission to perform this action.", code="forbidden")
 

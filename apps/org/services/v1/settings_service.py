@@ -24,6 +24,7 @@ _WRITABLE = frozenset(
     {
         "open_registration",
         "require_group_acceptance",
+        "default_language",
         "grading_scheme",
         "honor_roll_min",
         "academic_warning_max",
@@ -51,6 +52,8 @@ _WRITABLE = frozenset(
         "placement_allowed_question_types",
         "penalty_escalation_threshold",
         "show_classroom_rank",
+        "absence_deduction_enabled",
+        "absence_deduction_excused_only",
         "placement_test_creation_mobile_only",
     }
 )

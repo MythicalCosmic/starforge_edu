@@ -28,7 +28,6 @@ Handler ``attendance_update`` relays the producer payload to the socket as
 from __future__ import annotations
 
 from channels.db import database_sync_to_async
-from django.db.models import Q
 from django_tenants.utils import schema_context
 
 from core.permissions import Role, has_permission_code
@@ -75,15 +74,9 @@ def _can_watch_cohort(*, schema: str, user_id: int, cohort_id: int) -> bool:
             department_id=cohort.department_id,
         ):
             return False
-        return (
-            Cohort.objects.filter(pk=cohort_id)
-            .filter(
-                Q(primary_teacher__user_id=user_id)
-                | Q(co_teachers__teacher__user_id=user_id)
-                | Q(lessons__teacher__user_id=user_id)
-            )
-            .exists()
-        )
+        from apps.cohorts.selectors import taught_cohorts
+
+        return taught_cohorts(user_id=user_id).filter(pk=cohort_id).exists()
 
 
 class AttendanceConsumer(HeartbeatConsumerMixin):

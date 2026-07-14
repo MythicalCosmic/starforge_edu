@@ -10,8 +10,12 @@ from django.db.models.functions import ExtractDay, ExtractMonth
 from django.utils import timezone
 
 from apps.students.models import EnrollmentEvent, StudentProfile
-from core.permissions import Role
-from core.scoping import role_membership_scope_q
+from core.permissions import PermissionRoleSet, Role
+from core.scoping import (
+    permission_membership_scope_q,
+    permission_membership_scopes,
+    role_membership_scope_q,
+)
 
 # What counts as "leaving" the center (for joined/left analytics).
 _LEFT_STATUSES = (StudentProfile.Status.WITHDRAWN, StudentProfile.Status.GRADUATED)
@@ -40,16 +44,42 @@ def scoped_students(*, user, roles: set[str] | None = None) -> QuerySet[StudentP
 
     visible = Q(pk__in=[])
     scoped_staff = roles & BRANCH_STAFF_ROLES
-    if scoped_staff:
+    if scoped_staff and not isinstance(roles, PermissionRoleSet):
         visible |= role_membership_scope_q(
             user=user,
             roles=scoped_staff,
             branch_field="branch_id",
             department_field="current_cohort__department_id",
         )
-    if Role.PARENT in roles:  # read_own_children
+    # Canonical custom account types do not need a hard-coded legacy role to
+    # become useful. Scope each grant to the exact membership that supplied it.
+    visible |= permission_membership_scope_q(
+        roles=roles,
+        permission="students:read",
+        branch_field="branch_id",
+        department_field="current_cohort__department_id",
+        account_kinds={"staff", "teacher"},
+    )
+    parent_reader = Role.PARENT in roles
+    student_reader = Role.STUDENT in roles
+    if isinstance(roles, PermissionRoleSet):
+        parent_reader = bool(
+            permission_membership_scopes(
+                roles=roles,
+                permission="students:read",
+                account_kinds={"parent"},
+            )
+        )
+        student_reader = bool(
+            permission_membership_scopes(
+                roles=roles,
+                permission="students:read",
+                account_kinds={"student"},
+            )
+        )
+    if parent_reader:  # read_own_children
         visible |= Q(guardians__parent__user=user)
-    if Role.STUDENT in roles:  # read_self
+    if student_reader:  # read_self
         visible |= Q(user=user)
     return qs.filter(visible).distinct()
 

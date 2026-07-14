@@ -174,3 +174,25 @@ def test_journey_orders_by_timestamp_not_source_order(tenant_a, as_role):
         EnrollmentEvent.objects.filter(student=student).update(created_at=timezone.now() + timedelta(days=1))
     events = director.get(_journey_url(student.id)).json()["data"]["events"]
     assert events[0]["type"] == "enrollment"  # newest by timestamp, despite source order
+
+
+def test_journey_is_capped_at_one_hundred_events_and_supports_head(tenant_a, as_role):
+    from apps.students.models import EnrollmentEvent
+    from apps.students.tests.factories import StudentProfileFactory
+
+    director, _ = as_role(Role.DIRECTOR)
+    branch = _branch(tenant_a)
+    with schema_context(tenant_a.schema_name):
+        student = StudentProfileFactory.create(branch=branch)
+        EnrollmentEvent.objects.bulk_create(
+            [
+                EnrollmentEvent(student=student, from_status="lead", to_status="active", note=str(i))
+                for i in range(101)
+            ]
+        )
+
+    url = _journey_url(student.id)
+    response = director.get(url)
+    assert response.status_code == 200
+    assert len(response.json()["data"]["events"]) == 100
+    assert director.head(url).status_code == 200

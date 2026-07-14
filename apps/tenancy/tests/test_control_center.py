@@ -208,6 +208,33 @@ def test_create_center_trims_padded_contact_email(staff_client):
     assert Center.objects.get(slug="padmail").contact_email == "ops@padmail.example"
 
 
+def test_custom_domain_api_returns_challenge_then_verifies(staff_client, tenant_a, monkeypatch):
+    created = staff_client.post(
+        f"/api/v1/platform/centers/{tenant_a.pk}/domains/",
+        {"domain": "portal.api-customer.example", "is_primary": True},
+        format="json",
+    )
+    assert created.status_code == 201, created.content
+    claim = created.json()["data"]
+    assert claim["is_verified"] is False
+    assert claim["is_primary"] is False
+    assert claim["pending_primary"] is True
+    assert claim["verification"]["type"] == "TXT"
+
+    monkeypatch.setattr(
+        "apps.tenancy.services._lookup_txt_records",
+        lambda name: (claim["verification"]["value"],) if name == claim["verification"]["name"] else (),
+    )
+    verified = staff_client.post(
+        f"/api/v1/platform/centers/{tenant_a.pk}/domains/{claim['id']}/verify/",
+        {},
+        format="json",
+    )
+    assert verified.status_code == 200, verified.content
+    assert verified.json()["data"]["is_verified"] is True
+    assert verified.json()["data"]["is_primary"] is True
+
+
 def test_non_staff_public_user_403(public_tenant, tenant_a):
     """A public-schema NON-staff user is forbidden on the control center."""
     from apps.users.models import User
@@ -420,13 +447,15 @@ def test_impersonation_mints_a_readonly_session(staff_client, tenant_a, user_in)
     from django_tenants.utils import schema_context
 
     from apps.users.models import Session
+    from core.session_auth import hash_session_key
 
     target = user_in(tenant_a, roles=["teacher"])
 
     key = _mint_impersonation(staff_client, tenant_a, target.pk).json()["data"]["access"]
 
     with schema_context(tenant_a.schema_name):
-        session = Session.objects.get(key=key)
+        session = Session.objects.get(key_hash=hash_session_key(key))
+        assert session.key_hash != key
         assert session.user_id == target.pk
         assert session.read_only is True
         assert session.revoked_at is None

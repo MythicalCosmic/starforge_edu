@@ -15,10 +15,11 @@ from django_tenants.utils import schema_context
 
 from apps.academics import selectors, services
 from apps.academics.grading import display_for
-from apps.academics.models import ExamResult, Transcript
+from apps.academics.models import Exam, ExamResult, Transcript
 from apps.academics.signals import grade_changed
 from apps.academics.tests.factories import (
     ExamFactory,
+    ExamResultFactory,
     ExamTypeFactory,
     GradeFactory,
     SubjectFactory,
@@ -242,6 +243,62 @@ def test_grade_changed_not_emitted_on_identical_reentry(tenant_a, django_capture
             assert received == []  # ...but no grade_changed because score is unchanged
     finally:
         grade_changed.disconnect(_recv)
+
+
+def test_record_results_rejects_duplicate_student_rows(tenant_a):
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        exam: Any = ExamFactory(max_score=Decimal("100"))
+        student: Any = StudentProfileFactory(branch=branch)
+        CohortMembershipFactory(cohort=exam.cohort, student=student)
+
+        with pytest.raises(UnprocessableEntity) as exc:
+            services.record_results(
+                exam=exam,
+                rows=[
+                    {"student": student, "score": Decimal("70")},
+                    {"student": student, "score": Decimal("80")},
+                ],
+            )
+        assert exc.value.code == "duplicate_student"
+        assert ExamResult.objects.filter(exam=exam).count() == 0
+
+
+def test_record_results_bulk_query_budget(
+    tenant_a,
+    django_assert_max_num_queries,
+    django_capture_on_commit_callbacks,
+):
+    """A mixed create/update batch stays constant-query instead of growing per row."""
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        exam: Any = ExamFactory(max_score=Decimal("100"))
+        students = [StudentProfileFactory(branch=branch) for _ in range(30)]
+        for student in students:
+            CohortMembershipFactory(cohort=exam.cohort, student=student)
+        for student in students[:15]:
+            ExamResultFactory(exam=exam, student=student, score=Decimal("50"))
+
+        rows = [{"student": student, "score": Decimal("75"), "note": "bulk"} for student in students]
+        # SAVEPOINT + locked exam/cohort + membership ids + locked existing rows
+        # + one bulk INSERT + one bulk UPDATE + RELEASE SAVEPOINT.
+        with (
+            django_capture_on_commit_callbacks(execute=True),
+            django_assert_max_num_queries(8),
+        ):
+            result = services.record_results(exam=exam, rows=rows)
+
+        assert result["created"] == 15
+        assert result["updated"] == 15
+        assert [row.student_id for row in result["results"]] == [student.id for student in students]
+        assert ExamResult.objects.filter(exam=exam, score=Decimal("75")).count() == 30
+        from apps.audit.models import AuditLog
+
+        result_audits = AuditLog.objects.filter(
+            resource_type="academics.ExamResult",
+            resource_id__in=[str(row.pk) for row in result["results"]],
+        )
+        assert result_audits.count() == 30
 
 
 # --------------------------------------------------------------------------- #
@@ -820,6 +877,62 @@ def test_teacher_cannot_create_exam_in_non_taught_cohort(tenant_a, user_in, as_u
     # The exam carries its per-Center type as both an id and an expanded object.
     assert data["exam_type"] == exam_type_id
     assert data["exam_type_detail"]["id"] == exam_type_id
+
+
+def test_exam_write_contract_owner_positive_values_and_put_semantics(tenant_a, user_in, as_user):
+    director = user_in(tenant_a, roles=["director"])
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        cohort = CohortFactory(branch=branch)
+        subject = SubjectFactory()
+        term = TermFactory()
+        exam_type = ExamTypeFactory()
+
+    client = as_user(tenant_a, director)
+    payload = {
+        "subject": subject.id,
+        "cohort": cohort.id,
+        "term": term.id,
+        "exam_type": exam_type.id,
+        "title": "Secure bulk grading",
+        "exam_date": date(2026, 5, 2).isoformat(),
+        "max_score": "75",
+        "weight": "0.500",
+    }
+    invalid = client.post(
+        "/api/v1/academics/exams/",
+        {**payload, "max_score": "0"},
+        format="json",
+    )
+    assert invalid.status_code == 400
+
+    response = client.post("/api/v1/academics/exams/", payload, format="json")
+    assert response.status_code == 201, response.content
+    exam_id = response.json()["data"]["id"]
+    with schema_context(tenant_a.schema_name):
+        exam = Exam.objects.get(pk=exam_id)
+        assert exam.created_by_id == director.id
+
+    missing_required = client.put(
+        f"/api/v1/academics/exams/{exam_id}/",
+        {"title": "Incomplete replacement"},
+        format="json",
+    )
+    assert missing_required.status_code == 400
+
+    replacement = {key: value for key, value in payload.items() if key not in {"max_score", "weight"}}
+    replacement["title"] = "Complete replacement"
+    updated = client.put(
+        f"/api/v1/academics/exams/{exam_id}/",
+        replacement,
+        format="json",
+    )
+    assert updated.status_code == 200, updated.content
+    with schema_context(tenant_a.schema_name):
+        exam.refresh_from_db()
+        assert exam.title == "Complete replacement"
+        assert exam.max_score == Decimal("75")
+        assert exam.weight == Decimal("0.500")
 
 
 def test_manager_creates_and_lists_exam_types(as_role):

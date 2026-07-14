@@ -70,15 +70,31 @@ def revoke_card(*, card_id: int, actor=None, reason: str = "") -> Card:
 
 
 @transaction.atomic
-def scan_card(*, code: str, scanned_by=None) -> dict:
+def scan_card(
+    *,
+    code: str,
+    scanned_by=None,
+    note: str = "",
+    is_unscoped: bool = True,
+    branch_ids: set[int] | None = None,
+) -> dict:
     """Scan a card code to check a student in. An unknown code is a clean 404; a known
     code is ALWAYS logged (even a revoked card — the audit trail of an attempted entry),
     and the result reports whether the card was valid + who it belongs to."""
     card = Card.objects.select_related("student__user", "card_type").filter(code=(code or "").strip()).first()
     if card is None:
         raise NotFoundException(_("No card matches that code."), code="card_not_found")
+    if not is_unscoped and card.student.branch_id not in (branch_ids or set()):
+        # Match an unknown code so a scanner cannot use the endpoint as a
+        # cross-branch card/student existence oracle.
+        raise NotFoundException(_("No card matches that code."), code="card_not_found")
     valid = card.is_active
-    scan = CardScan.objects.create(card=card, scanned_by=scanned_by, was_valid=valid)
+    scan = CardScan.objects.create(
+        card=card,
+        scanned_by=scanned_by,
+        was_valid=valid,
+        note=(note or "").strip()[:255],
+    )
     student = card.student
     # F12/F15: a valid scan feeds attendance — mark the student PRESENT on the lesson they
     # are arriving for (never overrides a teacher's mark, never creates an absence). This is
@@ -101,6 +117,7 @@ def scan_card(*, code: str, scanned_by=None) -> dict:
         "student_name": student.get_full_name(),
         "card_type": card.card_type.name,
         "scanned_at": scan.scanned_at,
+        "note": scan.note,
         "attendance_lesson": attendance_lesson_id,
     }
 

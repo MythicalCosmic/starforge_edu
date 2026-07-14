@@ -112,6 +112,13 @@ if [[ "$healthy" != "1" ]]; then
   exit 1
 fi
 
+# This irreversible credential-storage cutover must happen only after readiness:
+# migrations run while old containers are still serving and therefore leave legacy
+# keys untouched. The command is batched/idempotent, so rerunning a partially failed
+# deploy is safe. From this point, any manual rollback must use a hash-aware release.
+echo "Hashing legacy session credentials after release readiness..."
+"${compose[@]}" run --rm --no-deps web python manage.py hash_session_keys
+
 printf '%s\n' "$sha" >"${DEPLOY_DIR}/current_release"
 docker image prune -f --filter "until=168h" >/dev/null
 echo "Deployment $short_sha is healthy."

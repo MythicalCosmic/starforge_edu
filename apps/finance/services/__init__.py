@@ -1040,7 +1040,7 @@ def _shift_cash_total(shift: CashierShift) -> Decimal:
 
 
 def emit_payment_reminders(*, today: date | None = None) -> int:
-    """Scan invoices with `due_date < today` in status issued/partially_paid and
+    """Scan invoices with ``due_date < today`` that still owe money and
     emit `payment_reminder` once per invoice per `payment_reminder_interval_days`
     cycle. Dedupe via a cache key so re-running the same day sends nothing.
     Returns the count of reminders emitted. Runs in the active tenant schema."""
@@ -1051,10 +1051,16 @@ def emit_payment_reminders(*, today: date | None = None) -> int:
     interval = getattr(settings, "payment_reminder_interval_days", None) or 3
     schema = current_schema()
 
-    # Also flip past-due open invoices to `overdue` (status hygiene).
+    # Keep already-overdue rows in the scan. Excluding them after the first status
+    # flip meant an invoice could receive its first reminder but never a later
+    # interval's reminder.
     overdue = Invoice.objects.filter(
         due_date__lt=today,
-        status__in=(Invoice.Status.ISSUED, Invoice.Status.PARTIALLY_PAID),
+        status__in=(
+            Invoice.Status.ISSUED,
+            Invoice.Status.PARTIALLY_PAID,
+            Invoice.Status.OVERDUE,
+        ),
     ).select_related("student")
 
     emitted = 0
@@ -1063,30 +1069,35 @@ def emit_payment_reminders(*, today: date | None = None) -> int:
     for invoice in overdue.iterator():
         if invoice.due_date is None:  # overdue filter excludes these; guard for typing/safety
             continue
+        # Invoice is an audited model. Use model.save() so the pre/post-save
+        # receivers persist the overdue transition; QuerySet.update() would make
+        # this compliance-relevant status change invisible in the audit trail.
+        if invoice.status != Invoice.Status.OVERDUE:
+            invoice.status = Invoice.Status.OVERDUE
+            invoice.save(update_fields=["status", "updated_at"])
         # Per-invoice dedupe bucket: floor(days_overdue / interval) so we emit at
         # most once per interval window; cache TTL covers the window.
         days_overdue = (today - invoice.due_date).days
         bucket = days_overdue // interval
+        # Carry the exact cycle used by the producer through to notification
+        # deduplication.  A receiver-side "today" fallback can collapse or repeat
+        # events when a queued signal is retried on another day.
+        reminder_cycle = f"{invoice.due_date.isoformat()}:{interval}:{bucket}"
         key = f"finance:reminder:{schema}:{invoice.pk}:{bucket}"
-        if cache.get(key) is not None:
+        # ``add`` is atomic on the production Redis backend. A get/set pair lets
+        # two Beat invocations both observe a miss and double-dispatch the cycle.
+        if not cache.add(key, 1, timeout=interval * 24 * 60 * 60):
             continue
-        cache.set(key, 1, timeout=interval * 24 * 60 * 60)
         student_id = invoice.student_id
         payment_reminder.send(
             sender=Invoice,
             invoice_id=invoice.pk,
             student_id=student_id,
+            reminder_cycle=reminder_cycle,
             schema_name=schema,
         )
         emitted += 1
 
-    # Mark them overdue (separate UPDATE, after the scan, so iteration is stable).
-    # PARTIALLY_PAID past-due bills are included: a partial payment must not park a
-    # delinquent invoice out of the OVERDUE state (R2-P2). PAID is excluded (settled).
-    Invoice.objects.filter(
-        due_date__lt=today,
-        status__in=(Invoice.Status.ISSUED, Invoice.Status.PARTIALLY_PAID),
-    ).update(status=Invoice.Status.OVERDUE)
     return emitted
 
 

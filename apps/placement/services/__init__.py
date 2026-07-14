@@ -196,14 +196,16 @@ def _clean_media(media: Any) -> dict:
 @transaction.atomic
 def remove_question(*, question: PlacementQuestion) -> None:
     """Drop a question. Only while the test is DRAFT."""
-    if question.test.status != PlacementTest.Status.DRAFT:
+    test = PlacementTest.objects.select_for_update().get(pk=question.test_id)
+    if test.status != PlacementTest.Status.DRAFT:
         raise UnprocessableEntity(_("Only a draft test can be edited."), code="test_not_draft")
-    question.delete()
+    PlacementQuestion.objects.filter(pk=question.pk, test=test).delete()
 
 
 @transaction.atomic
 def submit_for_review(*, test: PlacementTest) -> PlacementTest:
     """DRAFT → PENDING. A test must have at least one question to be reviewable."""
+    test = PlacementTest.objects.select_for_update().get(pk=test.pk)
     if test.status != PlacementTest.Status.DRAFT:
         raise UnprocessableEntity(_("Only a draft test can be submitted for review."), code="test_not_draft")
     if not test.questions.exists():
@@ -387,7 +389,7 @@ def submit_attempt(*, attempt: PlacementAttempt, answers: list[dict]) -> Placeme
     rows: list[PlacementAnswer] = []
     for item in answers:
         qid = item.get("question")
-        if not isinstance(qid, int) or qid not in questions:
+        if isinstance(qid, bool) or not isinstance(qid, int) or qid not in questions:
             raise ValidationException(
                 _("Unknown question for this test."),
                 code="unknown_question",

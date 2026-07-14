@@ -123,6 +123,21 @@ def paginate(
     return list(queryset[start : start + size]), total, page, size
 
 
+def paginate_sequence(
+    request: HttpRequest, items: Sequence[Any], *, default_size: int = DEFAULT_PAGE_SIZE
+) -> tuple[list[Any], int, int, int]:
+    """Bound an already-computed ordered result sequence with the same public paging
+    contract as :func:`paginate`. Useful for transparent analytics whose ranking must
+    be computed globally before a page can be selected."""
+    page = _positive_int(request.GET.get("page"), 1)
+    size = min(_positive_int(request.GET.get("page_size"), default_size), MAX_PAGE_SIZE)
+    total = len(items)
+    start = (page - 1) * size
+    if start > _MAX_OFFSET:
+        return [], total, page, size
+    return list(items[start : start + size]), total, page, size
+
+
 def cursor_paginate(
     request: HttpRequest, queryset: QuerySet, *, page_size: int = 50, max_page_size: int = MAX_PAGE_SIZE
 ) -> tuple[list[Any], str | None, str | None]:

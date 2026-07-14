@@ -59,6 +59,17 @@ def test_full_flow_pending_to_rejected(tenant_a, s3_stub, monkeypatch):
         assert s3_stub.copies == []
 
 
+def test_missing_uploaded_object_is_rejected_not_task_failure(tenant_a, s3_stub):
+    with schema_context(tenant_a.schema_name):
+        file = _upload(FolderFactory())
+        assert file.s3_key not in s3_stub.objects
+
+        assert services.validate_uploaded_file(file.id) == LessonFile.Status.REJECTED
+
+        file.refresh_from_db()
+        assert file.reject_reason == "Uploaded object was not found."
+
+
 @pytest.mark.minio
 def test_minio_live_round_trip():
     """Live MinIO round trip. Set STARFORGE_RUN_MINIO=1 with `docker compose up

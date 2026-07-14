@@ -35,6 +35,11 @@ class Term(models.Model):
         ordering = ("-start_date",)
         constraints = [
             models.UniqueConstraint(fields=("academic_year", "name"), name="term_unique_year_name"),
+            models.UniqueConstraint(
+                fields=("is_current",),
+                condition=Q(is_current=True),
+                name="term_one_current",
+            ),
             models.CheckConstraint(
                 condition=Q(end_date__gt=models.F("start_date")), name="term_dates_ordered"
             ),

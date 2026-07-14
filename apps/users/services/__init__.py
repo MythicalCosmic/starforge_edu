@@ -364,27 +364,124 @@ def issue_role_credentials(account, *, actor, resource_type: str) -> dict[str, s
     return {"username": account.username, "temporary_password": temporary_password}
 
 
-def ensure_role_membership(account, *, role: str, branch, department=None):
-    """Keep the canonical scoped role grant aligned with a role profile."""
+@transaction.atomic
+def ensure_role_membership(
+    account,
+    *,
+    branch,
+    department=None,
+    role: str | None = None,
+    account_type=None,
+    replace_scope: bool = True,
+):
+    """Keep a role profile's permission-native AccountType grant aligned.
+
+    ``role`` is a compatibility input for callers that want the seeded system
+    type. New admin code passes ``account_type`` directly. Explicit custom type
+    memberships are never rewritten into a system type; only the selected type
+    (or a legacy null row being upgraded) is touched.
+    """
+    from apps.access.models import AccountType
     from apps.users.models import RoleMembership
 
-    membership = (
-        RoleMembership.objects.filter(user=account.user, role=role, revoked_at__isnull=True)
-        .order_by("id")
-        .first()
+    if account_type is None:
+        if not role:
+            raise ValidationException(
+                _("Choose an account type."),
+                code="account_type_required",
+                fields={"account_type": [_("This field is required.")]},
+            )
+        account_type = AccountType.objects.filter(
+            is_system=True,
+            is_active=True,
+            slug=role,
+        ).first()
+        if account_type is None:
+            raise ValidationException(
+                _("The default account type is unavailable."),
+                code="account_type_unavailable",
+                fields={"account_type": [_("Activate the seeded account type first.")]},
+            )
+    else:
+        account_type = AccountType.objects.filter(pk=account_type.pk, is_active=True).first()
+        if account_type is None:
+            raise ValidationException(
+                _("Choose an active account type."),
+                code="account_type_inactive",
+                fields={"account_type": [_("Choose an active account type.")]},
+            )
+
+    kind_by_model = {
+        "org.staffprofile": AccountType.AccountKind.STAFF,
+        "teachers.teacherprofile": AccountType.AccountKind.TEACHER,
+        "students.studentprofile": AccountType.AccountKind.STUDENT,
+        "parents.parentprofile": AccountType.AccountKind.PARENT,
+    }
+    principal_kind = kind_by_model.get(account._meta.label_lower)
+    if principal_kind is not None and account_type.account_kind != principal_kind:
+        raise ValidationException(
+            _("The account type does not match this profile."),
+            code="principal_kind_mismatch",
+            fields={"account_type": [_("Choose an account type for this profile kind.")]},
+        )
+
+    compatibility_role = account_type.compatibility_role
+    department_id = department.pk if department is not None else None
+    exact = RoleMembership.objects.filter(
+        user=account.user,
+        account_type=account_type,
+        branch=branch,
     )
+    exact = (
+        exact.filter(department__isnull=True)
+        if department_id is None
+        else exact.filter(department_id=department_id)
+    )
+    exact = exact.order_by("revoked_at", "id")
+    membership = exact.first()
+    if membership is None:
+        # Upgrade a pre-migration row in place before considering a new row.
+        membership = (
+            RoleMembership.objects.filter(
+                user=account.user,
+                account_type__isnull=True,
+                role=compatibility_role,
+                revoked_at__isnull=True,
+            )
+            .order_by("id")
+            .first()
+        )
+    if membership is None and account_type.is_system and replace_scope:
+        # A teacher/student/staff profile has one primary system type scope;
+        # profile moves align that row. Parent guardian links pass
+        # replace_scope=False because one parent can legitimately span branches.
+        membership = (
+            RoleMembership.objects.filter(
+                user=account.user,
+                account_type=account_type,
+                revoked_at__isnull=True,
+            )
+            .order_by("id")
+            .first()
+        )
     if membership is None:
         return RoleMembership.objects.create(
             user=account.user,
-            role=role,
+            account_type=account_type,
+            role=compatibility_role,
             branch=branch,
             department=department,
         )
     changed: list[str] = []
+    if membership.account_type_id != account_type.pk:
+        membership.account_type = account_type
+        changed.append("account_type")
+    if membership.role != compatibility_role:
+        membership.role = compatibility_role
+        changed.append("role")
     if membership.branch_id != branch.pk:
         membership.branch = branch
         changed.append("branch")
-    department_id = department.pk if department is not None else None
     if membership.department_id != department_id:
         membership.department = department
         changed.append("department")

@@ -39,7 +39,14 @@ class PenaltyRepository(BaseRepository[Penalty], IPenaltyRepository):
         )
 
     def scoped(
-        self, *, is_director: bool, user, branch_ids: set[int], can_waive: bool, can_write: bool
+        self,
+        *,
+        is_director: bool,
+        user,
+        waive_branch_ids: set[int],
+        write_branch_ids: set[int],
+        can_waive: bool,
+        can_write: bool,
     ) -> QuerySet[Penalty]:
         qs = self._base()
         if is_director:
@@ -50,21 +57,30 @@ class PenaltyRepository(BaseRepository[Penalty], IPenaltyRepository):
         if can_waive:
             # A manager (waive-capable) handles ALL their branch's penalties — student
             # demerits AND staff discipline.
-            scope |= Q(branch_id__in=branch_ids)
-        elif can_write:
+            scope |= Q(branch_id__in=waive_branch_ids)
+        if can_write:
             # A non-manager issuer (teacher) sees their branch's STUDENT demerits only —
             # staff disciplinary records are NOT visible to peers (HR privacy).
-            scope |= Q(branch_id__in=branch_ids, staff__isnull=True)
+            scope |= Q(branch_id__in=write_branch_ids, staff__isnull=True)
         return qs.filter(scope).distinct()
 
     def get_scoped(
-        self, *, is_director: bool, user, branch_ids: set[int], can_waive: bool, can_write: bool, pk: int
+        self,
+        *,
+        is_director: bool,
+        user,
+        waive_branch_ids: set[int],
+        write_branch_ids: set[int],
+        can_waive: bool,
+        can_write: bool,
+        pk: int,
     ) -> Penalty | None:
         return (
             self.scoped(
                 is_director=is_director,
                 user=user,
-                branch_ids=branch_ids,
+                waive_branch_ids=waive_branch_ids,
+                write_branch_ids=write_branch_ids,
                 can_waive=can_waive,
                 can_write=can_write,
             )

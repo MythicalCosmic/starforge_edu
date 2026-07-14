@@ -32,7 +32,7 @@ from apps.content.presenters import (
     material_to_dict,
     module_to_dict,
 )
-from apps.content.selectors import REVIEWER_ROLES, scoped_libraries
+from apps.content.selectors import scoped_libraries
 from core.api_auth import check_perm, require_auth
 from core.container import container
 from core.exceptions import NotFoundException, PermissionException, ValidationException
@@ -541,7 +541,7 @@ def file_download_url_view(request: HttpRequest, pk: int) -> HttpResponse:
         return _method_not_allowed()
     check_perm(request, "content:read")
     file = _get_file_in_scope(request, pk)
-    is_staff = request.user.is_superuser or bool(_roles(request) & REVIEWER_ROLES)
+    is_staff = request.user.is_superuser or _manages_content(request)
     return success(_file_service().download_url(file=file, user=request.user, actor_is_staff=is_staff))
 
 

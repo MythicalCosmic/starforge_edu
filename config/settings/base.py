@@ -180,6 +180,22 @@ TENANT_MODEL = "tenancy.Center"
 TENANT_DOMAIN_MODEL = "tenancy.Domain"
 PUBLIC_SCHEMA_URLCONF = "config.urls_public"
 
+# Custom-domain ownership verification. Development-owned ``*.localhost``
+# hostnames can route immediately; production resets the trusted list to an
+# explicit env allowlist so arbitrary customer domains always require DNS TXT.
+DOMAIN_VERIFICATION_TRUSTED_SUFFIXES = env.list(
+    "DOMAIN_VERIFICATION_TRUSTED_SUFFIXES",
+    default=["localhost"],
+)
+DOMAIN_VERIFICATION_DNS_URL = env.str(
+    "DOMAIN_VERIFICATION_DNS_URL",
+    default="https://cloudflare-dns.com/dns-query",
+)
+DOMAIN_VERIFICATION_TIMEOUT_SECONDS = env.float(
+    "DOMAIN_VERIFICATION_TIMEOUT_SECONDS",
+    default=3.0,
+)
+
 # ---------------------------------------------------------------------------
 # Middleware (TenantMainMiddleware MUST be first)
 # ---------------------------------------------------------------------------
@@ -461,6 +477,10 @@ CELERY_BEAT_SCHEDULE = {
     "late-payment-reminders": {
         "task": "celery_tasks.finance_tasks.late_payment_reminders",
         "schedule": 60 * 60 * 24,  # daily (D3-A-8)
+    },
+    "refresh-fx-rates": {
+        "task": "celery_tasks.finance_tasks.refresh_fx_rates",
+        "schedule": crontab(hour=0, minute=15),  # daily CBU snapshot after midnight
     },
     "cleanup-old-audit-logs": {
         "task": "celery_tasks.audit_tasks.cleanup_old_audit_logs",

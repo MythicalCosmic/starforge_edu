@@ -14,7 +14,7 @@ from django_tenants.admin import TenantAdminMixin
 
 from apps.billing.models import Subscription
 
-from .models import Center, Domain, PlatformEvent
+from .models import Center, Domain, DomainClaim, PlatformEvent
 
 
 class SubscriptionInline(admin.StackedInline):
@@ -76,6 +76,20 @@ class DomainAdmin(admin.ModelAdmin):
     list_display = ("domain", "tenant", "is_primary")
     search_fields = ("domain",)
     list_filter = ("is_primary",)
+
+
+@admin.register(DomainClaim)
+class DomainClaimAdmin(admin.ModelAdmin):
+    list_display = ("domain", "tenant", "pending_primary", "verified_at", "created_at")
+    search_fields = ("domain", "tenant__name", "tenant__slug")
+    list_filter = ("pending_primary",)
+    readonly_fields = (
+        "verification_token",
+        "verified_at",
+        "domain_record",
+        "created_at",
+        "updated_at",
+    )
 
 
 @admin.register(PlatformEvent)

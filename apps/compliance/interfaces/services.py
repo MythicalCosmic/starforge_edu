@@ -47,12 +47,27 @@ class IRuleService(ABC):
 class IPenaltyService(ABC):
     @abstractmethod
     def scoped_list(
-        self, *, is_director: bool, user, branch_ids: set[int], can_waive: bool, can_write: bool
+        self,
+        *,
+        is_director: bool,
+        user,
+        waive_branch_ids: set[int],
+        write_branch_ids: set[int],
+        can_waive: bool,
+        can_write: bool,
     ) -> QuerySet[Penalty]: ...
 
     @abstractmethod
     def get_visible(
-        self, *, is_director: bool, user, branch_ids: set[int], can_waive: bool, can_write: bool, pk: int
+        self,
+        *,
+        is_director: bool,
+        user,
+        waive_branch_ids: set[int],
+        write_branch_ids: set[int],
+        can_waive: bool,
+        can_write: bool,
+        pk: int,
     ) -> Penalty | None: ...
 
     @abstractmethod

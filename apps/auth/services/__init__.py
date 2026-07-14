@@ -9,6 +9,7 @@ under this name so conftest ``as_user`` and other callers stay unchanged).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -128,7 +129,13 @@ def _has_privileged_bridge(account) -> bool:
 
 
 def role_login(
-    *, username: str, password: str, ip: str = "", user_agent: str = "", device_id: str = ""
+    *,
+    username: str,
+    password: str,
+    ip: str = "",
+    user_agent: str = "",
+    device_id: str = "",
+    platform: str = "",
 ) -> dict:
     """Authenticate against the role table's own password and issue a role session.
 
@@ -160,19 +167,40 @@ def role_login(
     type(account).objects.filter(pk=account.pk).update(last_login_at=now)
     account.user.last_seen_at = now
     account.user.save(update_fields=["last_seen_at"])
+    from apps.users.models import Device
+    from apps.users.services import register_device
+
+    normalized_device_id = device_id[:128]
+    was_known_device = bool(
+        normalized_device_id
+        and platform
+        and Device.objects.filter(
+            user=account.user,
+            device_id=normalized_device_id,
+            revoked_at__isnull=True,
+        ).exists()
+    )
+    device = register_device(
+        user=account.user,
+        device_id=normalized_device_id,
+        platform=platform,
+        user_agent=user_agent,
+    )
     login_succeeded.send(
         sender=User,
         username=username,
         user_id=account.user_id,
         ip=ip,
         user_agent=user_agent,
+        device_id=device.device_id if device is not None else "",
+        is_new_device=device is not None and not was_known_device,
         schema_name=current_schema(),
     )
     session = create_session(
         account.user,
         ip=ip,
         user_agent=user_agent,
-        device_id=device_id,
+        device_id=normalized_device_id,
         principal_kind=kind,
         principal_id=account.pk,
     )
@@ -348,6 +376,8 @@ def verify_otp(
     target_id: int | None = None,
     ip: str = "",
     user_agent: str = "",
+    before_consume: Callable[[], None] | None = None,
+    hide_failure_details: bool = False,
 ) -> None:
     """Verify an OTP and mark it consumed; raises on any failure.
 
@@ -373,16 +403,22 @@ def verify_otp(
             .first()
         )
         if otp is None:
+            # Match the expensive password-hash verification below so an absent
+            # capability is not distinguishable by a cheap timing probe.
+            check_password(code, _dummy_hash())
             failure = (
                 "no_active_code",
                 ValidationException,
                 _("Code expired or never issued. Request a new one."),
             )
         elif otp.attempts >= settings.OTP_MAX_ATTEMPTS:
+            check_password(code, _dummy_hash())
             failure = ("too_many_attempts", ThrottledException, _("Too many attempts. Request a new code."))
         else:
             otp.attempts += 1
             if check_password(code, otp.code_hash):
+                if before_consume is not None:
+                    before_consume()
                 otp.consumed_at = timezone.now()
                 otp.save(update_fields=["attempts", "consumed_at"])
             else:
@@ -392,6 +428,8 @@ def verify_otp(
     if failure is not None:
         reason, exc_class, detail = failure
         _fire_failed(identifier, ip, user_agent, reason=reason)
+        if hide_failure_details:
+            raise ValidationException(_("Invalid or expired code."))
         raise exc_class(detail)
 
     otp_verified.send(
@@ -468,17 +506,21 @@ def reset_password(
     sessions. The user logs in fresh with the new password afterwards."""
     identifier = _normalize(identifier)
     user = _resettable_account(identifier, account_type=account_type)
-    # Validate the new password BEFORE consuming the OTP, so a weak-password attempt
-    # doesn't burn the (correct) code. Validate EVEN when the account is unknown
-    # (user=None) so the weak_password response can't distinguish a registered
-    # identifier from an unregistered one (anti-enumeration on the confirm path).
-    _validate_new_password(new_password, user)
+    # Apply account-independent password policy first so universally weak input
+    # behaves identically for known and unknown identifiers. Account-specific
+    # similarity checks run only after the OTP itself proves account knowledge.
+    _validate_new_password(new_password, None)
     if user is None:
         # Never match an old/unbound reset OTP.  This also keeps an invalid or
         # administrator-linked target indistinguishable from an unknown account.
         target_kind, target_id = "invalid", None
     else:
         target_kind, target_id = _reset_principal(user)
+
+    def validate_for_verified_account() -> None:
+        if user is not None:
+            _validate_new_password(new_password, user)
+
     verify_otp(
         identifier=identifier,
         code=code,
@@ -487,6 +529,8 @@ def reset_password(
         target_id=target_id,
         ip=ip,
         user_agent=user_agent,
+        before_consume=validate_for_verified_account,
+        hide_failure_details=True,
     )
     if user is None:  # unreachable in practice: no OTP is issued for unknowns
         raise ValidationException(_("Invalid code."))

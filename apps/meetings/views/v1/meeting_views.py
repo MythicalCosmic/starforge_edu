@@ -24,14 +24,9 @@ from core.container import container
 from core.exceptions import NotFoundException, PermissionException, ValidationException
 from core.http import int_field, read_json, str_field
 from core.listing import apply_filters, paginate
-from core.permissions import (
-    Role,
-    _request_overrides,
-    get_role_memberships,
-    get_user_roles,
-    has_permission_code,
-)
+from core.permissions import _request_overrides, get_user_roles, has_permission_code
 from core.responses import created, error, paginated, success
+from core.scoping import is_unscoped, permission_membership_branch_ids
 
 _RESOURCE = "meeting"
 
@@ -43,10 +38,10 @@ def _service() -> IMeetingService:
 def _scope(request: HttpRequest) -> tuple[bool, bool, set[int]]:
     req: Any = request  # perm helpers are duck-typed on .user (typed Request upstream)
     roles = get_user_roles(req)
-    is_unscoped = getattr(req.user, "is_superuser", False) or Role.DIRECTOR in roles
+    unscoped = is_unscoped(req)
     is_manager = has_permission_code(roles, f"{_RESOURCE}:write", _request_overrides(req))
-    branch_ids = {m.branch_id for m in get_role_memberships(req) if m.branch_id}
-    return is_unscoped, is_manager, branch_ids
+    branch_ids = permission_membership_branch_ids(roles=roles, permission=f"{_RESOURCE}:write")
+    return unscoped, is_manager, branch_ids
 
 
 def _get_visible(request: HttpRequest, pk: int):

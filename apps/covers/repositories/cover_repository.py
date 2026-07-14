@@ -18,26 +18,41 @@ class CoverRepository(BaseRepository[CoverRequest], ICoverRepository):
         )
 
     def scoped(
-        self, *, user, is_unscoped: bool, is_manager: bool, branch_ids: set[int]
+        self,
+        *,
+        user,
+        is_unscoped: bool,
+        is_manager: bool,
+        manager_branch_ids: set[int],
+        teacher_branch_ids: set[int],
     ) -> QuerySet[CoverRequest]:
         qs = self.get_queryset()
         if is_unscoped:
             return qs
+        visible = Q(requester=user) | Q(cover_teacher__user=user)
         if is_manager:
-            return qs.filter(branch_id__in=branch_ids)  # managers see their branch's requests
-        # a teacher sees: their own requests, claimable pool requests in their branch,
-        # and requests assigned to them.
-        return qs.filter(
-            Q(requester=user)
-            | (Q(pool=True, status=CoverRequest.Status.OPEN) & Q(branch_id__in=branch_ids))
-            | Q(cover_teacher__user=user)
-        )
+            visible |= Q(branch_id__in=manager_branch_ids)
+        visible |= Q(pool=True, status=CoverRequest.Status.OPEN) & Q(branch_id__in=teacher_branch_ids)
+        return qs.filter(visible)
 
     def get_scoped(
-        self, *, user, is_unscoped: bool, is_manager: bool, branch_ids: set[int], pk: int
+        self,
+        *,
+        user,
+        is_unscoped: bool,
+        is_manager: bool,
+        manager_branch_ids: set[int],
+        teacher_branch_ids: set[int],
+        pk: int,
     ) -> CoverRequest | None:
         return (
-            self.scoped(user=user, is_unscoped=is_unscoped, is_manager=is_manager, branch_ids=branch_ids)
+            self.scoped(
+                user=user,
+                is_unscoped=is_unscoped,
+                is_manager=is_manager,
+                manager_branch_ids=manager_branch_ids,
+                teacher_branch_ids=teacher_branch_ids,
+            )
             .filter(pk=pk)
             .first()
         )

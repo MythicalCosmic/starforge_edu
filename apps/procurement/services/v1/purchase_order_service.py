@@ -17,11 +17,11 @@ class PurchaseOrderService(IPurchaseOrderService):
     def __init__(self, repository: IPurchaseOrderRepository) -> None:
         self.repository = repository
 
-    def scoped_list(self, *, is_unscoped: bool, user) -> QuerySet[PurchaseOrder]:
-        return self.repository.scoped(is_unscoped=is_unscoped, user=user)
+    def scoped_list(self, *, is_unscoped: bool, user, branch_ids: set[int]) -> QuerySet[PurchaseOrder]:
+        return self.repository.scoped(is_unscoped=is_unscoped, user=user, branch_ids=branch_ids)
 
-    def get_visible(self, *, is_unscoped: bool, user, pk: int) -> PurchaseOrder | None:
-        return self.repository.get_scoped(is_unscoped=is_unscoped, user=user, pk=pk)
+    def get_visible(self, *, is_unscoped: bool, user, branch_ids: set[int], pk: int) -> PurchaseOrder | None:
+        return self.repository.get_scoped(is_unscoped=is_unscoped, user=user, branch_ids=branch_ids, pk=pk)
 
     def get_branch(self, *, branch_id: int) -> Branch | None:
         return self.repository.get_branch(branch_id=branch_id)

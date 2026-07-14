@@ -73,8 +73,9 @@ class MeetingService(IMeetingService):
 
     @staticmethod
     def resolve_attendees(ids: list[int]) -> list:
+        from apps.access.models import AccountType
         from apps.users.models import User
-        from core.permissions import Role
+        from core.permissions import role_memberships_for_account_kinds
 
         if not ids:
             raise ValidationException(
@@ -84,14 +85,15 @@ class MeetingService(IMeetingService):
             )
         # Meetings are staff coordination — invitees must be active staff (not students/
         # parents), mirroring the old ScheduleMeetingSerializer attendees queryset.
-        staff_roles = tuple(r for r in Role.ALL if r not in (Role.STUDENT, Role.PARENT))
+        staff_memberships = role_memberships_for_account_kinds(
+            (AccountType.AccountKind.STAFF, AccountType.AccountKind.TEACHER)
+        )
         deduped = list(dict.fromkeys(ids))
         users = list(
             User.objects.filter(
                 pk__in=deduped,
                 is_active=True,
-                role_memberships__revoked_at__isnull=True,
-                role_memberships__role__in=staff_roles,
+                role_memberships__in=staff_memberships,
             ).distinct()
         )
         if len(users) != len(deduped):

@@ -14,6 +14,7 @@ from apps.cohorts.services import enroll_student_in_cohort
 from apps.cohorts.tests.factories import CohortFactory
 from apps.org.tests.factories import BranchFactory
 from apps.students.tests.factories import StudentProfileFactory
+from apps.teachers.models import TeacherType
 from apps.teachers.tests.factories import TeacherProfileFactory
 from core.permissions import Role
 
@@ -113,19 +114,20 @@ def test_assign_and_list_co_teacher(director, tenant_a):
     assert resp.status_code == 201, resp.content
     assert resp.json()["data"]["teacher"] == teacher.id
     assert resp.json()["data"]["role"] == "assistant"
+    assert resp.json()["data"]["teacher_type_slug"] == "assistant"
 
     roster = director.get(f"/api/v1/cohorts/{cohort.id}/teachers/")
     assert roster.status_code == 200
-    assert roster.json()["data"] == [
-        {"id": resp.json()["data"]["id"], "teacher": teacher.id, "role": "assistant"}
-    ]
+    assert len(roster.json()["data"]) == 1
+    assert roster.json()["data"][0]["id"] == resp.json()["data"]["id"]
+    assert roster.json()["data"][0]["teacher"] == teacher.id
 
     # And it surfaces on the cohort detail's co_teachers block.
     detail = director.get(f"/api/v1/cohorts/{cohort.id}/")
     assert detail.json()["data"]["co_teachers"][0]["teacher"] == teacher.id
 
 
-def test_reassign_co_teacher_updates_role_idempotently(director, tenant_a):
+def test_same_teacher_can_hold_multiple_types(director, tenant_a):
     with schema_context(tenant_a.schema_name):
         branch = BranchFactory.create()
         cohort = CohortFactory.create(branch=branch)
@@ -137,16 +139,16 @@ def test_reassign_co_teacher_updates_role_idempotently(director, tenant_a):
         format="json",
     )
     assert first.status_code == 201
-    # Re-assign the SAME teacher -> upsert (200, role updated, no duplicate row, no 409).
+    # The same teacher may legitimately hold several responsibilities in one group.
     second = director.post(
         f"/api/v1/cohorts/{cohort.id}/teachers/",
         {"teacher": teacher.id, "role": "assistant"},
         format="json",
     )
-    assert second.status_code == 200
+    assert second.status_code == 201
     assert second.json()["data"]["role"] == "assistant"
     with schema_context(tenant_a.schema_name):
-        assert CohortTeacher.objects.filter(cohort=cohort, teacher=teacher).count() == 1
+        assert CohortTeacher.objects.filter(cohort=cohort, teacher=teacher).count() == 2
 
 
 def test_assign_co_teacher_invalid_role_400(director, tenant_a):
@@ -180,9 +182,10 @@ def test_remove_co_teacher(director, tenant_a):
         branch = BranchFactory.create()
         cohort = CohortFactory.create(branch=branch)
         teacher = TeacherProfileFactory.create(branch=branch)
-        CohortTeacher.objects.create(cohort=cohort, teacher=teacher, role="co_teacher")
+        teacher_type = TeacherType.objects.get(slug="co-teacher")
+        assignment = CohortTeacher.objects.create(cohort=cohort, teacher=teacher, teacher_type=teacher_type)
 
-    resp = director.delete(f"/api/v1/cohorts/{cohort.id}/teachers/{teacher.id}/")
+    resp = director.delete(f"/api/v1/cohorts/{cohort.id}/teachers/{assignment.id}/")
     assert resp.status_code == 204
     with schema_context(tenant_a.schema_name):
         assert not CohortTeacher.objects.filter(cohort=cohort, teacher=teacher).exists()
@@ -192,19 +195,19 @@ def test_remove_unassigned_co_teacher_404(director, tenant_a):
     with schema_context(tenant_a.schema_name):
         branch = BranchFactory.create()
         cohort = CohortFactory.create(branch=branch)
-        teacher = TeacherProfileFactory.create(branch=branch)  # never assigned
-    resp = director.delete(f"/api/v1/cohorts/{cohort.id}/teachers/{teacher.id}/")
+        TeacherProfileFactory.create(branch=branch)  # no assignments in the cohort
+    resp = director.delete(f"/api/v1/cohorts/{cohort.id}/teachers/9999999/")
     assert resp.status_code == 404
 
 
-def test_co_teacher_default_role_is_co_teacher(director, tenant_a):
+def test_default_assignment_type_is_main_teacher(director, tenant_a):
     with schema_context(tenant_a.schema_name):
         branch = BranchFactory.create()
         cohort = CohortFactory.create(branch=branch)
         teacher = TeacherProfileFactory.create(branch=branch)
     resp = director.post(f"/api/v1/cohorts/{cohort.id}/teachers/", {"teacher": teacher.id}, format="json")
     assert resp.status_code == 201
-    assert resp.json()["data"]["role"] == "co_teacher"
+    assert resp.json()["data"]["role"] == "main_teacher"
 
 
 # --- branch scoping (the new actions inherit _get_in_scope) -----------------

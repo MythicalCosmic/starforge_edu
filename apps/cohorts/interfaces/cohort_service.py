@@ -13,8 +13,10 @@ from apps.cohorts.dto.cohort_dto import (
     CohortMoveDTO,
     CohortRemoveDTO,
     CohortTeacherDTO,
+    TeacherTypeCreateDTO,
 )
 from apps.cohorts.models import Cohort, CohortMembership, CohortTeacher
+from apps.teachers.models import TeacherType
 
 
 class ICohortService(ABC):
@@ -57,14 +59,36 @@ class ICohortService(ABC):
     def members(self, cohort: Cohort) -> QuerySet[CohortMembership]: ...
 
     @abstractmethod
+    def teacher_types(self) -> QuerySet[TeacherType]: ...
+
+    @abstractmethod
+    def get_teacher_type(self, teacher_type_id: int) -> TeacherType | None: ...
+
+    @abstractmethod
+    def create_teacher_type(self, data: TeacherTypeCreateDTO) -> TeacherType: ...
+
+    @abstractmethod
+    def update_teacher_type(self, teacher_type: TeacherType, changes: dict[str, Any]) -> TeacherType: ...
+
+    @abstractmethod
+    def delete_teacher_type(self, teacher_type: TeacherType) -> None: ...
+
+    @abstractmethod
     def co_teachers(self, cohort: Cohort) -> QuerySet[CohortTeacher]:
-        """The cohort's co-teacher/assistant roster (F4)."""
+        """The cohort's canonical typed teacher roster."""
+
+    @abstractmethod
+    def get_teacher_assignment(self, cohort: Cohort, assignment_id: int) -> CohortTeacher | None: ...
 
     @abstractmethod
     def assign_teacher(self, cohort: Cohort, data: CohortTeacherDTO) -> tuple[CohortTeacher, bool]:
-        """Assign/re-assign a co-teacher/assistant (idempotent upsert); returns
-        (row, created)."""
+        """Assign a teacher/type triple idempotently; returns (row, created)."""
 
     @abstractmethod
-    def remove_teacher(self, cohort: Cohort, teacher_id: int) -> None:
-        """Unassign a co-teacher/assistant (404 if not assigned)."""
+    def update_teacher_assignment(
+        self, cohort: Cohort, assignment: CohortTeacher, changes: dict[str, Any]
+    ) -> CohortTeacher: ...
+
+    @abstractmethod
+    def remove_teacher(self, cohort: Cohort, assignment: CohortTeacher) -> None:
+        """Delete exactly one typed assignment."""

@@ -18,6 +18,7 @@ import pytest
 from django.core.cache import cache
 from django_tenants.utils import schema_context
 
+from apps.audit.models import AuditLog
 from apps.cohorts.tests.factories import CohortFactory, CohortMembershipFactory
 from apps.finance import selectors, services
 from apps.finance.models import (
@@ -808,24 +809,35 @@ def test_outstanding_balance_math(tenant_a):
 # --------------------------------------------------------------------------- #
 
 
-def test_payment_reminders_emit_once_and_dedupe(tenant_a):
+def test_payment_reminders_emit_once_and_dedupe(tenant_a, django_capture_on_commit_callbacks):
     from datetime import date
 
     with schema_context(tenant_a.schema_name):
         cache.clear()
-        InvoiceFactory(due_date=date(2020, 1, 1), status=Invoice.Status.ISSUED)
+        invoice = InvoiceFactory(due_date=date(2020, 1, 1), status=Invoice.Status.ISSUED)
         captured = []
         payment_reminder.connect(lambda **kw: captured.append(kw), weak=False, dispatch_uid="rem")
         try:
-            n1 = services.emit_payment_reminders(today=date(2020, 1, 10))
+            with django_capture_on_commit_callbacks(execute=True):
+                n1 = services.emit_payment_reminders(today=date(2020, 1, 10))
             n2 = services.emit_payment_reminders(today=date(2020, 1, 10))
+            n3 = services.emit_payment_reminders(today=date(2020, 1, 13))
         finally:
             payment_reminder.disconnect(dispatch_uid="rem")
         assert n1 == 1
         assert n2 == 0  # same interval bucket -> deduped
-        assert len(captured) == 1
+        assert n3 == 1  # an already-overdue row remains eligible next interval
+        assert len(captured) == 2
+        assert captured[0]["reminder_cycle"] == "2020-01-01:3:3"
+        assert captured[1]["reminder_cycle"] == "2020-01-01:3:4"
         # the invoice flipped to overdue
         assert Invoice.objects.filter(status=Invoice.Status.OVERDUE).count() == 1
+        assert AuditLog.objects.filter(
+            action=AuditLog.Action.UPDATE,
+            resource_type="finance.Invoice",
+            resource_id=str(invoice.pk),
+            after__status=Invoice.Status.OVERDUE,
+        ).exists()
 
 
 # --------------------------------------------------------------------------- #

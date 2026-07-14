@@ -9,12 +9,12 @@ free of direct ORM imports.
 
 from __future__ import annotations
 
-from django.db.models import Q, QuerySet
+from django.db.models import QuerySet
 
 from apps.attendance import selectors
 from apps.attendance.interfaces.repositories import IAttendanceRepository
 from apps.attendance.models import AttendanceRecord
-from apps.cohorts.models import Cohort
+from apps.cohorts.selectors import taught_cohorts
 from apps.schedule import selectors as schedule_selectors
 from apps.schedule.models import Lesson
 from apps.students.models import StudentProfile
@@ -37,12 +37,4 @@ class AttendanceRepository(BaseRepository[AttendanceRecord], IAttendanceReposito
         return {s.pk: s for s in StudentProfile.objects.filter(pk__in=ids)}
 
     def cohort_taught_by(self, *, cohort_id: int, user) -> bool:
-        return (
-            Cohort.objects.filter(pk=cohort_id)
-            .filter(
-                Q(primary_teacher__user=user)
-                | Q(co_teachers__teacher__user=user)
-                | Q(lessons__teacher__user=user)
-            )
-            .exists()
-        )
+        return taught_cohorts(user=user).filter(pk=cohort_id).exists()

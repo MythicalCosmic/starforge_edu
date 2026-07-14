@@ -163,7 +163,11 @@ def center_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
         return success(center_to_dict(_get_center(pk)))
     if request.method == "PATCH":
         center = _get_center(pk)
-        center = _service().update_contact(center=center, changes=_update_changes(request))
+        center = _service().update_contact(
+            center=center,
+            changes=_update_changes(request),
+            actor=request.user,
+        )
         return success(center_to_dict(center))
     return _method_not_allowed()
 
@@ -246,7 +250,12 @@ def center_domains_view(request: HttpRequest, pk: int) -> HttpResponse:
         data = read_json(request)
         domain_name = _str_required(_require(data, "domain"), "domain", max_length=253)
         is_primary = bool_field(data, "is_primary")
-        row = _service().add_domain(center=center, domain_name=domain_name, is_primary=is_primary)
+        row = _service().add_domain(
+            center=center,
+            domain_name=domain_name,
+            is_primary=is_primary,
+            actor=request.user,
+        )
         return created(domain_to_dict(row))
     return _method_not_allowed()
 
@@ -257,7 +266,20 @@ def center_set_primary_domain_view(request: HttpRequest, pk: int, domain_id: int
     if request.method != "POST":
         return _method_not_allowed()
     center = _get_center(pk)
-    row = _service().set_primary_domain(center=center, domain_id=domain_id)
+    row = _service().set_primary_domain(center=center, domain_id=domain_id, actor=request.user)
+    return success(domain_to_dict(row))
+
+
+@csrf_exempt
+@require_platform_admin
+def center_verify_domain_view(request: HttpRequest, pk: int, claim_id) -> HttpResponse:
+    if request.method != "POST":
+        return _method_not_allowed()
+    row = _service().verify_domain(
+        center=_get_center(pk),
+        claim_id=claim_id,
+        actor=request.user,
+    )
     return success(domain_to_dict(row))
 
 

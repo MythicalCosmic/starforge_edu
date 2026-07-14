@@ -27,11 +27,11 @@ from core.listing import apply_filters, paginate
 from core.permissions import (
     Role,
     _request_overrides,
-    get_role_memberships,
     get_user_roles,
     has_permission_code,
 )
 from core.responses import created, error, no_content, paginated, success
+from core.scoping import is_unscoped, permission_membership_branch_ids
 
 _RESOURCE = "forms"
 
@@ -40,20 +40,26 @@ def _service() -> IFormService:
     return container.resolve(IFormService)  # type: ignore[type-abstract]
 
 
-def _scope(request: HttpRequest) -> tuple[bool, bool, set[int]]:
-    """(is_unscoped, can_write, branch_ids) for the caller."""
+def _scope(request: HttpRequest) -> tuple[bool, bool, set[int], set[int]]:
+    """Permission-paired read/write branch scopes for the caller."""
     req: Any = request  # perm helpers are duck-typed on .user (typed Request upstream)
     roles = get_user_roles(req)
-    is_unscoped = getattr(req.user, "is_superuser", False) or Role.DIRECTOR in roles
+    unscoped = is_unscoped(req)
     can_write = has_permission_code(roles, f"{_RESOURCE}:write", _request_overrides(req))
-    branch_ids = {m.branch_id for m in get_role_memberships(req) if m.branch_id}
-    return is_unscoped, can_write, branch_ids
+    read_branch_ids = permission_membership_branch_ids(roles=roles, permission=f"{_RESOURCE}:read")
+    write_branch_ids = permission_membership_branch_ids(roles=roles, permission=f"{_RESOURCE}:write")
+    return unscoped, can_write, read_branch_ids, write_branch_ids
 
 
 def _get_visible(request: HttpRequest, pk: int) -> Form:
-    is_unscoped, can_write, branch_ids = _scope(request)
+    unscoped, can_write, read_branch_ids, write_branch_ids = _scope(request)
     form = _service().get_visible(
-        user=request.user, is_unscoped=is_unscoped, can_write=can_write, branch_ids=branch_ids, pk=pk
+        user=request.user,
+        is_unscoped=unscoped,
+        can_write=can_write,
+        read_branch_ids=read_branch_ids,
+        write_branch_ids=write_branch_ids,
+        pk=pk,
     )
     if form is None:
         raise NotFoundException(code="not_found")  # not in the caller's scope -> 404, no leak
@@ -67,8 +73,8 @@ def _get_manageable(request: HttpRequest, pk: int) -> Form:
     that read leg must not let them edit/close it or inspect all respondents.
     """
     form = _get_visible(request, pk)
-    is_unscoped, _can_write, branch_ids = _scope(request)
-    if is_unscoped or form.created_by_id == request.user.pk or form.branch_id in branch_ids:
+    unscoped, _can_write, _read_branch_ids, write_branch_ids = _scope(request)
+    if unscoped or form.created_by_id == request.user.pk or form.branch_id in write_branch_ids:
         return form
     raise NotFoundException(code="not_found")
 
@@ -78,9 +84,13 @@ def _get_manageable(request: HttpRequest, pk: int) -> Form:
 def forms_collection_view(request: HttpRequest) -> HttpResponse:
     if request.method in ("GET", "HEAD"):
         check_perm(request, f"{_RESOURCE}:read")
-        is_unscoped, can_write, branch_ids = _scope(request)
+        unscoped, can_write, read_branch_ids, write_branch_ids = _scope(request)
         qs = _service().scoped_list(
-            user=request.user, is_unscoped=is_unscoped, can_write=can_write, branch_ids=branch_ids
+            user=request.user,
+            is_unscoped=unscoped,
+            can_write=can_write,
+            read_branch_ids=read_branch_ids,
+            write_branch_ids=write_branch_ids,
         )
         qs = apply_filters(
             request,
@@ -216,8 +226,8 @@ def _create(request: HttpRequest) -> HttpResponse:
         audience_roles=_audience_roles(body.get("audience_roles", [])),
         audience_user_ids=_audience_user_ids(body.get("audience_user_ids", [])),
     )
-    is_unscoped, _can_write, branch_ids = _scope(request)
-    form = _service().create(dto, creator=request.user, is_unscoped=is_unscoped, branch_ids=branch_ids)
+    unscoped, _can_write, _read_branch_ids, write_branch_ids = _scope(request)
+    form = _service().create(dto, creator=request.user, is_unscoped=unscoped, branch_ids=write_branch_ids)
     return created(form_to_dict(form))
 
 

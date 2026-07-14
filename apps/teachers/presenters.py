@@ -27,6 +27,11 @@ def teacher_to_dict(teacher: TeacherProfile) -> dict[str, Any]:
     # without a second call. `branch`/`department` are select_related on both the list
     # queryset (repository.get_queryset + selectors.list_teachers) and detail path, so
     # these add JOINs, not queries. `branch` is non-null; `department` is nullable.
+    from apps.users.presenters import role_membership_to_dict
+
+    memberships = [
+        membership for membership in teacher.user.role_memberships.all() if membership.revoked_at is None
+    ]
     return {
         "id": teacher.id,
         "username": teacher.username,
@@ -53,5 +58,6 @@ def teacher_to_dict(teacher: TeacherProfile) -> dict[str, Any]:
         "salary_type": teacher.salary_type,
         "rate": str(teacher.rate) if teacher.rate is not None else None,
         "is_substitute": teacher.is_substitute,
+        "account_type_assignments": [role_membership_to_dict(membership) for membership in memberships],
         "created_at": teacher.created_at.isoformat(),
     }

@@ -7,8 +7,8 @@ from django.db.models import Count, Q, QuerySet
 
 from apps.attendance.models import AttendanceRecord
 from apps.cohorts.models import Cohort
-from core.permissions import Role
-from core.scoping import role_membership_scope_q
+from core.permissions import PermissionRoleSet, Role
+from core.scoping import permission_membership_scope_q, role_membership_scope_q
 
 
 def _base() -> QuerySet[AttendanceRecord]:
@@ -27,8 +27,14 @@ def scoped_records(*, user, roles: set[str] | None = None) -> QuerySet[Attendanc
     if Role.DIRECTOR in roles:
         return qs
 
-    visible = Q(pk__in=[])
-    if Role.HEAD_OF_DEPT in roles:
+    visible = permission_membership_scope_q(
+        roles=roles,
+        permission="attendance:read",
+        branch_field="lesson__cohort__branch_id",
+        department_field="lesson__cohort__department_id",
+        account_kinds={"staff"},
+    )
+    if not isinstance(roles, PermissionRoleSet) and Role.HEAD_OF_DEPT in roles:
         visible |= role_membership_scope_q(
             user=user,
             roles={Role.HEAD_OF_DEPT},
@@ -54,8 +60,14 @@ def scoped_dashboard_cohorts(*, user, roles: set[str] | None = None) -> QuerySet
     if Role.DIRECTOR in roles:
         return qs
 
-    visible = Q(pk__in=[])
-    if Role.HEAD_OF_DEPT in roles:
+    visible = permission_membership_scope_q(
+        roles=roles,
+        permission="attendance:read",
+        branch_field="branch_id",
+        department_field="department_id",
+        account_kinds={"staff"},
+    )
+    if not isinstance(roles, PermissionRoleSet) and Role.HEAD_OF_DEPT in roles:
         visible |= role_membership_scope_q(
             user=user,
             roles={Role.HEAD_OF_DEPT},
@@ -63,11 +75,9 @@ def scoped_dashboard_cohorts(*, user, roles: set[str] | None = None) -> QuerySet
             department_field="department_id",
         )
     if Role.TEACHER in roles:
-        visible |= (
-            Q(primary_teacher__user=user)
-            | Q(co_teachers__teacher__user=user)
-            | Q(lessons__teacher__user=user)
-        )
+        from apps.cohorts.selectors import taught_cohorts
+
+        visible |= Q(pk__in=taught_cohorts(user=user).values("pk"))
     return qs.filter(visible).distinct()
 
 

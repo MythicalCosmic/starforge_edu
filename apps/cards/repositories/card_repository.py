@@ -11,7 +11,7 @@ from apps.cards.interfaces.repositories import (
     ICardTypeRepository,
     IWalletRepository,
 )
-from apps.cards.models import Card, CardType, Wallet, WalletTransaction
+from apps.cards.models import Card, CardScan, CardType, Wallet, WalletTransaction
 from apps.students.models import StudentProfile
 from core.repositories import BaseRepository
 
@@ -66,6 +66,18 @@ class CardRepository(BaseRepository[Card], ICardRepository):
 
     def get_student(self, *, student_id: int) -> StudentProfile | None:
         return StudentProfile.objects.select_related("branch").filter(pk=student_id).first()
+
+    def scoped_scans(self, *, is_director: bool, branch_ids: set[int]) -> QuerySet[CardScan]:
+        qs = CardScan.objects.select_related(
+            "card",
+            "card__student",
+            "card__student__user",
+            "card__card_type",
+            "scanned_by",
+        )
+        if is_director:
+            return qs
+        return qs.filter(card__student__branch_id__in=branch_ids)
 
 
 class WalletRepository(BaseRepository[Wallet], IWalletRepository):

@@ -20,7 +20,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from core.permissions import Role
+from core.permissions import PermissionRoleSet, Role
+from core.scoping import permission_membership_scope_q
 
 # Only directors see a whole tenant. HoDs/accountants are branch-scoped and a
 # teacher is narrowed further to cohorts they own (see teacher_cohort_ids).
@@ -77,13 +78,9 @@ def teacher_cohort_ids(user) -> set[int]:
     One query. Used by the cohort-scoped generators to restrict a non-staff
     teacher's report to their own cohorts (D4-LB-5 selector scoping).
     """
-    from django.db.models import Q
+    from apps.cohorts.selectors import taught_cohorts
 
-    from apps.cohorts.models import Cohort
-
-    qs = Cohort.objects.filter(
-        Q(primary_teacher__user=user) | Q(co_teachers__teacher__user=user) | Q(lessons__teacher__user=user)
-    )
+    qs = taught_cohorts(user=user)
     return set(qs.values_list("id", flat=True).distinct())
 
 
@@ -92,6 +89,27 @@ def membership_branch_ids(user) -> set[int]:
     if user is None:
         return set()
     return set(user.role_memberships.filter(revoked_at__isnull=True).values_list("branch_id", flat=True))
+
+
+def staff_report_scope_q(*, roles: set[str], user, branch_field: str, department_field: str | None = None):
+    """Per-membership report scope for custom STAFF account types.
+
+    Plain role sets are retained for direct selector tests/internal callers and use
+    the legacy branch fallback. Runtime ``PermissionRoleSet`` values bind the grant
+    to the exact membership that supplied ``reports:read``.
+    """
+    from django.db.models import Q
+
+    scoped = permission_membership_scope_q(
+        roles=roles,
+        permission="reports:read",
+        branch_field=branch_field,
+        department_field=department_field,
+        account_kinds={"staff"},
+    )
+    if not isinstance(roles, PermissionRoleSet):
+        scoped |= Q(**{f"{branch_field}__in": membership_branch_ids(user)})
+    return scoped
 
 
 def is_full_scope(*, user, roles: set[str]) -> bool:

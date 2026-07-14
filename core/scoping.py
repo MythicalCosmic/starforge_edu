@@ -12,7 +12,15 @@ from typing import Any
 
 from django.db.models import Q, QuerySet
 
-from core.permissions import Role, get_role_memberships
+from core.permissions import (
+    MembershipGrantScope,
+    PermissionRoleSet,
+    Role,
+    _code_allowed,
+    get_role_memberships,
+    get_user_roles,
+    has_permission_code,
+)
 
 
 def is_unscoped(request: Any) -> bool:
@@ -56,7 +64,9 @@ def role_membership_scope_q(
         user.role_memberships.filter(
             revoked_at__isnull=True,
             role__in=role_set,
-        ).values_list("branch_id", "department_id")
+        )
+        .filter(Q(account_type__isnull=True) | Q(account_type__is_active=True))
+        .values_list("branch_id", "department_id")
     )
     if not memberships:
         return Q(pk__in=[])
@@ -76,6 +86,186 @@ def role_membership_scope_q(
                 }
             )
     return scoped
+
+
+def permission_membership_scope_q(
+    *,
+    roles: Iterable[str],
+    permission: str,
+    branch_field: str,
+    department_field: str | None = None,
+    account_kinds: Iterable[str] | None = None,
+) -> Q:
+    """Scope rows to memberships that actually grant ``permission``.
+
+    This is the canonical bridge for custom account types: a counselor grant in
+    Branch A cannot accidentally borrow the user's unrelated Branch B account
+    type. Legacy/null memberships retain matrix+override compatibility.
+    """
+    scoped = Q(pk__in=[])
+    for membership in permission_membership_scopes(
+        roles=roles,
+        permission=permission,
+        account_kinds=account_kinds,
+    ):
+        if membership.department_id is None or department_field is None:
+            scoped |= Q(**{branch_field: membership.branch_id})
+        else:
+            scoped |= Q(
+                **{
+                    branch_field: membership.branch_id,
+                    department_field: membership.department_id,
+                }
+            )
+    return scoped
+
+
+def permission_membership_scopes(
+    *,
+    roles: Iterable[str],
+    permission: str,
+    account_kinds: Iterable[str] | None = None,
+) -> tuple[MembershipGrantScope, ...]:
+    """Memberships that individually supply ``permission``.
+
+    Request paths pass :class:`PermissionRoleSet`, whose per-membership grant
+    metadata prevents a scope from one account type being borrowed by another.
+    A plain role set intentionally has no trustworthy membership/grant pairing
+    and therefore fails closed here.
+    """
+    if not isinstance(roles, PermissionRoleSet):
+        return ()
+    allowed_kinds = set(account_kinds) if account_kinds is not None else None
+    matches: list[MembershipGrantScope] = []
+    for membership in roles.membership_scopes:
+        if allowed_kinds is not None and membership.account_kind not in allowed_kinds:
+            continue
+        allowed = (
+            has_permission_code({membership.role}, permission)
+            if membership.is_legacy_fallback
+            else _code_allowed(set(membership.grants), set(), permission)
+        )
+        if allowed:
+            matches.append(membership)
+    return tuple(matches)
+
+
+def permission_membership_branch_ids(
+    *,
+    roles: Iterable[str],
+    permission: str,
+    account_kinds: Iterable[str] | None = None,
+) -> set[int]:
+    """Branch ids from only the memberships granting ``permission``."""
+    return {
+        membership.branch_id
+        for membership in permission_membership_scopes(
+            roles=roles,
+            permission=permission,
+            account_kinds=account_kinds,
+        )
+    }
+
+
+def permission_membership_department_ids(
+    *,
+    roles: Iterable[str],
+    permission: str,
+    account_kinds: Iterable[str] | None = None,
+) -> set[int]:
+    """Department ids from only the memberships granting ``permission``."""
+    return {
+        membership.department_id
+        for membership in permission_membership_scopes(
+            roles=roles,
+            permission=permission,
+            account_kinds=account_kinds,
+        )
+        if membership.department_id is not None
+    }
+
+
+def request_permission_membership_allows(
+    request: Any,
+    *,
+    permission: str,
+    branch_id: int | None,
+    department_id: int | None = None,
+    enforce_department: bool = True,
+    account_kinds: Iterable[str] | None = None,
+) -> bool:
+    """Whether the exact membership granting ``permission`` covers the target."""
+    if is_unscoped(request):
+        return True
+    roles = get_user_roles(request)
+    if not isinstance(roles, PermissionRoleSet):
+        return False
+    allowed_kinds = set(account_kinds) if account_kinds is not None else None
+    for membership in roles.membership_scopes:
+        if membership.branch_id != branch_id:
+            continue
+        if allowed_kinds is not None and membership.account_kind not in allowed_kinds:
+            continue
+        if (
+            enforce_department
+            and membership.department_id is not None
+            and membership.department_id != department_id
+        ):
+            continue
+        allowed = (
+            has_permission_code({membership.role}, permission)
+            if membership.is_legacy_fallback
+            else _code_allowed(set(membership.grants), set(), permission)
+        )
+        if allowed:
+            return True
+    return False
+
+
+def assert_permission_membership_scope(
+    request: Any,
+    *,
+    permission: str,
+    branch_id: int | None,
+    department_id: int | None = None,
+    enforce_department: bool = True,
+    account_kinds: Iterable[str] | None = None,
+) -> None:
+    if request_permission_membership_allows(
+        request,
+        permission=permission,
+        branch_id=branch_id,
+        department_id=department_id,
+        enforce_department=enforce_department,
+        account_kinds=account_kinds,
+    ):
+        return
+    from core.exceptions import PermissionException
+
+    raise PermissionException(code="out_of_scope")
+
+
+def scope_to_permission_memberships(
+    request: Any,
+    queryset: QuerySet,
+    *,
+    permission: str,
+    branch_field: str,
+    department_field: str | None = None,
+    account_kinds: Iterable[str] | None = None,
+) -> QuerySet:
+    """Filter rows by the exact memberships supplying ``permission``."""
+    if is_unscoped(request):
+        return queryset
+    return queryset.filter(
+        permission_membership_scope_q(
+            roles=get_user_roles(request),
+            permission=permission,
+            branch_field=branch_field,
+            department_field=department_field,
+            account_kinds=account_kinds,
+        )
+    )
 
 
 def request_role_membership_allows(

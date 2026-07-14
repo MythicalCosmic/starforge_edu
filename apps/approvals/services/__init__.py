@@ -22,7 +22,7 @@ from core.exceptions import (
     UnprocessableEntity,
     ValidationException,
 )
-from core.permissions import roles_with_permission
+from core.permissions import role_memberships_with_permission
 
 # Kinds whose payload is validated at creation time and which carry an
 # on-approval side-effect (see _apply_approval_effect).
@@ -88,11 +88,7 @@ def _notify(*, event_type: str, recipient_id: int | None, req: ApprovalRequest) 
 
 def _disburser_ids(req: ApprovalRequest) -> list[int]:
     """Active users who may disburse — scoped to the request's branch when set."""
-    from apps.users.models import RoleMembership
-
-    qs = RoleMembership.objects.filter(
-        role__in=roles_with_permission("approvals:disburse"), revoked_at__isnull=True
-    )
+    qs = role_memberships_with_permission("approvals:disburse")
     if req.branch_id:
         qs = qs.filter(branch_id=req.branch_id)
     return list(qs.values_list("user_id", flat=True).distinct())
@@ -267,19 +263,21 @@ def _validate_loan_payload(payload: dict) -> dict:
     IN) name the BORROWER on the ledger — not whoever keyed the request — which is
     the "who actually owes the centre" audit line.
     """
+    from apps.access.models import AccountType
     from apps.users.models import User
-    from core.permissions import Role
+    from core.permissions import role_memberships_for_account_kinds
 
-    staff_roles = tuple(r for r in Role.ALL if r not in (Role.STUDENT, Role.PARENT))
     borrower_id = payload.get("borrower_id")
+    staff_memberships = role_memberships_for_account_kinds(
+        (AccountType.AccountKind.STAFF, AccountType.AccountKind.TEACHER)
+    )
     borrower = (
         User.objects.filter(
             pk=borrower_id,
             is_active=True,
             # Positive role condition on the join → only users WITH a live staff
             # membership match (avoids the LEFT-JOIN isnull trap matching everyone).
-            role_memberships__revoked_at__isnull=True,
-            role_memberships__role__in=staff_roles,
+            role_memberships__in=staff_memberships,
         )
         .distinct()
         .first()
@@ -700,9 +698,12 @@ def _apply_payment_delay_effect(req: ApprovalRequest, actor) -> None:
     from apps.finance.services import extend_invoice_due_date
 
     p = dict(req.payload or {})
-    before = Invoice.objects.filter(pk=p["invoice_id"]).only("due_date", "status").first()
+    # Lock before taking the snapshot. Two delay decisions for one invoice must
+    # serialize or the second request can remember a stale "previous" deadline.
+    before = Invoice.objects.select_for_update().filter(pk=p["invoice_id"]).only("due_date", "status").first()
     previous_due = before.due_date.isoformat() if before and before.due_date else None
     previous_status = before.status if before else None
+    baseline_due = _payment_delay_baseline_date(p["invoice_id"], fallback=before.due_date if before else None)
     invoice = extend_invoice_due_date(
         invoice_id=p["invoice_id"],
         new_due_date=date.fromisoformat(p["new_due_date"]),
@@ -711,6 +712,7 @@ def _apply_payment_delay_effect(req: ApprovalRequest, actor) -> None:
     req.payload = {
         **p,
         "previous_due_date": previous_due,
+        "baseline_due_date": baseline_due.isoformat() if baseline_due else None,
         "previous_status": previous_status,
         "applied_due_date": invoice.due_date.isoformat() if invoice.due_date else None,
         "invoice_status": invoice.status,
@@ -855,21 +857,68 @@ def _reverse_absence_deduction_effect(req: ApprovalRequest) -> None:
         req.payload = {**p, "effect_reversed": True}
 
 
+def _payment_delay_baseline_date(invoice_id: int, *, fallback: date | None = None) -> date | None:
+    """Earliest known pre-delay deadline for an invoice's extension chain."""
+    candidates = [fallback] if fallback is not None else []
+    payloads = ApprovalRequest.objects.filter(
+        kind=KIND_PAYMENT_DELAY,
+        payload__invoice_id=invoice_id,
+    ).values_list("payload", flat=True)
+    for payload in payloads:
+        raw = (payload or {}).get("baseline_due_date") or (payload or {}).get("previous_due_date")
+        if not raw:
+            continue
+        try:
+            candidates.append(date.fromisoformat(raw))
+        except (TypeError, ValueError):
+            continue
+    return min(candidates) if candidates else None
+
+
 def _reverse_payment_delay_effect(req: ApprovalRequest, actor) -> None:
-    """Put the invoice's due date back to its pre-extension value (snapshotted at
-    approve time), re-flagging OVERDUE if appropriate."""
+    """Remove one extension while preserving every other approved extension."""
+    from apps.finance.models import Invoice
     from apps.finance.services import restore_invoice_due_date
 
     p = dict(req.payload or {})
     invoice_id = p.get("invoice_id")
     if invoice_id and "previous_due_date" in p:
-        prev = p["previous_due_date"]
+        # The invoice row is the serialization lock shared by approve/reject.
+        # Other requests remain unlocked, avoiding cross-request deadlocks.
+        Invoice.objects.select_for_update().filter(pk=invoice_id).only("pk").first()
+        fallback_raw = p.get("baseline_due_date") or p.get("previous_due_date")
+        fallback = date.fromisoformat(fallback_raw) if fallback_raw else None
+        baseline = _payment_delay_baseline_date(invoice_id, fallback=fallback)
+        active_due_dates: list[date] = []
+        active_payloads = (
+            ApprovalRequest.objects.filter(
+                kind=KIND_PAYMENT_DELAY,
+                status=ApprovalRequest.Status.APPROVED,
+                payload__invoice_id=invoice_id,
+            )
+            .exclude(pk=req.pk)
+            .values_list("payload", flat=True)
+        )
+        for payload in active_payloads:
+            if (payload or {}).get("effect_reversed"):
+                continue
+            raw = (payload or {}).get("applied_due_date") or (payload or {}).get("new_due_date")
+            if raw:
+                try:
+                    active_due_dates.append(date.fromisoformat(raw))
+                except (TypeError, ValueError):
+                    continue
+        effective_due = max([d for d in [baseline, *active_due_dates] if d is not None], default=None)
         restore_invoice_due_date(
             invoice_id=invoice_id,
-            due_date=date.fromisoformat(prev) if prev else None,
+            due_date=effective_due,
             actor=actor,
         )
-        req.payload = {**p, "effect_reversed": True}
+        req.payload = {
+            **p,
+            "effect_reversed": True,
+            "restored_due_date": effective_due.isoformat() if effective_due else None,
+        }
 
 
 def _reverse_approval_effect(req: ApprovalRequest, actor) -> None:

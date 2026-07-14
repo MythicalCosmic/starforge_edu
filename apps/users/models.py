@@ -1,11 +1,12 @@
-"""Identity models: User, Device, OTP, RoleMembership.
+"""Identity models: admin User, role-owned accounts, sessions, and type assignments.
 
 Login is username + password (owner decision, 2026-06-11 — supersedes the
 original OTP-as-login design). ``username`` is the unique identity; phone and
 email are optional contact/verification channels. OTP codes now serve password
 reset and contact verification only (see apps.auth).
 
-Roles are assigned via RoleMembership(user, branch, department, role).
+Permissions are assigned through AccountType-backed RoleMembership rows. The
+``role`` column and internal User FK remain rollout-compatibility details only.
 The Branch and Department FK targets live in apps.org (TENANT_APPS only),
 so RoleMembership only exists on tenant schemas.
 """
@@ -187,14 +188,19 @@ class Device(models.Model):
 
 
 class Session(models.Model):
-    """Custom auth session (no JWT): the opaque ``key`` is the Bearer token sent on
-    every request. The row lives in the tenant schema, so a key only authenticates
-    against the center that issued it — tenant binding is automatic, no token claim
-    needed. Revocation is a row update (``revoked_at``); roles are read live per
-    request, so a role change takes effect immediately (no stale-token window)."""
+    """Custom auth session (no JWT).
 
+    The opaque Bearer key is returned exactly once at issuance; only ``key_hash``
+    is persisted. The row lives in the tenant schema, so a key only authenticates
+    against the center that issued it — tenant binding is automatic. Revocation is
+    a row update; roles are read live on every request.
+    """
+
+    _issued_key: str
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="auth_sessions")
-    key = models.CharField(max_length=64, unique=True, db_index=True)
+    # Keep the physical column name stable for a lower-risk deployment while the
+    # ORM/API name makes clear that this value is never a usable credential.
+    key_hash = models.CharField(db_column="key", max_length=71, unique=True, db_index=True)
     # Role-native auth: which role account the caller signed in AS (student/teacher/parent/
     # staff). Blank for legacy User-based sessions. ``user`` stays the linked account so all
     # downstream authz + audit FKs are unchanged; the principal just records role identity.
@@ -219,12 +225,17 @@ class Session(models.Model):
         return f"Session(user={self.user_id}, active={self.is_active})"
 
     @property
+    def key(self) -> str:
+        """Raw key on the newly-issued in-memory instance; empty after a DB read."""
+        return getattr(self, "_issued_key", "")
+
+    @property
     def is_active(self) -> bool:
         return self.revoked_at is None and self.expires_at > timezone.now()
 
 
 class RoleMembership(models.Model):
-    """Assignment of a Role to a User scoped by Branch (and optionally Department).
+    """Permission account-type assignment scoped by Branch and Department.
 
     Branch and Department live in apps.org (TENANT_APPS only). Because the
     `users` app is SHARED (TD-3 — public-schema platform staff), this model also
@@ -250,6 +261,16 @@ class RoleMembership(models.Model):
         blank=True,
         db_constraint=False,
     )
+    account_type = models.ForeignKey(
+        "access.AccountType",
+        on_delete=models.PROTECT,
+        related_name="memberships",
+        null=True,
+        blank=True,
+        db_constraint=False,
+    )
+    # Compatibility role retained for legacy row-scope code. Canonical
+    # permission grants come from ``account_type`` whenever it is populated.
     role = models.CharField(max_length=32)
 
     granted_at = models.DateTimeField(auto_now_add=True)
@@ -263,12 +284,49 @@ class RoleMembership(models.Model):
     revoked_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
-        unique_together = (("user", "branch", "department", "role"),)
+        verbose_name = _("Account type assignment")
+        verbose_name_plural = _("Account type assignments")
         constraints = [
             models.UniqueConstraint(
                 fields=("user", "branch", "role"),
-                condition=models.Q(department__isnull=True),
+                condition=models.Q(account_type__isnull=True, department__isnull=True),
                 name="role_membership_unique_branch_role",
+            ),
+            models.UniqueConstraint(
+                fields=("user", "branch", "department", "role"),
+                condition=models.Q(account_type__isnull=True, department__isnull=False),
+                name="legacy_membership_unique_scoped_role",
+            ),
+            models.UniqueConstraint(
+                fields=("user", "branch", "account_type"),
+                condition=models.Q(account_type__isnull=False, department__isnull=True),
+                name="account_type_membership_unique_branch",
+            ),
+            models.UniqueConstraint(
+                fields=("user", "branch", "department", "account_type"),
+                condition=models.Q(account_type__isnull=False, department__isnull=False),
+                name="account_type_membership_unique_department",
             ),
         ]
         ordering = ("-granted_at",)
+
+    def save(self, *args, **kwargs) -> None:
+        """Link known legacy roles to their canonical system type on new writes."""
+        account_type_linked = False
+        if self.account_type_id is None and self.role:
+            from django_tenants.utils import get_public_schema_name
+
+            from core.utils import current_schema
+
+            if current_schema() != get_public_schema_name():
+                from apps.access.models import AccountType
+
+                self.account_type_id = (
+                    AccountType.objects.filter(is_system=True, slug=self.role)
+                    .values_list("pk", flat=True)
+                    .first()
+                )
+                account_type_linked = self.account_type_id is not None
+        if account_type_linked and kwargs.get("update_fields") is not None:
+            kwargs["update_fields"] = set(kwargs["update_fields"]) | {"account_type"}
+        super().save(*args, **kwargs)

@@ -158,6 +158,38 @@ def _verify_and_consume_upload_grants(*, keys: list[str], actor) -> None:
         grant.save(update_fields=["actual_size_bytes", "consumed_at"])
 
 
+def consume_assignment_attachments(*, keys: list, actor=None) -> list[str]:
+    """Validate tenant ownership and, for new public writes, consume upload grants."""
+    if len(keys) > 20:
+        raise UnprocessableEntity(
+            _("Too many attachment keys."),
+            code="invalid_attachment_key",
+            fields={"attachments": ["At most 20 attachment keys are allowed."]},
+        )
+    try:
+        unique_count = len(set(keys))
+    except TypeError:
+        unique_count = -1
+    if unique_count != len(keys):
+        raise UnprocessableEntity(
+            _("Duplicate or malformed attachment keys are not allowed."),
+            code="invalid_attachment_key",
+            fields={"attachments": ["Each attachment key must be a unique string."]},
+        )
+    prefix = f"{current_schema()}/assignments/"
+    bad = [key for key in keys if not isinstance(key, str) or len(key) > 512 or not key.startswith(prefix)]
+    if bad:
+        raise UnprocessableEntity(
+            _("One or more attachment keys are not valid for this tenant."),
+            code="invalid_attachment_key",
+            fields={"attachments": [f"Keys must start with '{prefix}'."]},
+        )
+    normalized = list(keys)
+    if actor is not None:
+        _verify_and_consume_upload_grants(keys=normalized, actor=actor)
+    return normalized
+
+
 # ---------------------------------------------------------------------------
 # Assignment lifecycle
 # ---------------------------------------------------------------------------
@@ -192,6 +224,23 @@ def publish_assignment(*, assignment: Assignment, actor=None) -> Assignment:
 
 
 @transaction.atomic
+def close_assignment(*, assignment: Assignment, actor=None) -> Assignment:
+    """Close an open assignment; retries are idempotent and drafts cannot skip publish."""
+    assignment = Assignment.objects.select_for_update().get(pk=assignment.pk)
+    if assignment.status == Assignment.Status.CLOSED:
+        return assignment
+    if assignment.status != Assignment.Status.PUBLISHED:
+        raise UnprocessableEntity(
+            _("Only a published assignment can be closed."),
+            code="assignment_not_published",
+            fields={"status": [f"Cannot close from status '{assignment.status}'."]},
+        )
+    assignment.status = Assignment.Status.CLOSED
+    assignment.save(update_fields=["status", "updated_at"])
+    return assignment
+
+
+@transaction.atomic
 def submit(
     *, assignment: Assignment, student, text: str = "", attachment_keys=None, actor=None
 ) -> Submission:
@@ -216,17 +265,7 @@ def submit(
     # any key not under this tenant's prefix so a student cannot persist
     # cross-tenant-shaped (or other-student) S3 references that a future
     # download / quota flow would inherit.
-    keys = list(attachment_keys or [])
-    prefix = f"{current_schema()}/assignments/"
-    bad = [k for k in keys if not isinstance(k, str) or not k.startswith(prefix)]
-    if bad:
-        raise UnprocessableEntity(
-            _("One or more attachment keys are not valid for this tenant."),
-            code="invalid_attachment_key",
-            fields={"attachment_keys": [f"Keys must start with '{prefix}'."]},
-        )
-    if actor is not None:
-        _verify_and_consume_upload_grants(keys=keys, actor=actor)
+    keys = consume_assignment_attachments(keys=list(attachment_keys or []), actor=actor)
 
     settings = get_center_settings()
     max_resubmits = (
@@ -250,7 +289,10 @@ def submit(
         )
 
     grace = timedelta(minutes=settings.assignment_grace_minutes)
-    is_late = timezone.now() > assignment.due_at + grace
+    now = timezone.now()
+    # Compare elapsed time instead of adding to due_at; datetime.max + grace
+    # overflows even though such a far-future submission is plainly not late.
+    is_late = now > assignment.due_at and (now - assignment.due_at) > grace
     try:
         with transaction.atomic():
             submission = Submission.objects.create(
@@ -347,8 +389,19 @@ def grade_submission(*, submission: Submission, score, rubric_scores=None, feedb
     return grade
 
 
+@transaction.atomic
+def return_submission(*, submission: Submission, actor=None) -> Submission:
+    """Return a submission for revision; a repeated teacher action is a no-op."""
+    submission = Submission.objects.select_for_update().get(pk=submission.pk)
+    if submission.status == Submission.Status.RETURNED:
+        return submission
+    submission.status = Submission.Status.RETURNED
+    submission.save(update_fields=["status"])
+    return submission
+
+
 # ---------------------------------------------------------------------------
-# Plagiarism (D2-D-5 stub — interface only, no HTTP)
+# Plagiarism (D2-D-5 local tenant-scoped detector)
 # ---------------------------------------------------------------------------
 
 
@@ -356,12 +409,51 @@ def grade_submission(*, submission: Submission, score, rubric_scores=None, feedb
 class PlagiarismResult:
     status: str
     score: float | None
+    matched_submission_id: int | None = None
 
 
 def check_submission(submission: Submission) -> PlagiarismResult:
-    """Plagiarism interface stub (real provider lands later). Never called from a
-    request path; returns a typed not-implemented result."""
-    return PlagiarismResult(status="not_implemented", score=None)
+    """Compare one response with other students' responses for the assignment.
+
+    This is a deterministic local baseline rather than a fictional external
+    provider. Five-word shingles tolerate punctuation/case changes, and every
+    candidate remains inside the current tenant and assignment.
+    """
+    import re
+
+    def shingles(text: str) -> set[tuple[str, ...]]:
+        words = re.findall(r"\w+", (text or "").casefold(), flags=re.UNICODE)
+        if len(words) < 5:
+            return set()
+        return {tuple(words[index : index + 5]) for index in range(len(words) - 4)}
+
+    source = shingles(submission.text)
+    if not source:
+        return PlagiarismResult(status="insufficient_text", score=None)
+
+    best_score = 0.0
+    matched_submission_id: int | None = None
+    candidates = (
+        Submission.objects.filter(assignment_id=submission.assignment_id)
+        .exclude(pk=submission.pk)
+        .exclude(student_id=submission.student_id)
+        .only("id", "text")
+    )
+    for candidate in candidates.iterator(chunk_size=200):
+        candidate_shingles = shingles(candidate.text)
+        if not candidate_shingles:
+            continue
+        score = len(source & candidate_shingles) / len(source | candidate_shingles)
+        if score > best_score:
+            best_score = score
+            matched_submission_id = candidate.pk
+            if score == 1.0:
+                break
+    return PlagiarismResult(
+        status="completed",
+        score=round(best_score, 4),
+        matched_submission_id=matched_submission_id,
+    )
 
 
 # ---------------------------------------------------------------------------

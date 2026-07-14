@@ -8,24 +8,16 @@ from __future__ import annotations
 from django.db.models import Q, QuerySet
 
 from apps.assignments.models import Assignment, Submission
-from core.permissions import Role
-from core.scoping import role_membership_scope_q
+from core.permissions import PermissionRoleSet, Role
+from core.scoping import permission_membership_scope_q, role_membership_scope_q
 
 STAFF_ROLES = {Role.DIRECTOR}
 
 
 def _cohorts_taught_by(user) -> QuerySet:
-    from apps.cohorts.models import Cohort
+    from apps.cohorts.selectors import taught_cohorts
 
-    return (
-        Cohort.objects.filter(
-            Q(primary_teacher__user=user)
-            | Q(co_teachers__teacher__user=user)
-            | Q(lessons__teacher__user=user)
-        )
-        .values_list("id", flat=True)
-        .distinct()
-    )
+    return taught_cohorts(user=user).values_list("id", flat=True)
 
 
 def scoped_assignments(*, user, roles: set[str] | None = None) -> QuerySet[Assignment]:
@@ -36,24 +28,29 @@ def scoped_assignments(*, user, roles: set[str] | None = None) -> QuerySet[Assig
         roles = {m.role for m in user.role_memberships.filter(revoked_at__isnull=True)}
     if roles & STAFF_ROLES:
         return qs
-    if Role.HEAD_OF_DEPT in roles:
-        return qs.filter(
-            role_membership_scope_q(
-                user=user,
-                roles={Role.HEAD_OF_DEPT},
-                branch_field="cohort__branch_id",
-                department_field="cohort__department_id",
-            )
+    visible = permission_membership_scope_q(
+        roles=roles,
+        permission="assignments:read",
+        branch_field="cohort__branch_id",
+        department_field="cohort__department_id",
+        account_kinds={"staff"},
+    )
+    if not isinstance(roles, PermissionRoleSet) and Role.HEAD_OF_DEPT in roles:
+        visible |= role_membership_scope_q(
+            user=user,
+            roles={Role.HEAD_OF_DEPT},
+            branch_field="cohort__branch_id",
+            department_field="cohort__department_id",
         )
-    if Role.TEACHER in roles:  # own cohorts, incl. drafts
-        return qs.filter(cohort_id__in=_cohorts_taught_by(user))
+    if Role.TEACHER in roles:  # natural ownership: cohorts this teacher actually teaches
+        visible |= Q(cohort_id__in=_cohorts_taught_by(user))
     if Role.STUDENT in roles:  # published only, own cohorts
-        return qs.filter(
+        visible |= Q(
             status=Assignment.Status.PUBLISHED,
             cohort__memberships__student__user=user,
             cohort__memberships__end_date__isnull=True,
-        ).distinct()
-    return qs.none()
+        )
+    return qs.filter(visible).distinct()
 
 
 def scoped_submissions(*, user, roles: set[str] | None = None) -> QuerySet[Submission]:
@@ -64,17 +61,22 @@ def scoped_submissions(*, user, roles: set[str] | None = None) -> QuerySet[Submi
         roles = {m.role for m in user.role_memberships.filter(revoked_at__isnull=True)}
     if roles & STAFF_ROLES:
         return qs
-    if Role.HEAD_OF_DEPT in roles:
-        return qs.filter(
-            role_membership_scope_q(
-                user=user,
-                roles={Role.HEAD_OF_DEPT},
-                branch_field="assignment__cohort__branch_id",
-                department_field="assignment__cohort__department_id",
-            )
+    visible = permission_membership_scope_q(
+        roles=roles,
+        permission="assignments:read",
+        branch_field="assignment__cohort__branch_id",
+        department_field="assignment__cohort__department_id",
+        account_kinds={"staff"},
+    )
+    if not isinstance(roles, PermissionRoleSet) and Role.HEAD_OF_DEPT in roles:
+        visible |= role_membership_scope_q(
+            user=user,
+            roles={Role.HEAD_OF_DEPT},
+            branch_field="assignment__cohort__branch_id",
+            department_field="assignment__cohort__department_id",
         )
-    if Role.TEACHER in roles:  # submissions for cohorts they teach
-        return qs.filter(assignment__cohort_id__in=_cohorts_taught_by(user))
+    if Role.TEACHER in roles:  # natural ownership: submissions for taught cohorts
+        visible |= Q(assignment__cohort_id__in=_cohorts_taught_by(user))
     if Role.STUDENT in roles:  # own submissions only
-        return qs.filter(student__user=user)
-    return qs.none()
+        visible |= Q(student__user=user)
+    return qs.filter(visible).distinct()
