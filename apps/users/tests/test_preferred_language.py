@@ -80,3 +80,16 @@ def test_patch_me_duplicate_phone_is_field_400_not_409(tenant_a, user_in, as_use
     assert resp.status_code == 400, resp.content
     assert resp.json()["code"] == "validation_error"
     assert "phone" in resp.json()["errors"]
+
+
+def test_patch_me_cannot_deactivate_own_account(tenant_a, user_in, as_user):
+    user = user_in(tenant_a)
+    response = as_user(tenant_a, user).patch(
+        "/api/v1/users/me/",
+        {"is_active": False},
+        format="json",
+    )
+    assert response.status_code == 400
+    assert "is_active" in response.json()["errors"]
+    user.refresh_from_db()
+    assert user.is_active is True

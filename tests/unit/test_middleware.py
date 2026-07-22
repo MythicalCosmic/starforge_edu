@@ -6,7 +6,7 @@ import re
 from unittest import mock
 
 from django.http import HttpResponse
-from django.test import RequestFactory
+from django.test import RequestFactory, override_settings
 
 from core.middleware import HealthCheckMiddleware, RequestIDMiddleware
 
@@ -77,8 +77,8 @@ def test_healthz_ready_503_when_db_down():
         response = HealthCheckMiddleware(_boom)(RequestFactory().get("/healthz/ready"))
     assert response.status_code == 503
     body = json.loads(response.content)
-    assert body["error"]["code"] == "not_ready"
-    assert body["error"]["detail"] == "Database unavailable."
+    assert body["code"] == "not_ready"
+    assert body["message"] == "Database unavailable."
 
 
 def test_healthz_ready_503_when_redis_down():
@@ -90,8 +90,8 @@ def test_healthz_ready_503_when_redis_down():
         response = HealthCheckMiddleware(_boom)(RequestFactory().get("/healthz/ready"))
     assert response.status_code == 503
     body = json.loads(response.content)
-    assert body["error"]["code"] == "not_ready"
-    assert body["error"]["detail"] == "Cache unavailable."
+    assert body["code"] == "not_ready"
+    assert body["message"] == "Cache unavailable."
 
 
 def test_healthz_ready_200_when_all_healthy():
@@ -103,6 +103,34 @@ def test_healthz_ready_200_when_all_healthy():
         response = HealthCheckMiddleware(_boom)(RequestFactory().get("/healthz/ready"))
     assert response.status_code == 200
     assert json.loads(response.content) == {"status": "ready"}
+
+
+@override_settings(HEALTH_REQUIRE_CELERY_HEARTBEAT=True)
+def test_healthz_ready_requires_recent_beat_worker_heartbeat():
+    with (
+        mock.patch("core.middleware.connection", mock.MagicMock()),
+        mock.patch("infrastructure.cache.redis_client.get_redis") as get_redis,
+    ):
+        get_redis.return_value.ping.return_value = True
+        get_redis.return_value.get.return_value = None
+        response = HealthCheckMiddleware(_boom)(RequestFactory().get("/healthz/ready"))
+    assert response.status_code == 503
+    assert json.loads(response.content)["message"] == "Background workers unavailable."
+
+
+@override_settings(HEALTH_READY_RATELIMIT="2/min")
+def test_healthz_ready_has_bounded_pre_tenant_probe_rate():
+    HealthCheckMiddleware._probe_buckets.clear()
+    middleware = HealthCheckMiddleware(_boom)
+    with (
+        mock.patch("core.middleware.connection", mock.MagicMock()),
+        mock.patch("infrastructure.cache.redis_client.get_redis") as get_redis,
+    ):
+        get_redis.return_value.ping.return_value = True
+        assert middleware(RequestFactory().get("/healthz/ready")).status_code == 200
+        assert middleware(RequestFactory().get("/healthz/ready")).status_code == 200
+        response = middleware(RequestFactory().get("/healthz/ready"))
+    assert response.status_code == 429
 
 
 def test_redis_url_setting_defined_so_get_redis_constructs():

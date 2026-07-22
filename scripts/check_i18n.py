@@ -3,8 +3,8 @@
 
 DoD #11 / TASKS §24: every user-facing string raised from a service or serializer
 error path must be translatable (wrapped in ``_()`` / ``gettext`` / ``gettext_lazy``).
-This script statically scans the repo's ``services.py`` + ``serializers.py`` (plus
-``core/exceptions.py`` and ``core/validators.py``) and flags any *bare* string
+This script statically scans layered service packages, legacy service modules,
+serializers, and shared error modules and flags any *bare* string
 literal passed as the message argument to an exception constructor.
 
 It is intentionally narrow to avoid false positives:
@@ -135,17 +135,23 @@ class ErrorPathVisitor(ast.NodeVisitor):
 
 
 def iter_target_files() -> list[Path]:
-    """The error-path files in scope: every services.py + serializers.py under
-    apps/, plus the two shared error/validation modules."""
-    targets: list[Path] = []
+    """Return every service/serializer module that constructs domain errors."""
+    targets: set[Path] = set()
     apps_dir = REPO_ROOT / "apps"
-    for pattern in ("*/services.py", "*/serializers.py"):
-        targets.extend(sorted(apps_dir.glob(pattern)))
-    for shared in ("core/exceptions.py", "core/validators.py"):
+    for pattern in (
+        "*/services.py",
+        "*/services/**/*.py",
+        "*/serializers.py",
+    ):
+        targets.update(apps_dir.glob(pattern))
+    for shared in (
+        "core/exceptions.py",
+        "core/validators.py",
+    ):
         path = REPO_ROOT / shared
         if path.exists():
-            targets.append(path)
-    return targets
+            targets.add(path)
+    return sorted(targets)
 
 
 def scan_file(path: Path) -> list[Finding]:

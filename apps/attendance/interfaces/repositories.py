@@ -1,8 +1,8 @@
 """Attendance-domain repository ports.
 
-Read scoping is role-based (delegated to ``apps.attendance.selectors``): a
-director/HoD/superuser sees every record; a teacher only records on lessons they
-teach; a parent their guardian-linked children's; a student their own. Out-of-scope
+Read scoping is delegated to ``apps.attendance.selectors``: director/superuser
+are tenant-wide, HoD follows membership scope, teacher follows taught lessons,
+and parent/student follow family/self. Out-of-scope
 rows are filtered OUT (so a detail 404s, never a 403 that leaks existence).
 """
 
@@ -23,7 +23,7 @@ class IAttendanceRepository(IBaseRepository[AttendanceRecord]):
     def get_scoped(self, *, user, roles: set[str], pk: int) -> AttendanceRecord | None:
         raise NotImplementedError
 
-    def get_lesson(self, *, lesson_id: int) -> Lesson | None:
+    def get_lesson(self, *, lesson_id: int, user, roles: set[str]) -> Lesson | None:
         raise NotImplementedError
 
     def students_by_ids(self, *, ids: list[int]) -> dict[int, StudentProfile]:

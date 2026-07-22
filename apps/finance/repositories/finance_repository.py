@@ -73,7 +73,12 @@ class ExpenseRepository(BaseRepository[Expense], IExpenseRepository):
 
     def query(self) -> QuerySet[Expense]:
         return Expense.objects.select_related(
-            "branch", "payment_method", "created_by", "approved_by", "paid_by"
+            "branch",
+            "payment_method",
+            "created_by",
+            "approved_by",
+            "paid_by",
+            "approval_request",
         ).all()
 
     def get(self, pk: int) -> Expense | None:
@@ -84,7 +89,7 @@ class CashierShiftRepository(BaseRepository[CashierShift], ICashierShiftReposito
     model = CashierShift
 
     def query(self) -> QuerySet[CashierShift]:
-        return CashierShift.objects.select_related("cashier", "branch").all()
+        return CashierShift.objects.select_related("cashier", "branch", "closed_by").all()
 
     def get(self, pk: int) -> CashierShift | None:
         return self.query().filter(pk=pk).first()

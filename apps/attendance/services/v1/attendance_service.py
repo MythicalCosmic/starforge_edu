@@ -7,6 +7,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from django.db.models import QuerySet
+from django.utils.translation import gettext_lazy as _
 
 from apps.attendance import selectors
 from apps.attendance.dto.attendance_dto import MarkEntryDTO
@@ -16,12 +17,6 @@ from apps.attendance.models import AttendanceRecord
 from apps.attendance.services import mark_attendance
 from apps.schedule.models import Lesson
 from core.exceptions import PermissionException, ValidationException
-from core.permissions import Role
-
-# Staff who may view any cohort's dashboard; a teacher additionally qualifies for
-# cohorts they teach (checked per-request). Students/parents never do. Kept in sync
-# with selectors.STAFF_ROLES.
-_DASHBOARD_STAFF = selectors.STAFF_ROLES
 
 
 class AttendanceService(IAttendanceService):
@@ -34,8 +29,8 @@ class AttendanceService(IAttendanceService):
     def get_record(self, *, user, roles: set[str], pk: int) -> AttendanceRecord | None:
         return self.repository.get_scoped(user=user, roles=roles, pk=pk)
 
-    def get_lesson(self, *, lesson_id: int) -> Lesson | None:
-        return self.repository.get_lesson(lesson_id=lesson_id)
+    def get_lesson(self, *, lesson_id: int, user, roles: set[str]) -> Lesson | None:
+        return self.repository.get_lesson(lesson_id=lesson_id, user=user, roles=roles)
 
     def mark(self, *, lesson: Lesson, entries: list[MarkEntryDTO], actor) -> dict:
         """Resolve each entry's `student_id` to a StudentProfile (unknown id -> 400,
@@ -46,7 +41,7 @@ class AttendanceService(IAttendanceService):
         missing = sorted({sid for sid in ids if sid not in found})
         if missing:
             raise ValidationException(
-                "One or more student ids do not exist.",
+                _("One or more student ids do not exist."),
                 code="validation_error",
                 fields={"student": [f"Unknown student id(s): {missing}."]},
             )
@@ -71,13 +66,9 @@ class AttendanceService(IAttendanceService):
         return selectors.cohort_dashboard(cohort_id=cohort_id, date_from=date_from, date_to=date_to)
 
     def authorize_dashboard(self, *, user, roles: set[str], cohort_id: int) -> None:
-        """Whole-cohort dashboard is staff-wide (any STAFF_ROLES member) or the teaching
-        teacher; a non-teaching, non-staff role (e.g. a student/parent that holds
-        attendance:read) is denied with `not_cohort_teacher`."""
-        if getattr(user, "is_superuser", False) or roles & _DASHBOARD_STAFF:
-            return
-        if Role.TEACHER in roles and self.repository.cohort_taught_by(cohort_id=cohort_id, user=user):
+        """Authorize the cohort-wide feed through the same object scope as records."""
+        if selectors.scoped_dashboard_cohorts(user=user, roles=roles).filter(pk=cohort_id).exists():
             return
         raise PermissionException(
-            "You may only view dashboards for cohorts you teach.", code="not_cohort_teacher"
+            _("You may only view dashboards for cohorts in your scope."), code="out_of_scope"
         )

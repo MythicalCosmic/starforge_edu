@@ -3,6 +3,7 @@ from typing import ClassVar
 from django import forms
 from django.contrib import admin
 
+from apps.access.models import AccountType
 from apps.teachers.models import TeacherProfile
 from core.admin_mixins import RoleAccountAdminForm, RoleAccountAdminMixin
 
@@ -19,24 +20,37 @@ from .models import (
 
 
 class StaffProfileAdminForm(RoleAccountAdminForm):
-    role = forms.ChoiceField(choices=(), required=True)
+    account_type = forms.ModelChoiceField(
+        label="Account type",
+        queryset=AccountType.objects.none(),
+        required=True,
+        help_text="Choose the permission set for this staff account.",
+    )
     branch = forms.ModelChoiceField(queryset=Branch.objects.all(), required=True)
     department = forms.ModelChoiceField(queryset=Department.objects.all(), required=False)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        from apps.org.services import STAFF_ROLES
-
-        role_field = self.fields["role"]
-        if isinstance(role_field, forms.ChoiceField):
-            role_field.choices = [(role, role.replace("_", " ").title()) for role in STAFF_ROLES]
+        account_type_field = self.fields["account_type"]
+        assert isinstance(account_type_field, forms.ModelChoiceField)
+        account_type_field.queryset = AccountType.objects.filter(
+            account_kind=AccountType.AccountKind.STAFF,
+            is_active=True,
+        ).order_by("name")
         if self.instance.pk and self.instance.user_id:
             membership = (
-                self.instance.user.role_memberships.filter(revoked_at__isnull=True).order_by("id").first()
+                self.instance.user.role_memberships.filter(
+                    revoked_at__isnull=True,
+                    account_type__account_kind=AccountType.AccountKind.STAFF,
+                    account_type__is_active=True,
+                )
+                .select_related("account_type", "branch", "department")
+                .order_by("-account_type__is_system", "id")
+                .first()
             )
             if membership is not None:
                 self.initial.update(
-                    role=membership.role,
+                    account_type=membership.account_type,
                     branch=membership.branch,
                     department=membership.department,
                 )
@@ -68,7 +82,7 @@ class StaffProfileAdmin(RoleAccountAdminMixin):
 
         ensure_role_membership(
             obj,
-            role=form.cleaned_data["role"],
+            account_type=form.cleaned_data["account_type"],
             branch=form.cleaned_data["branch"],
             department=form.cleaned_data.get("department"),
         )

@@ -28,6 +28,15 @@ def _client() -> EskizClient:
     )
 
 
+def test_disabled_sms_fails_closed_before_client_construction(settings):
+    from core.exceptions import ServiceUnavailableException
+
+    settings.SMS_ENABLED = False
+    with pytest.raises(ServiceUnavailableException) as exc_info:
+        get_sms_client()
+    assert exc_info.value.code == "sms_unavailable"
+
+
 def test_eskiz_401_reauths_exactly_once_then_raises(monkeypatch):
     """Two consecutive 401s: one re-login, one retry, then HTTPError (no recursion)."""
     client = _client()
@@ -79,6 +88,7 @@ def test_eskiz_sender_comes_from_settings(monkeypatch, settings):
 
     client = get_sms_client()
     assert isinstance(client, EskizClient)
+    assert get_sms_client() is client  # bearer token is reused within this worker
     assert client.sender == "STARFORGE"
 
     captured: dict = {}

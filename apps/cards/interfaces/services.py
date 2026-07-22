@@ -8,7 +8,7 @@ from typing import Any
 from django.db.models import QuerySet
 
 from apps.cards.dto.card_dto import WalletAmountDTO
-from apps.cards.models import Card, CardType, WalletTransaction
+from apps.cards.models import Card, CardScan, CardType, WalletTransaction
 from apps.students.models import StudentProfile
 
 
@@ -50,7 +50,18 @@ class ICardService(ABC):
     def revoke(self, card: Card, *, actor, reason: str) -> Card: ...
 
     @abstractmethod
-    def scan(self, *, code: str, scanned_by) -> dict[str, Any]: ...
+    def scan(
+        self,
+        *,
+        code: str,
+        scanned_by,
+        note: str = "",
+        is_unscoped: bool,
+        branch_ids: set[int],
+    ) -> dict[str, Any]: ...
+
+    @abstractmethod
+    def scoped_scans(self, *, is_director: bool, branch_ids: set[int]) -> QuerySet[CardScan]: ...
 
 
 class IWalletService(ABC):
@@ -65,3 +76,6 @@ class IWalletService(ABC):
 
     @abstractmethod
     def spend(self, data: WalletAmountDTO, *, student, actor) -> WalletTransaction: ...
+
+    @abstractmethod
+    def refund(self, data: WalletAmountDTO, *, student, actor) -> WalletTransaction: ...

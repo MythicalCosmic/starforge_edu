@@ -12,6 +12,7 @@ from datetime import timedelta
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from django.db import connection
 from django.test import RequestFactory
 from django.utils import timezone
 from django_tenants.utils import schema_context
@@ -33,11 +34,20 @@ def _cursor_of(link: str) -> str:
 
 
 def _seed(n: int) -> None:
-    AuditLog.objects.all().delete()
-    base = timezone.now() - timedelta(hours=1)
-    for i in range(n):
-        row = AuditLogFactory(resource_id=str(i))
-        AuditLog.objects.filter(pk=row.pk).update(created_at=base + timedelta(seconds=i))
+    # The production table is append-only. This test alone needs deterministic
+    # historical timestamps, so use the same transaction-local maintenance gate as
+    # the audited retention task and close it immediately after fixture setup.
+    with connection.cursor() as cursor:
+        cursor.execute("SET LOCAL starforge.audit_maintenance = 'on'")
+    try:
+        AuditLog.objects.all().delete()
+        base = timezone.now() - timedelta(hours=1)
+        for i in range(n):
+            row = AuditLogFactory(resource_id=str(i))
+            AuditLog.objects.filter(pk=row.pk).update(created_at=base + timedelta(seconds=i))
+    finally:
+        with connection.cursor() as cursor:
+            cursor.execute("SET LOCAL starforge.audit_maintenance = 'off'")
 
 
 def test_forward_pages_stay_disjoint_under_head_inserts(tenant_a):

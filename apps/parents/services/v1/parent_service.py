@@ -68,8 +68,12 @@ class ParentService(IParentService):
     def delete(self, parent: ParentProfile) -> None:
         self._parents.delete(parent)
 
-    def students(self, parent: ParentProfile) -> QuerySet:
-        return self._parents.students_for(parent)
+    def students(self, parent: ParentProfile, *, user=None, roles=None) -> QuerySet:
+        return self._parents.students_for(parent, user=user, roles=roles)
+
+    def assert_manage_scope(self, parent: ParentProfile, *, user, roles) -> None:
+        if not self._parents.all_students_in_scope(parent, user=user, roles=roles):
+            raise NotFoundException(code="not_found")
 
     def require_profile(self, user) -> ParentProfile:
         parent = self._parents.profile_for(user)

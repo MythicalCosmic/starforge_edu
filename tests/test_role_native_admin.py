@@ -5,6 +5,7 @@ from django.contrib import admin
 from django.test import RequestFactory
 from django_tenants.utils import schema_context
 
+from apps.access.models import AccountType
 from apps.org.models import Department, StaffProfile
 from apps.org.tests.factories import BranchFactory
 from apps.parents.models import ParentProfile
@@ -82,13 +83,16 @@ def test_student_admin_provisions_bridge_and_membership_automatically(tenant_a):
         ).exists()
 
 
-def test_staff_admin_uses_staff_fields_and_creates_scoped_role(tenant_a):
+def test_staff_admin_uses_staff_fields_and_creates_scoped_account_type(tenant_a):
     with schema_context(tenant_a.schema_name):
         operator = User.objects.create_superuser(username="staff-admin", password="Admin-pass-42")
         branch = BranchFactory()
+        cashier_type = AccountType.objects.get(is_system=True, slug=Role.CASHIER)
         model_admin = admin.site._registry[StaffProfile]
         request = _request(operator)
         form_class = model_admin.get_form(request)
+        assert "role" not in form_class.base_fields
+        assert "account_type" in form_class.base_fields
         form = form_class(
             data={
                 "username": "admin.cashier",
@@ -97,7 +101,7 @@ def test_staff_admin_uses_staff_fields_and_creates_scoped_role(tenant_a):
                 "is_active": "on",
                 "first_name": "Casey",
                 "last_name": "Cashier",
-                "role": Role.CASHIER,
+                "account_type": cashier_type.pk,
                 "branch": branch.pk,
             }
         )
@@ -109,7 +113,7 @@ def test_staff_admin_uses_staff_fields_and_creates_scoped_role(tenant_a):
         assert not staff.user.has_usable_password()
         assert RoleMembership.objects.filter(
             user=staff.user,
-            role=Role.CASHIER,
+            account_type=cashier_type,
             branch=branch,
             revoked_at__isnull=True,
         ).exists()

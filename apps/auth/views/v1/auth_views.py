@@ -106,12 +106,16 @@ def password_change_view(request: HttpRequest) -> HttpResponse:
         new_password=str_field(body, "new_password"),
     )
     session = getattr(request, "auth", None)
+    ctx = _ctx(request)
     return success(
         _service().change_password(
             request.user,  # type: ignore[arg-type]
             dto,
             principal_kind=getattr(session, "principal_kind", ""),
             principal_id=getattr(session, "principal_id", None),
+            device_id=getattr(session, "device_id", ""),
+            ip=ctx.ip,
+            user_agent=ctx.user_agent,
         )
     )
 

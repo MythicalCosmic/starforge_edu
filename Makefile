@@ -34,7 +34,7 @@ typecheck:
 
 # Generate + validate the OpenAPI schema (the frontend contract).
 schema:
-	uv run python manage.py spectacular --file openapi.yaml --validate
+	uv run python scripts/export_openapi.py --validate
 
 # Everything CI runs, locally.
 check: lint typecheck test schema

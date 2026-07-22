@@ -8,8 +8,7 @@ from apps.rewards.models import RewardGrant, RewardType
 from core.interfaces import IBaseRepository
 
 
-class IRewardTypeRepository(IBaseRepository[RewardType]):
-    ...
+class IRewardTypeRepository(IBaseRepository[RewardType]): ...
 
 
 class IRewardGrantRepository(IBaseRepository[RewardGrant]):

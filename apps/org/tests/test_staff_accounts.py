@@ -6,6 +6,7 @@ import pytest
 from django.conf import settings
 from django_tenants.utils import schema_context
 
+from apps.access.models import AccountType
 from apps.org.models import StaffProfile
 from apps.org.tests.factories import BranchFactory
 from core.permissions import Role
@@ -17,6 +18,7 @@ def test_staff_account_api_and_role_owned_credentials(tenant_a, as_role, client_
     director, _user = as_role(Role.DIRECTOR)
     with schema_context(tenant_a.schema_name):
         branch = BranchFactory()
+        cashier_type = AccountType.objects.get(is_system=True, slug=Role.CASHIER)
 
     response = director.post(
         "/api/v1/org/staff/",
@@ -25,7 +27,7 @@ def test_staff_account_api_and_role_owned_credentials(tenant_a, as_role, client_
             "phone": "+998901112233",
             "first_name": "Casey",
             "last_name": "Cashier",
-            "role": Role.CASHIER,
+            "account_type": cashier_type.pk,
             "branch": branch.pk,
         },
         format="json",
@@ -34,7 +36,7 @@ def test_staff_account_api_and_role_owned_credentials(tenant_a, as_role, client_
     payload = response.json()["data"]
     assert payload["username"] == "casey.cashier"
     assert "user" not in payload
-    assert payload["role_memberships"][0]["role"] == Role.CASHIER
+    assert payload["role_memberships"][0]["account_type_slug"] == Role.CASHIER
     staff_id = payload["id"]
 
     credentials = director.post(f"/api/v1/org/staff/{staff_id}/credentials/", {}, format="json")
@@ -52,7 +54,7 @@ def test_staff_account_api_and_role_owned_credentials(tenant_a, as_role, client_
     staff_client.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
     me = staff_client.get("/api/v1/users/me/")
     assert me.status_code == 200
-    assert me.json()["data"]["account_type"] == "staff"
+    assert me.json()["data"]["principal_kind"] == "staff"
     assert me.json()["data"]["id"] == staff_id
 
     changed = staff_client.post(
@@ -64,7 +66,7 @@ def test_staff_account_api_and_role_owned_credentials(tenant_a, as_role, client_
     changed_access = changed.json()["data"]["access"]
     changed_client = client_for(tenant_a)
     changed_client.credentials(HTTP_AUTHORIZATION=f"Bearer {changed_access}")
-    assert changed_client.get("/api/v1/users/me/").json()["data"]["account_type"] == "staff"
+    assert changed_client.get("/api/v1/users/me/").json()["data"]["principal_kind"] == "staff"
 
     assert (
         client_for(tenant_a)

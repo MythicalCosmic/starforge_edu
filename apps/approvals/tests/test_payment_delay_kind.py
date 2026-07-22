@@ -162,6 +162,63 @@ def test_rejecting_approved_delay_restores_due_date(tenant_a, as_role):
         assert inv.status == Invoice.Status.OVERDUE  # past again -> back in dunning
 
 
+def test_rejecting_stacked_delays_preserves_other_active_extensions(tenant_a, as_role):
+    teacher, _ = as_role(Role.TEACHER)
+    director, _ = as_role(Role.DIRECTOR)
+    today = timezone.localdate()
+    original_due = today + timedelta(days=5)
+    first_due = today + timedelta(days=20)
+    second_due = today + timedelta(days=40)
+
+    def approved_delay(invoice_id: int, due_date) -> int:
+        created = teacher.post(
+            REQ,
+            {
+                "kind": "payment_delay",
+                "title": "Stacked grace",
+                "payload": {"invoice_id": invoice_id, "new_due_date": due_date.isoformat()},
+            },
+            format="json",
+        )
+        assert created.status_code == 201, created.content
+        request_id = created.json()["data"]["id"]
+        approved = director.post(f"{REQ}{request_id}/approve/", {}, format="json")
+        assert approved.status_code == 200, approved.content
+        return request_id
+
+    # Reject the older extension first: the newer deadline must remain. Once
+    # the newer extension is also rejected, restore the true original baseline.
+    first_invoice_id = _invoice(
+        tenant_a,
+        due_date=original_due,
+        status=Invoice.Status.ISSUED,
+    )
+    first_request = approved_delay(first_invoice_id, first_due)
+    second_request = approved_delay(first_invoice_id, second_due)
+    assert director.post(f"{REQ}{first_request}/reject/", {"note": "old"}, format="json").status_code == 200
+    with schema_context(tenant_a.schema_name):
+        assert Invoice.objects.get(pk=first_invoice_id).due_date == second_due
+    assert director.post(f"{REQ}{second_request}/reject/", {"note": "new"}, format="json").status_code == 200
+    with schema_context(tenant_a.schema_name):
+        assert Invoice.objects.get(pk=first_invoice_id).due_date == original_due
+
+    # Reverse order: removing the newer extension falls back to the still-active
+    # older one, then removing that one reaches the original deadline.
+    second_invoice_id = _invoice(
+        tenant_a,
+        due_date=original_due,
+        status=Invoice.Status.ISSUED,
+    )
+    older_request = approved_delay(second_invoice_id, first_due)
+    newer_request = approved_delay(second_invoice_id, second_due)
+    assert director.post(f"{REQ}{newer_request}/reject/", {"note": "new"}, format="json").status_code == 200
+    with schema_context(tenant_a.schema_name):
+        assert Invoice.objects.get(pk=second_invoice_id).due_date == first_due
+    assert director.post(f"{REQ}{older_request}/reject/", {"note": "old"}, format="json").status_code == 200
+    with schema_context(tenant_a.schema_name):
+        assert Invoice.objects.get(pk=second_invoice_id).due_date == original_due
+
+
 def test_payment_delay_requires_valid_open_invoice(tenant_a, as_role):
     teacher, _ = as_role(Role.TEACHER)
     today = timezone.now().date()

@@ -29,3 +29,9 @@ class IThreadRepository(IBaseRepository[Thread]):
 
     def active_members(self, *, ids: list[int]) -> list[User]:
         raise NotImplementedError
+
+    def contacts_for(self, *, user, category: str = "") -> QuerySet[User]:
+        raise NotImplementedError
+
+    def is_active_teacher(self, *, user) -> bool:
+        raise NotImplementedError

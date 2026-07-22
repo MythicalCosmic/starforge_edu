@@ -34,6 +34,22 @@ EXPORT_URL = "/api/v1/audit/export/"
 Action = AuditLog.Action
 
 
+def _maintenance_update(queryset, **changes):
+    from django.db import connection, transaction
+
+    with transaction.atomic(), connection.cursor() as cursor:
+        cursor.execute("SET LOCAL starforge.audit_maintenance = 'on'")
+        return queryset.update(**changes)
+
+
+def _maintenance_delete(queryset):
+    from django.db import connection, transaction
+
+    with transaction.atomic(), connection.cursor() as cursor:
+        cursor.execute("SET LOCAL starforge.audit_maintenance = 'on'")
+        return queryset.delete()
+
+
 # --------------------------------------------------------------------------- #
 # Model receivers (D3-D-2)
 # --------------------------------------------------------------------------- #
@@ -108,11 +124,14 @@ class TestModelReceivers:
                     permission="students:write",
                     effect=RolePermissionOverride.Effect.GRANT,
                 )
-            assert AuditLog.objects.filter(
-                resource_type="access.RolePermissionOverride",
-                resource_id=str(override.pk),
-                action=Action.CREATE,
-            ).count() == 1
+            assert (
+                AuditLog.objects.filter(
+                    resource_type="access.RolePermissionOverride",
+                    resource_id=str(override.pk),
+                    action=Action.CREATE,
+                ).count()
+                == 1
+            )
 
             with django_capture_on_commit_callbacks(execute=True):
                 override.effect = RolePermissionOverride.Effect.REVOKE
@@ -153,11 +172,8 @@ class TestModelReceivers:
 # --------------------------------------------------------------------------- #
 
 
-class TestPublicSchemaGuard:
-    """``apps.audit`` is tenant-only, so ``audit_auditlog`` does not exist in the
-    public schema. Platform-staff writes to the SHARED users.User /
-    users.RoleMembership tables fire the audit receivers while the connection is
-    on ``public`` — those must NO-OP, not raise ProgrammingError."""
+class TestPublicSchemaAudit:
+    """Platform mutations are persisted in the public audit table."""
 
     def test_public_schema_user_save_does_not_raise_or_audit(
         self, public_tenant, django_capture_on_commit_callbacks
@@ -169,14 +185,18 @@ class TestPublicSchemaGuard:
 
         with schema_context(get_public_schema_name()):
             assert connection.schema_name == get_public_schema_name()
-            # The on_commit audit hook would target a non-existent table; the
-            # public-schema guard must keep this from being scheduled/raised.
+            # Public schema now has the same append-only audit table as tenants.
             with django_capture_on_commit_callbacks(execute=True):
                 user = UserFactory()
             # User actually persisted on the public schema.
             from apps.users.models import User
 
             assert User.objects.filter(pk=user.pk).exists()
+            assert AuditLog.objects.filter(
+                action=Action.CREATE,
+                resource_type="users.User",
+                resource_id=str(user.pk),
+            ).exists()
 
     def test_public_schema_rolemembership_save_does_not_raise(
         self, public_tenant, django_capture_on_commit_callbacks
@@ -189,29 +209,71 @@ class TestPublicSchemaGuard:
             user = UserFactory()
             # org_branch does not exist on public; the branch FK is db_constraint=
             # False (ADR-007), so a public-schema RoleMembership uses a bare
-            # branch_id. The audit receiver still fires on this save and must
-            # no-op rather than hit the non-existent audit_auditlog table.
+            # branch_id. The audit receiver records the public mutation.
             with django_capture_on_commit_callbacks(execute=True):
                 membership = RoleMembership.objects.create(user=user, branch_id=1, role=Role.IT)
             assert RoleMembership.objects.filter(pk=membership.pk).exists()
+            assert AuditLog.objects.filter(
+                action=Action.CREATE,
+                resource_type="users.RoleMembership",
+                resource_id=str(membership.pk),
+            ).exists()
 
     def test_audit_log_helper_noops_on_public_schema(self, public_tenant):
         from django_tenants.utils import get_public_schema_name, schema_context
 
         with schema_context(get_public_schema_name()):
-            # Synchronous audit_log() (the auth-flow path) must also no-op.
+            # Synchronous auth-flow events are also retained on public.
             row = audit_log(
                 actor=None,
                 action=Action.LOGIN_FAILED,
                 resource_type="users.User",
                 after={"username": "platform-admin"},
             )
-            assert row is None
+            assert row.pk is not None
+            assert row.resource_type == "users.User"
 
 
 # --------------------------------------------------------------------------- #
 # Before-snapshot thread-local: schema-scoped + self-cleaning (D3-F)
 # --------------------------------------------------------------------------- #
+
+
+def test_database_rejects_audit_update_and_delete(tenant_a):
+    from django.db import DatabaseError, transaction
+
+    with schema_context(tenant_a.schema_name):
+        row = AuditLogFactory(action=Action.LOGIN)
+        with pytest.raises(DatabaseError, match="append-only"), transaction.atomic():
+            AuditLog.objects.filter(pk=row.pk).update(action=Action.LOGOUT)
+        with pytest.raises(DatabaseError, match="append-only"), transaction.atomic():
+            AuditLog.objects.filter(pk=row.pk).delete()
+        row.refresh_from_db()
+        assert row.action == Action.LOGIN
+
+
+def test_model_receiver_uses_request_local_actor(tenant_a, django_capture_on_commit_callbacks):
+    from django.test import RequestFactory
+
+    from apps.audit.context import bind_request, reset_request
+
+    with schema_context(tenant_a.schema_name):
+        actor = UserFactory()
+        request = RequestFactory().post("/api/v1/users/")
+        request.user = actor
+        tokens = bind_request(request)
+        try:
+            with django_capture_on_commit_callbacks(execute=True):
+                target = UserFactory()
+        finally:
+            reset_request(tokens)
+
+        row = AuditLog.objects.filter(
+            action=Action.CREATE,
+            resource_type="users.User",
+            resource_id=str(target.pk),
+        ).latest("created_at")
+        assert row.actor_id == actor.pk
 
 
 class TestBeforeSnapshotThreadLocal:
@@ -452,11 +514,13 @@ class TestAuditAPIAppendOnly:
     def test_cursor_pagination_stable_under_inserts(self, tenant_a, as_role):
         client, _ = as_role(Role.DIRECTOR, tenant_a)
         with schema_context(tenant_a.schema_name):
-            AuditLog.objects.all().delete()
+            _maintenance_delete(AuditLog.objects.all())
             base = timezone.now() - timedelta(hours=1)
             for i in range(120):
                 row = AuditLogFactory(resource_id=str(i))
-                AuditLog.objects.filter(pk=row.pk).update(created_at=base + timedelta(seconds=i))
+                _maintenance_update(
+                    AuditLog.objects.filter(pk=row.pk), created_at=base + timedelta(seconds=i)
+                )
 
         page1 = client.get(AUDIT_URL).json()
         assert len(page1["results"]) == 50
@@ -518,6 +582,16 @@ class TestAuditExport:
         assert "\n=cmd|" not in content  # never a bare formula cell at row start
         assert ",=cmd|" not in content  # nor mid-row
 
+    def test_export_head_has_no_audit_side_effect(self, tenant_a, as_role):
+        client, _ = as_role(Role.DIRECTOR, tenant_a)
+        with schema_context(tenant_a.schema_name):
+            before = AuditLog.objects.filter(action=Action.EXPORT).count()
+        response = client.head(EXPORT_URL)
+        assert response.status_code == 200
+        assert response["Content-Type"] == "text/csv"
+        with schema_context(tenant_a.schema_name):
+            assert AuditLog.objects.filter(action=Action.EXPORT).count() == before
+
     def test_export_over_cap_400(self, tenant_a, as_role, monkeypatch):
         import apps.audit.views.v1.audit_views as views
 
@@ -545,12 +619,15 @@ class TestRetentionTask:
         from celery_tasks.audit_tasks import cleanup_old_audit_logs_for_schema
 
         with schema_context(tenant_a.schema_name):
-            AuditLog.objects.all().delete()
+            _maintenance_delete(AuditLog.objects.all())
             now = timezone.now()
 
             def _aged(*, resource_type, days_ago, resource_id):
                 row = AuditLogFactory(resource_type=resource_type, resource_id=resource_id)
-                AuditLog.objects.filter(pk=row.pk).update(created_at=now - timedelta(days=days_ago))
+                _maintenance_update(
+                    AuditLog.objects.filter(pk=row.pk),
+                    created_at=now - timedelta(days=days_ago),
+                )
                 return row.pk
 
             # Long-retention type, 6y old -> KEPT (< 7y).
@@ -574,9 +651,12 @@ class TestRetentionTask:
         from celery_tasks.audit_tasks import cleanup_old_audit_logs_for_schema
 
         with schema_context(tenant_a.schema_name):
-            AuditLog.objects.all().delete()
+            _maintenance_delete(AuditLog.objects.all())
             row = AuditLogFactory(resource_type="users.User", resource_id="x")
-            AuditLog.objects.filter(pk=row.pk).update(created_at=timezone.now() - timedelta(days=365 * 3))
+            _maintenance_update(
+                AuditLog.objects.filter(pk=row.pk),
+                created_at=timezone.now() - timedelta(days=365 * 3),
+            )
             assert cleanup_old_audit_logs_for_schema() == 1
             assert cleanup_old_audit_logs_for_schema() == 0
 

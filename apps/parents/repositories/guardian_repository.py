@@ -18,7 +18,12 @@ class GuardianRepository(BaseRepository[Guardian], IGuardianRepository):
 
     def scoped(self, *, user, roles) -> QuerySet[Guardian]:
         return scope_rows(
-            self.get_queryset(), user=user, roles=roles, own_filter={"parent__user": user}
+            self.get_queryset(),
+            user=user,
+            roles=roles,
+            own_filter={"parent__user": user},
+            branch_field="student__branch_id",
+            department_field="student__current_cohort__department_id",
         )
 
     def get_scoped(self, *, user, roles, pk: int) -> Guardian | None:

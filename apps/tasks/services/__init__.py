@@ -13,9 +13,9 @@ from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
 from apps.tasks.models import RoleGrade, Task
-from apps.users.models import RoleMembership, User
+from apps.users.models import User
 from core.exceptions import PermissionException, UnprocessableEntity
-from core.permissions import Role, has_permission_code
+from core.permissions import has_permission_code
 
 _UNSET: object = object()
 
@@ -23,7 +23,6 @@ _UNSET: object = object()
 _OPEN_LOAD_STATUSES = (Task.Status.OPEN, Task.Status.IN_PROGRESS, Task.Status.BLOCKED)
 # Only staff can be tasked — never a student/parent who could never see it (matches
 # the assignee queryset on TaskCreate/TaskAssign serializers).
-_TASKABLE_ROLES = tuple(r for r in Role.ALL if r not in (Role.STUDENT, Role.PARENT))
 
 # Allowed status transitions. DONE may still be cancelled; both DONE and CANCELLED
 # can be reopened to OPEN. A same-status transition is a no-op (handled below).
@@ -40,12 +39,13 @@ def _roles_of(user) -> set[str]:
     return {m.role for m in user.role_memberships.filter(revoked_at__isnull=True)}
 
 
-def user_grade(user, roles: set[str] | None = None) -> int:
+def user_grade(user, roles: set[str] | None = None, *, grades: dict[str, int] | None = None) -> int:
     """The seniority level of `user` = the max RoleGrade.level over their roles.
     Ungraded roles count as 0 (most junior)."""
     if roles is None:
         roles = _roles_of(user)
-    grades = dict(RoleGrade.objects.values_list("role", "level"))
+    if grades is None:
+        grades = dict(RoleGrade.objects.values_list("role", "level"))
     return max((grades.get(r, 0) for r in roles), default=0)
 
 
@@ -65,7 +65,7 @@ def can_assign(*, actor, actor_roles: set[str], target_user) -> bool:
     grades = dict(RoleGrade.objects.values_list("role", "level"))
     if not grades:
         return True  # hierarchy not configured for this center
-    actor_grade = max((grades.get(r, 0) for r in actor_roles), default=0)
+    actor_grade = user_grade(actor, actor_roles, grades=grades)
     target_levels = [grades[r] for r in _roles_of(target_user) if r in grades]
     if not target_levels:
         return False  # target unplaced in the hierarchy -> fail closed
@@ -124,12 +124,14 @@ def assign_task(*, task: Task, actor, actor_roles: set[str], assignee=_UNSET, de
 
 
 @transaction.atomic
-def transition_task(*, task: Task, to_status: str, actor=None) -> Task:
+def transition_task(*, task: Task, to_status: str, actor, can_transition_any: bool = False) -> Task:
     # Re-fetch under a row lock so two concurrent transitions can't both read the
     # same pre-image and each pass the gate, bypassing the state-machine graph
     # (e.g. one racer commits OPEN->CANCELLED while the other commits OPEN->DONE,
     # landing a CANCELLED task in DONE). Mirrors every sibling transition service.
     task = Task.objects.select_for_update().get(pk=task.pk)
+    if task.assignee_id != actor.id and not can_transition_any:
+        raise PermissionException(_("Only the assignee may transition this task."), code="not_task_assignee")
     if to_status == task.status:
         return task  # no-op
     if to_status not in _ALLOWED_TRANSITIONS.get(task.status, set()):
@@ -170,12 +172,14 @@ def auto_split_tasks(*, task_ids, department, actor, actor_roles: set[str], mode
     # fair: balance across the department's active, taskable staff the actor may assign
     # to (same who-can-be-tasked definition as the manual assign/create paths).
     staff_by_id: dict[int, User] = {}
-    for membership in RoleMembership.objects.filter(
-        department=department,
-        revoked_at__isnull=True,
-        user__is_active=True,
-        role__in=_TASKABLE_ROLES,
-    ).select_related("user"):
+    from apps.access.models import AccountType
+    from core.permissions import role_memberships_for_account_kinds
+
+    for membership in (
+        role_memberships_for_account_kinds((AccountType.AccountKind.STAFF, AccountType.AccountKind.TEACHER))
+        .filter(department=department)
+        .select_related("user")
+    ):
         staff_by_id.setdefault(membership.user_id, membership.user)
     eligible = [
         user

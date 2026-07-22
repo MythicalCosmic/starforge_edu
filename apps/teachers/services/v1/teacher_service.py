@@ -43,6 +43,7 @@ class TeacherService(ITeacherService):
         return create_teacher(
             branch=self._resolve_branch(data.branch_id),
             department=self._resolve_department(data.department_id),
+            account_type=self._resolve_account_type(data.account_type_id),
             username=data.username,
             phone=data.phone,
             email=data.email,
@@ -60,6 +61,21 @@ class TeacherService(ITeacherService):
         )
 
     def update(self, teacher: TeacherProfile, changes: dict[str, Any]) -> TeacherProfile:
+        # Preserve the account type that currently anchors this profile when its
+        # branch/department changes. Falling back unconditionally to the seeded
+        # ``teacher`` type would silently add legacy permissions to a custom,
+        # permission-only teacher account on its first ordinary PATCH.
+        membership_scope = teacher.user.role_memberships.filter(
+            revoked_at__isnull=True,
+            branch_id=teacher.branch_id,
+            account_type__account_kind="teacher",
+        )
+        membership_scope = (
+            membership_scope.filter(department__isnull=True)
+            if teacher.department_id is None
+            else membership_scope.filter(department_id=teacher.department_id)
+        )
+        primary_membership = membership_scope.select_related("account_type").order_by("id").first()
         identity_changes = {field: changes[field] for field in _IDENTITY_FIELDS if field in changes}
         if identity_changes:
             from apps.users.services import update_role_identity
@@ -91,7 +107,8 @@ class TeacherService(ITeacherService):
 
         ensure_role_membership(
             teacher,
-            role=Role.TEACHER,
+            role=Role.TEACHER if primary_membership is None else None,
+            account_type=(primary_membership.account_type if primary_membership is not None else None),
             branch=teacher.branch,
             department=teacher.department,
         )
@@ -133,3 +150,22 @@ class TeacherService(ITeacherService):
                 fields={"department": ["Not found."]},
             )
         return dept
+
+    @staticmethod
+    def _resolve_account_type(account_type_id: int | None):
+        if account_type_id is None:
+            return None
+        from apps.access.models import AccountType
+
+        account_type = AccountType.objects.filter(
+            pk=account_type_id,
+            account_kind=AccountType.AccountKind.TEACHER,
+            is_active=True,
+        ).first()
+        if account_type is None:
+            raise ValidationException(
+                _("Invalid account type."),
+                code="invalid_account_type",
+                fields={"account_type": [_("Choose an active teacher account type.")]},
+            )
+        return account_type

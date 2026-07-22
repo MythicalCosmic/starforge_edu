@@ -20,12 +20,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from core.permissions import Role
+from core.permissions import PermissionRoleSet, Role
+from core.scoping import permission_membership_scope_q
 
-# Roles that see the whole tenant for the cohort-scoped reports (enrollment /
-# attendance / grades). A teacher is scoped to cohorts they own (see
-# teacher_cohort_ids). Accountants are NOT here — finance scoping is per-report.
-STAFF_ROLES = {Role.DIRECTOR, Role.HEAD_OF_DEPT}
+# Only directors see a whole tenant. HoDs/accountants are branch-scoped and a
+# teacher is narrowed further to cohorts they own (see teacher_cohort_ids).
+STAFF_ROLES = {Role.DIRECTOR}
 
 # Locale set every report template ships (TD-14).
 TEMPLATE_LOCALES = ("uz", "ru", "en")
@@ -53,6 +53,7 @@ def enforce_report_row_cap(qs) -> None:
             fields={"rows": [f"{total} rows match (max {MAX_REPORT_ROWS})."]},
         )
 
+
 # Characters that make Excel/LibreOffice treat a cell as a formula. Report cells
 # carry tenant-user-controlled strings (student/cohort/library names), so any of
 # these as a leading char must be neutralized to block CSV/XLSX formula injection.
@@ -77,14 +78,38 @@ def teacher_cohort_ids(user) -> set[int]:
     One query. Used by the cohort-scoped generators to restrict a non-staff
     teacher's report to their own cohorts (D4-LB-5 selector scoping).
     """
+    from apps.cohorts.selectors import taught_cohorts
+
+    qs = taught_cohorts(user=user)
+    return set(qs.values_list("id", flat=True).distinct())
+
+
+def membership_branch_ids(user) -> set[int]:
+    """Active branch scope for a non-director report requester."""
+    if user is None:
+        return set()
+    return set(user.role_memberships.filter(revoked_at__isnull=True).values_list("branch_id", flat=True))
+
+
+def staff_report_scope_q(*, roles: set[str], user, branch_field: str, department_field: str | None = None):
+    """Per-membership report scope for custom STAFF account types.
+
+    Plain role sets are retained for direct selector tests/internal callers and use
+    the legacy branch fallback. Runtime ``PermissionRoleSet`` values bind the grant
+    to the exact membership that supplied ``reports:read``.
+    """
     from django.db.models import Q
 
-    from apps.cohorts.models import Cohort
-
-    qs = Cohort.objects.filter(
-        Q(primary_teacher__user=user) | Q(co_teachers__teacher__user=user) | Q(lessons__teacher__user=user)
+    scoped = permission_membership_scope_q(
+        roles=roles,
+        permission="reports:read",
+        branch_field=branch_field,
+        department_field=department_field,
+        account_kinds={"staff"},
     )
-    return set(qs.values_list("id", flat=True).distinct())
+    if not isinstance(roles, PermissionRoleSet):
+        scoped |= Q(**{f"{branch_field}__in": membership_branch_ids(user)})
+    return scoped
 
 
 def is_full_scope(*, user, roles: set[str]) -> bool:

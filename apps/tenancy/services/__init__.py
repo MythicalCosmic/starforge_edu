@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+import ipaddress
+import json
 import re
+import secrets
+import shlex
 from datetime import timedelta
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 from django.conf import settings
 from django.db import IntegrityError, connection, transaction
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
-from django_tenants.utils import schema_context
+from django_tenants.utils import get_public_schema_name, schema_context
 
-from apps.tenancy.models import Center, Domain, PlatformEvent
+from apps.tenancy.models import Center, Domain, DomainClaim, PlatformEvent
 from core.exceptions import NotFoundException, ValidationException
 
 # Postgres-safe schema names: lowercase, starts with a letter, ≤ 63 chars.
@@ -20,6 +26,10 @@ RESERVED_SLUGS = {"public", "admin", "www", "api", "static", "media"}
 
 # Read-only impersonation tokens are deliberately short-lived (D4-LE-4).
 IMPERSONATION_TOKEN_TTL_SECONDS = 600  # 10 minutes
+DOMAIN_CHALLENGE_LABEL = "_starforge-verification"
+DOMAIN_CHALLENGE_PREFIX = "starforge-domain-verification="
+_DOMAIN_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+_MAX_DNS_RESPONSE_BYTES = 64 * 1024
 
 
 def _validate_slug(slug: str) -> str:
@@ -34,6 +44,46 @@ def _validate_slug(slug: str) -> str:
     if Center.objects.filter(slug=slug).exists() or Center.objects.filter(schema_name=slug).exists():
         raise ValidationException(_("That slug is already taken."), code="slug_taken")
     return slug
+
+
+def _normalize_domain(domain: str) -> str:
+    """Return a canonical ASCII hostname or raise a field-safe 400."""
+    if not isinstance(domain, str):
+        raise ValidationException(_("Domain must be a hostname."), code="domain_invalid")
+    value = domain.strip().lower().rstrip(".")
+    try:
+        value = value.encode("idna").decode("ascii")
+    except UnicodeError as exc:
+        raise ValidationException(_("Domain must be a valid hostname."), code="domain_invalid") from exc
+    if not value or len(value) > 253 or "://" in value or "/" in value:
+        raise ValidationException(_("Domain must be a valid hostname."), code="domain_invalid")
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        pass
+    else:
+        raise ValidationException(_("An IP address cannot be verified as a domain."), code="domain_invalid")
+    if any(_DOMAIN_LABEL_RE.fullmatch(label) is None for label in value.split(".")):
+        raise ValidationException(_("Domain must be a valid hostname."), code="domain_invalid")
+    return value
+
+
+def _trusted_domain(domain: str) -> bool:
+    """Whether the platform itself controls this suffix (no TXT challenge needed)."""
+    suffixes = getattr(settings, "DOMAIN_VERIFICATION_TRUSTED_SUFFIXES", ())
+    for raw_suffix in suffixes:
+        suffix = str(raw_suffix).strip().lower().lstrip(".").rstrip(".")
+        if suffix and (domain == suffix or domain.endswith(f".{suffix}")):
+            return True
+    return False
+
+
+def _assert_operable_center(center: Center) -> None:
+    """Reject control-plane writes to the public or an archived Center."""
+    if center.schema_name == get_public_schema_name():
+        raise ValidationException(_("The platform center cannot be mutated here."), code="public_center")
+    if center.archived_at is not None:
+        raise ValidationException(_("Archived centers are read-only."), code="center_archived")
 
 
 @transaction.atomic
@@ -59,7 +109,9 @@ def provision_center(
         contact_phone=contact_phone,
         contact_email=contact_email,
     )
-    Domain.objects.create(domain=primary_domain, tenant=center, is_primary=True)
+    # A platform-owned hostname can route immediately. A custom hostname is a
+    # pending claim and becomes primary only after its DNS TXT challenge passes.
+    add_domain(center, domain=primary_domain, is_primary=True)
 
     # The schema + tenant tables now exist (auto_create_schema). Seed settings.
     with schema_context(center.schema_name):
@@ -90,6 +142,7 @@ def archive_center(center: Center) -> Center:
     slug-validated so it is injection-safe — WORKLOG justification)."""
     if center.archived_at is not None:
         raise ValidationException(_("Center is already archived."), code="already_archived")
+    _assert_operable_center(center)
     now = timezone.now()
     old_schema = center.schema_name
     prefix, suffix = "_archived_", f"_{now:%Y%m%d}"
@@ -108,8 +161,9 @@ def archive_center(center: Center) -> Center:
 
 
 @transaction.atomic
-def set_primary_domain(center: Center, domain_id: int) -> Domain:
+def set_primary_domain(center: Center, domain_id: int, *, actor=None) -> Domain:
     """Make exactly one Domain primary for a Center, atomically."""
+    _assert_operable_center(center)
     # Lock the whole domain set: locking only the target row lets two concurrent
     # promotions each demote a snapshot that misses the other's new primary.
     # The one_primary_domain_per_tenant constraint is the DB-level backstop.
@@ -120,28 +174,168 @@ def set_primary_domain(center: Center, domain_id: int) -> Domain:
     Domain.objects.filter(tenant=center, is_primary=True).exclude(pk=domain.pk).update(is_primary=False)
     domain.is_primary = True
     domain.save(update_fields=["is_primary"])
+    record_platform_event(
+        actor=actor,
+        center=center,
+        event=PlatformEvent.Event.DOMAIN_PRIMARY_CHANGED,
+        payload={"domain_id": domain.pk, "domain": domain.domain},
+    )
     return domain
 
 
 @transaction.atomic
-def add_domain(center: Center, *, domain: str, is_primary: bool = False) -> Domain:
-    """Attach a hostname to a Center (TXT ownership check stubbed — O-8)."""
-    if Domain.objects.filter(domain=domain).exists():
+def add_domain(
+    center: Center,
+    *,
+    domain: str,
+    is_primary: bool = False,
+    actor=None,
+) -> Domain | DomainClaim:
+    """Create a routable platform hostname or an isolated custom-domain claim.
+
+    A custom hostname never exists in django-tenants' ``Domain`` table before
+    its TXT proof succeeds. That remains safe while old application nodes serve
+    during a rolling deploy and if the new image is rolled back later.
+    """
+    _assert_operable_center(center)
+    domain = _normalize_domain(domain)
+    if Domain.objects.filter(domain=domain).exists() or DomainClaim.objects.filter(domain=domain).exists():
         raise ValidationException(_("That domain is already registered."), code="domain_taken")
+    trusted = _trusted_domain(domain)
     try:
-        row = Domain.objects.create(domain=domain, tenant=center, is_primary=False)
+        if trusted:
+            row: Domain | DomainClaim = Domain.objects.create(
+                domain=domain,
+                tenant=center,
+                is_primary=False,
+            )
+        else:
+            row = DomainClaim.objects.create(
+                domain=domain,
+                tenant=center,
+                verification_token=secrets.token_urlsafe(32),
+                pending_primary=is_primary,
+            )
     except IntegrityError as exc:
         # Unique race: a concurrent insert won between the pre-check and ours.
         raise ValidationException(_("That domain is already registered."), code="domain_taken") from exc
-    if is_primary:
-        set_primary_domain(center, row.pk)
+    if is_primary and trusted:
+        assert isinstance(row, Domain)
+        set_primary_domain(center, row.pk, actor=actor)
         row.refresh_from_db()
+    record_platform_event(
+        actor=actor,
+        center=center,
+        event=PlatformEvent.Event.DOMAIN_ADDED,
+        payload={
+            "domain_id": str(row.pk) if isinstance(row, DomainClaim) else row.pk,
+            "domain": row.domain,
+            "is_verified": trusted,
+            "pending_primary": bool(is_primary and not trusted),
+        },
+    )
     return row
 
 
-def verify_domain_txt(domain: str) -> bool:
-    """[OWNER:O-8] DNS TXT ownership verification — mock passes until creds land."""
-    return True
+def verify_domain_txt(domain: str, token: str) -> bool:
+    """Check the domain's ownership challenge through DNS-over-HTTPS.
+
+    Network/parser failures fail closed. The endpoint is fixed by settings (not
+    user-controlled), the response is size-bounded, and only exact TXT values
+    pass; a transient resolver failure can therefore never attach a hostname.
+    """
+    name = f"{DOMAIN_CHALLENGE_LABEL}.{_normalize_domain(domain)}"
+    expected = f"{DOMAIN_CHALLENGE_PREFIX}{token}"
+    return expected in _lookup_txt_records(name)
+
+
+def _lookup_txt_records(name: str) -> tuple[str, ...]:
+    endpoint = str(
+        getattr(
+            settings,
+            "DOMAIN_VERIFICATION_DNS_URL",
+            "https://cloudflare-dns.com/dns-query",
+        )
+    )
+    timeout = float(getattr(settings, "DOMAIN_VERIFICATION_TIMEOUT_SECONDS", 3.0))
+    separator = "&" if "?" in endpoint else "?"
+    request = Request(
+        f"{endpoint}{separator}{urlencode({'name': name, 'type': 'TXT'})}",
+        headers={"Accept": "application/dns-json", "User-Agent": "Starforge-Domain-Verification/1"},
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            raw = response.read(_MAX_DNS_RESPONSE_BYTES + 1)
+        if len(raw) > _MAX_DNS_RESPONSE_BYTES:
+            return ()
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return ()
+    if not isinstance(payload, dict) or payload.get("Status") != 0:
+        return ()
+    records: list[str] = []
+    for answer in payload.get("Answer") or ():
+        if not isinstance(answer, dict) or answer.get("type") != 16:
+            continue
+        data = answer.get("data")
+        if not isinstance(data, str):
+            continue
+        try:
+            # DNS JSON renders TXT chunks as ``"part1" "part2"``. A logical
+            # TXT value is the concatenation of those chunks.
+            records.append("".join(shlex.split(data)))
+        except ValueError:
+            continue
+    return tuple(records)
+
+
+def verify_domain(center: Center, *, claim_id, actor=None) -> Domain:
+    """Promote one DNS-proven claim into the only routable domain table."""
+    _assert_operable_center(center)
+    claim = DomainClaim.objects.filter(tenant=center, pk=claim_id).first()
+    if claim is None:
+        raise NotFoundException(_("Domain claim does not belong to this center."))
+    if claim.domain_record_id is not None:
+        assert claim.domain_record is not None
+        return claim.domain_record
+    if not verify_domain_txt(claim.domain, claim.verification_token):
+        raise ValidationException(
+            _("DNS verification record was not found."),
+            code="domain_verification_failed",
+        )
+    with transaction.atomic():
+        # Lock only the claim row. Joining its nullable Domain relation under a
+        # blanket FOR UPDATE is rejected by PostgreSQL (the nullable side of an
+        # outer join cannot be locked).
+        claim = DomainClaim.objects.select_for_update().get(tenant=center, pk=claim.pk)
+        if claim.domain_record_id is not None:
+            assert claim.domain_record is not None
+            return claim.domain_record
+        existing = Domain.objects.select_for_update().filter(domain=claim.domain).first()
+        if existing is not None and existing.tenant_id != center.pk:
+            raise ValidationException(
+                _("That domain is already registered."),
+                code="domain_taken",
+            )
+        row = existing or Domain.objects.create(
+            domain=claim.domain,
+            tenant=center,
+            is_primary=False,
+        )
+        if claim.pending_primary:
+            set_primary_domain(center, row.pk, actor=actor)
+            row.refresh_from_db()
+        claim.domain_record = row
+        claim.verified_at = timezone.now()
+        claim.pending_primary = False
+        claim.save(update_fields=["domain_record", "verified_at", "pending_primary", "updated_at"])
+        record_platform_event(
+            actor=actor,
+            center=center,
+            event=PlatformEvent.Event.DOMAIN_VERIFIED,
+            payload={"domain_id": row.pk, "domain": row.domain, "is_primary": row.is_primary},
+        )
+        return row
 
 
 # ---------------------------------------------------------------------------
@@ -173,19 +367,30 @@ def record_platform_event(
 # ---------------------------------------------------------------------------
 @transaction.atomic
 def suspend_center(center: Center, *, actor=None, reason: str = "") -> Center:
-    """Suspend a Center (billing): flip its subscription to ``suspended`` so the
-    SubscriptionGateMiddleware paywall returns 402 on the API while STILL allowing
-    auth/admin/healthz/schema (so the tenant can log in and pay). It does NOT set
-    ``is_active=False``: that drives InactiveTenantMiddleware's 503 (which has no
-    auth allowlist) and is reserved for hard archival / trial-expiry — otherwise
-    the 503 would shadow the paywall and make the auth allowlist dead. Records a
-    PlatformEvent. Idempotent."""
-    _set_subscription_status(center, status="suspended")
+    """Suspend a Center and record how the suspension is enforced.
+
+    A center with a subscription receives the normal billing paywall. Legacy or
+    incompletely provisioned centers without one fall back to the hard inactive
+    gate; returning success while leaving such a tenant accessible would make the
+    control-plane action dangerously misleading.
+    """
+    _assert_operable_center(center)
+    subscription_changed = _set_subscription_status(center, status="suspended")
+    if not subscription_changed:
+        # Provisioning deliberately does not fail when the plan catalogue is
+        # temporarily unavailable.  A later platform suspension must still be
+        # real: fall back to the hard inactive gate instead of returning a false
+        # success while the tenant stays fully accessible.
+        center.is_active = False
+        center.save(update_fields=["is_active", "updated_at"])
     record_platform_event(
         actor=actor,
         center=center,
         event=PlatformEvent.Event.CENTER_SUSPENDED,
-        payload={"reason": reason} if reason else {},
+        payload={
+            **({"reason": reason} if reason else {}),
+            "enforcement": "subscription" if subscription_changed else "inactive_center",
+        },
     )
     return center
 
@@ -195,8 +400,15 @@ def activate_center(center: Center, *, actor=None) -> Center:
     """Re-activate a suspended Center: reactivate it AND flip its subscription
     back to ``active`` so the tenant API returns 200 again. Records a
     PlatformEvent."""
+    _assert_operable_center(center)
     center.is_active = True
-    center.save(update_fields=["is_active", "updated_at"])
+    update_fields = ["is_active", "updated_at"]
+    if center.on_trial and (center.trial_ends_at is None or center.trial_ends_at <= timezone.now()):
+        # Manual activation after an expired trial is a deliberate permanent
+        # activation. Clear the expired marker so Beat cannot undo it next hour.
+        center.on_trial = False
+        update_fields.append("on_trial")
+    center.save(update_fields=update_fields)
     _set_subscription_status(center, status="active")
     record_platform_event(
         actor=actor,
@@ -211,6 +423,7 @@ def extend_trial(center: Center, *, days: int, actor=None) -> Center:
     """Push `Center.trial_ends_at` out by `days` (from the later of now / the
     existing end). Records a PlatformEvent. Does not change subscription state —
     use activate_center for that."""
+    _assert_operable_center(center)
     if days <= 0:
         raise ValidationException(_("Days must be a positive integer."), code="invalid_days")
     now = timezone.now()
@@ -232,7 +445,7 @@ def extend_trial(center: Center, *, days: int, actor=None) -> Center:
     return center
 
 
-def _set_subscription_status(center: Center, *, status: str) -> None:
+def _set_subscription_status(center: Center, *, status: str) -> bool:
     """Drive the Day-3 billing state machine from the control center.
 
     Imported lazily: billing is a sibling SHARED app and reaching for it at
@@ -244,7 +457,8 @@ def _set_subscription_status(center: Center, *, status: str) -> None:
     try:
         change_subscription(center_id=center.pk, status=status)
     except NotFoundException:
-        return  # no subscription row → nothing to flip (paywall passes through)
+        return False
+    return True
 
 
 def _extend_subscription_trial(center: Center, *, new_trial_ends_at) -> None:
@@ -274,6 +488,8 @@ def mint_impersonation_token(*, center: Center, user_id: int, impersonator) -> d
     and one tenant-schema ``audit_log("impersonation.started")`` inside the
     target center's schema (so the school's own audit log shows it too).
     """
+    _assert_operable_center(center)
+
     from apps.users.models import User
 
     with schema_context(center.schema_name):
@@ -306,11 +522,12 @@ def mint_impersonation_token(*, center: Center, user_id: int, impersonator) -> d
 
 def _audit_impersonation_started(*, target, impersonator) -> None:
     """Write the tenant-schema audit row (already inside schema_context)."""
+    from apps.audit.models import AuditLog
     from apps.audit.services import audit_log
 
     audit_log(
         actor=None,  # the impersonator is a public-schema user, not a tenant FK
-        action="impersonation.started",
+        action=AuditLog.Action.IMPERSONATE,
         resource_type="users.User",
         resource_id=str(target.pk),
         after={

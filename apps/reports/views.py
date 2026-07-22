@@ -24,7 +24,7 @@ from apps.reports.serializers import (
 )
 from core.permissions import DenyWriteForReadOnlyToken, RolePermission, get_user_roles
 from core.renderers import StandardEnvelopeRenderer
-from core.viewsets import assert_tenant_context
+from core.tenant_context import assert_tenant_context
 
 
 @extend_schema(tags=["reports"])
@@ -127,6 +127,21 @@ class ReportScheduleViewSet(
 
     def get_queryset(self):
         return selectors.scoped_schedules(user=self.request.user, roles=get_user_roles(self.request))
+
+    def partial_update(self, request, *args, **kwargs):
+        schedule = self.get_object()
+        ser = ReportScheduleWriteSerializer(instance=schedule, data=request.data, partial=True)
+        ser.is_valid(raise_exception=True)
+        data = dict(ser.validated_data)
+        report_key = data.pop("report_key", None)
+        updated = services.update_schedule(
+            schedule,
+            actor=request.user,
+            roles=get_user_roles(request),
+            report_key=report_key,
+            **data,
+        )
+        return Response(ReportScheduleReadSerializer(updated).data)
 
     @extend_schema(
         summary="Create a report schedule",

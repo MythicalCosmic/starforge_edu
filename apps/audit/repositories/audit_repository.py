@@ -22,9 +22,6 @@ class AuditRepository(BaseRepository[AuditLog], IAuditRepository):
     def get_queryset(self) -> QuerySet[AuditLog]:
         return AuditLog.objects.select_related("actor").order_by("-created_at", "-id")
 
-    def timeline(self) -> QuerySet[AuditLog]:
-        return self.get_queryset()
-
     def filtered(self, filters: AuditFilterDTO) -> QuerySet[AuditLog]:
         qs = self.get_queryset()
         if filters.actor is not None:

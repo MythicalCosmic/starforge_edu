@@ -16,11 +16,12 @@ from datetime import timedelta
 from decimal import Decimal
 from pathlib import PurePosixPath
 
+from botocore.exceptions import ClientError
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
-from apps.assignments.models import Assignment, Submission, SubmissionGrade
+from apps.assignments.models import Assignment, AssignmentUploadGrant, Submission, SubmissionGrade
 from apps.assignments.signals import (
     ai_feedback_requested,
     assignment_due_soon,
@@ -31,14 +32,16 @@ from apps.cohorts.models import CohortMembership
 from apps.org.selectors import get_center_settings
 from core.exceptions import ConflictException, UnprocessableEntity
 from core.utils import current_schema
-from infrastructure.storage.s3_client import presign_upload
+from infrastructure.storage.s3_client import head_object, presign_post_upload, presign_upload
 
 # ---------------------------------------------------------------------------
 # Attachment upload (presigned PUT)
 # ---------------------------------------------------------------------------
 
 
-def validate_and_presign_upload(*, filename: str, content_type: str, size_bytes: int) -> dict:
+def validate_and_presign_upload(
+    *, filename: str, content_type: str, size_bytes: int, requested_by=None
+) -> dict:
     """Validate against the `allowed_file_types` / `max_upload_mb` knobs (TD-13)
     and return a presigned PUT URL + the tenant-prefixed key."""
     settings = get_center_settings()
@@ -79,8 +82,112 @@ def validate_and_presign_upload(*, filename: str, content_type: str, size_bytes:
             fields={"size_bytes": [f"Exceeds the {settings.max_upload_mb} MB limit."]},
         )
     key = f"{current_schema()}/assignments/{uuid.uuid4().hex}/{filename}"
+    if requested_by is not None:
+        expires_at = timezone.now() + timedelta(minutes=10)
+        grant = AssignmentUploadGrant.objects.create(
+            key=key,
+            requested_by=requested_by,
+            content_type=content_type,
+            expected_size_bytes=size_bytes,
+            expires_at=expires_at,
+        )
+        post = presign_post_upload(key, content_type=content_type, size_bytes=size_bytes)
+        return {
+            "url": post["url"],
+            "fields": post["fields"],
+            "method": "POST",
+            "key": key,
+            "grant_id": grant.pk,
+            "expires_at": expires_at.isoformat(),
+        }
+    # Backwards-compatible internal helper. Public API callers always provide an
+    # owner and receive the enforceable POST policy above.
     url = presign_upload(key, content_type=content_type)
     return {"url": url, "key": key}
+
+
+def _verify_and_consume_upload_grants(*, keys: list[str], actor) -> None:
+    """Require live, single-use grants and verify the objects S3 actually stored."""
+    if not keys:
+        return
+    now = timezone.now()
+    grants = {
+        grant.key: grant
+        for grant in AssignmentUploadGrant.objects.select_for_update().filter(
+            key__in=keys,
+            requested_by=actor,
+            consumed_at__isnull=True,
+            expires_at__gt=now,
+        )
+    }
+    if set(grants) != set(keys):
+        raise UnprocessableEntity(
+            _("An attachment upload grant is missing, expired, already used, or belongs to another user."),
+            code="invalid_attachment_grant",
+            fields={"attachment_keys": ["Request a new upload URL and upload the file again."]},
+        )
+    for key in keys:
+        grant = grants[key]
+        try:
+            metadata = head_object(key)
+        except ClientError as exc:
+            code = str(exc.response.get("Error", {}).get("Code", ""))
+            if code not in {"404", "NoSuchKey", "NotFound"}:
+                raise
+            raise UnprocessableEntity(
+                _("An uploaded attachment could not be verified."),
+                code="attachment_not_uploaded",
+                fields={"attachment_keys": ["The object does not exist in storage."]},
+            ) from exc
+        actual_size = int(metadata.get("ContentLength", -1))
+        actual_type = str(metadata.get("ContentType", "")).split(";", 1)[0].strip().lower()
+        if actual_size != grant.expected_size_bytes:
+            raise UnprocessableEntity(
+                _("An uploaded attachment has the wrong size."),
+                code="attachment_size_mismatch",
+                fields={"attachment_keys": ["The stored object size does not match its upload grant."]},
+            )
+        if actual_type != grant.content_type.lower():
+            raise UnprocessableEntity(
+                _("An uploaded attachment has the wrong content type."),
+                code="attachment_type_mismatch",
+                fields={"attachment_keys": ["The stored content type does not match its upload grant."]},
+            )
+        grant.actual_size_bytes = actual_size
+        grant.consumed_at = now
+        grant.save(update_fields=["actual_size_bytes", "consumed_at"])
+
+
+def consume_assignment_attachments(*, keys: list, actor=None) -> list[str]:
+    """Validate tenant ownership and, for new public writes, consume upload grants."""
+    if len(keys) > 20:
+        raise UnprocessableEntity(
+            _("Too many attachment keys."),
+            code="invalid_attachment_key",
+            fields={"attachments": ["At most 20 attachment keys are allowed."]},
+        )
+    try:
+        unique_count = len(set(keys))
+    except TypeError:
+        unique_count = -1
+    if unique_count != len(keys):
+        raise UnprocessableEntity(
+            _("Duplicate or malformed attachment keys are not allowed."),
+            code="invalid_attachment_key",
+            fields={"attachments": ["Each attachment key must be a unique string."]},
+        )
+    prefix = f"{current_schema()}/assignments/"
+    bad = [key for key in keys if not isinstance(key, str) or len(key) > 512 or not key.startswith(prefix)]
+    if bad:
+        raise UnprocessableEntity(
+            _("One or more attachment keys are not valid for this tenant."),
+            code="invalid_attachment_key",
+            fields={"attachments": [f"Keys must start with '{prefix}'."]},
+        )
+    normalized = list(keys)
+    if actor is not None:
+        _verify_and_consume_upload_grants(keys=normalized, actor=actor)
+    return normalized
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +224,23 @@ def publish_assignment(*, assignment: Assignment, actor=None) -> Assignment:
 
 
 @transaction.atomic
+def close_assignment(*, assignment: Assignment, actor=None) -> Assignment:
+    """Close an open assignment; retries are idempotent and drafts cannot skip publish."""
+    assignment = Assignment.objects.select_for_update().get(pk=assignment.pk)
+    if assignment.status == Assignment.Status.CLOSED:
+        return assignment
+    if assignment.status != Assignment.Status.PUBLISHED:
+        raise UnprocessableEntity(
+            _("Only a published assignment can be closed."),
+            code="assignment_not_published",
+            fields={"status": [f"Cannot close from status '{assignment.status}'."]},
+        )
+    assignment.status = Assignment.Status.CLOSED
+    assignment.save(update_fields=["status", "updated_at"])
+    return assignment
+
+
+@transaction.atomic
 def submit(
     *, assignment: Assignment, student, text: str = "", attachment_keys=None, actor=None
 ) -> Submission:
@@ -141,15 +265,7 @@ def submit(
     # any key not under this tenant's prefix so a student cannot persist
     # cross-tenant-shaped (or other-student) S3 references that a future
     # download / quota flow would inherit.
-    keys = list(attachment_keys or [])
-    prefix = f"{current_schema()}/assignments/"
-    bad = [k for k in keys if not isinstance(k, str) or not k.startswith(prefix)]
-    if bad:
-        raise UnprocessableEntity(
-            _("One or more attachment keys are not valid for this tenant."),
-            code="invalid_attachment_key",
-            fields={"attachment_keys": [f"Keys must start with '{prefix}'."]},
-        )
+    keys = consume_assignment_attachments(keys=list(attachment_keys or []), actor=actor)
 
     settings = get_center_settings()
     max_resubmits = (
@@ -173,7 +289,10 @@ def submit(
         )
 
     grace = timedelta(minutes=settings.assignment_grace_minutes)
-    is_late = timezone.now() > assignment.due_at + grace
+    now = timezone.now()
+    # Compare elapsed time instead of adding to due_at; datetime.max + grace
+    # overflows even though such a far-future submission is plainly not late.
+    is_late = now > assignment.due_at and (now - assignment.due_at) > grace
     try:
         with transaction.atomic():
             submission = Submission.objects.create(
@@ -270,8 +389,19 @@ def grade_submission(*, submission: Submission, score, rubric_scores=None, feedb
     return grade
 
 
+@transaction.atomic
+def return_submission(*, submission: Submission, actor=None) -> Submission:
+    """Return a submission for revision; a repeated teacher action is a no-op."""
+    submission = Submission.objects.select_for_update().get(pk=submission.pk)
+    if submission.status == Submission.Status.RETURNED:
+        return submission
+    submission.status = Submission.Status.RETURNED
+    submission.save(update_fields=["status"])
+    return submission
+
+
 # ---------------------------------------------------------------------------
-# Plagiarism (D2-D-5 stub — interface only, no HTTP)
+# Plagiarism (D2-D-5 local tenant-scoped detector)
 # ---------------------------------------------------------------------------
 
 
@@ -279,12 +409,51 @@ def grade_submission(*, submission: Submission, score, rubric_scores=None, feedb
 class PlagiarismResult:
     status: str
     score: float | None
+    matched_submission_id: int | None = None
 
 
 def check_submission(submission: Submission) -> PlagiarismResult:
-    """Plagiarism interface stub (real provider lands later). Never called from a
-    request path; returns a typed not-implemented result."""
-    return PlagiarismResult(status="not_implemented", score=None)
+    """Compare one response with other students' responses for the assignment.
+
+    This is a deterministic local baseline rather than a fictional external
+    provider. Five-word shingles tolerate punctuation/case changes, and every
+    candidate remains inside the current tenant and assignment.
+    """
+    import re
+
+    def shingles(text: str) -> set[tuple[str, ...]]:
+        words = re.findall(r"\w+", (text or "").casefold(), flags=re.UNICODE)
+        if len(words) < 5:
+            return set()
+        return {tuple(words[index : index + 5]) for index in range(len(words) - 4)}
+
+    source = shingles(submission.text)
+    if not source:
+        return PlagiarismResult(status="insufficient_text", score=None)
+
+    best_score = 0.0
+    matched_submission_id: int | None = None
+    candidates = (
+        Submission.objects.filter(assignment_id=submission.assignment_id)
+        .exclude(pk=submission.pk)
+        .exclude(student_id=submission.student_id)
+        .only("id", "text")
+    )
+    for candidate in candidates.iterator(chunk_size=200):
+        candidate_shingles = shingles(candidate.text)
+        if not candidate_shingles:
+            continue
+        score = len(source & candidate_shingles) / len(source | candidate_shingles)
+        if score > best_score:
+            best_score = score
+            matched_submission_id = candidate.pk
+            if score == 1.0:
+                break
+    return PlagiarismResult(
+        status="completed",
+        score=round(best_score, 4),
+        matched_submission_id=matched_submission_id,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -6,9 +6,10 @@ from datetime import date
 
 import factory
 
-from apps.cohorts.models import Cohort, CohortMembership
+from apps.cohorts.models import Cohort, CohortMembership, CohortTeacher
 from apps.org.tests.factories import BranchFactory
 from apps.students.tests.factories import StudentProfileFactory
+from apps.teachers.tests.factories import TeacherProfileFactory, TeacherTypeFactory
 
 
 class CohortFactory(factory.django.DjangoModelFactory[Cohort]):
@@ -32,3 +33,12 @@ class CohortMembershipFactory(factory.django.DjangoModelFactory[CohortMembership
     student = factory.SubFactory(StudentProfileFactory)
     start_date = date(2026, 1, 1)
     end_date = None
+
+
+class CohortTeacherFactory(factory.django.DjangoModelFactory[CohortTeacher]):
+    class Meta:
+        model = CohortTeacher
+
+    cohort = factory.SubFactory(CohortFactory)
+    teacher = factory.LazyAttribute(lambda assignment: TeacherProfileFactory(branch=assignment.cohort.branch))
+    teacher_type = factory.SubFactory(TeacherTypeFactory)

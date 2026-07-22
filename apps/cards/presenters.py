@@ -5,7 +5,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
-from apps.cards.models import Card, CardType, Wallet, WalletTransaction
+from apps.cards.models import Card, CardScan, CardType, Wallet, WalletTransaction
 
 _TWO_PLACES = Decimal("0.01")
 
@@ -73,3 +73,17 @@ def scan_to_dict(result: dict[str, Any]) -> dict:
     if scanned_at is not None and hasattr(scanned_at, "isoformat"):
         out["scanned_at"] = scanned_at.isoformat()
     return out
+
+
+def card_scan_to_dict(scan: CardScan) -> dict:
+    return {
+        "id": scan.id,
+        "card": scan.card_id,
+        "student": scan.card.student_id,
+        "student_name": scan.card.student.get_full_name(),
+        "card_type": scan.card.card_type.name,
+        "scanned_by": scan.scanned_by_id,
+        "was_valid": scan.was_valid,
+        "note": scan.note,
+        "scanned_at": scan.scanned_at.isoformat(),
+    }

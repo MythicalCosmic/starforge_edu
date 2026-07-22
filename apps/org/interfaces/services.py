@@ -102,6 +102,17 @@ class IBranchTransferService(ABC):
     @abstractmethod
     def get(self, transfer_id: int) -> BranchTransfer | None: ...
 
+    @abstractmethod
+    def transfer_student(
+        self,
+        *,
+        student_id: int,
+        to_branch_id: int,
+        reason: str,
+        actor: Any,
+        allowed_branch_ids: set[int] | None,
+    ) -> BranchTransfer: ...
+
 
 class ICenterSettingsService(ABC):
     @abstractmethod

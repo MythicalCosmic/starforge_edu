@@ -48,7 +48,7 @@ class RealUzumClient(UzumClient):
         if not signature or not api_key:
             return False
         expected = uzum_signature(payload=payload, api_key=api_key)
-        return hmac.compare_digest(expected, signature)
+        return hmac.compare_digest(expected.encode("ascii"), signature.encode("utf-8"))
 
     def build_checkout(self, *, amount_uzs: int, order_id: str, config: Any) -> dict[str, Any]:
         merchant = getattr(config, "uzum_merchant_id", "")

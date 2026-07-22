@@ -30,8 +30,8 @@ def _code_from(sms_text: str) -> str:
     return match.group(1)
 
 
-def _password_user(tenant, user_in, *, roles=("teacher",), password=PASSWORD):
-    user = user_in(tenant, roles=list(roles))
+def _password_user(tenant, user_in, *, roles=("teacher",), password=PASSWORD, **kwargs):
+    user = user_in(tenant, roles=list(roles), **kwargs)
     with schema_context(tenant.schema_name):
         user.set_password(password)
         user.save(update_fields=["password"])
@@ -66,6 +66,7 @@ def test_login_happy_path_registers_device(tenant_a, client_for, user_in):
     me = authed.get(ME_URL)
     assert me.status_code == 200
     assert me.json()["data"]["username"] == user.username  # layered envelope
+    assert me.json()["data"]["tenant_slug"] == tenant_a.schema_name
 
 
 def test_role_login_student_signs_in_as_their_role(tenant_a, client_for):
@@ -93,7 +94,8 @@ def test_role_login_student_signs_in_as_their_role(tenant_a, client_for):
     me = authed.get(ME_URL)
     assert me.status_code == 200
     assert me.json()["data"]["id"] == student_id
-    assert me.json()["data"]["account_type"] == "student"
+    assert me.json()["data"]["principal_kind"] == "student"
+    assert me.json()["data"]["tenant_slug"] == tenant_a.schema_name
 
 
 def test_role_login_wrong_password_401(tenant_a, client_for):
@@ -223,6 +225,134 @@ def test_password_change_ends_other_sessions(tenant_a, client_for, user_in, as_u
     ).status_code == 200
 
 
+def test_password_change_preserves_current_push_device_binding(
+    tenant_a,
+    client_for,
+    user_in,
+):
+    import celery_tasks.notification_tasks as notification_tasks
+    from apps.users.models import Device
+    from core.session_auth import create_session, validate_session_key
+
+    user = _password_user(tenant_a, user_in)
+    login = client_for(tenant_a).post(
+        LOGIN_URL,
+        {
+            "username": user.username,
+            "password": PASSWORD,
+            "device_id": "current-phone",
+            "platform": "ios",
+        },
+        format="json",
+    )
+    assert login.status_code == 200
+    client = client_for(tenant_a)
+    client.credentials(HTTP_AUTHORIZATION=f"Bearer {login.json()['data']['access']}")
+    registered = client.post(
+        "/api/v1/users/devices/",
+        {
+            "device_id": "current-phone",
+            "platform": "ios",
+            "push_token": "current-private-token",
+        },
+        format="json",
+    )
+    assert registered.status_code == 201
+    with schema_context(tenant_a.schema_name):
+        Device.objects.create(
+            user=user,
+            device_id="old-tablet",
+            platform="android",
+            push_token="old-private-token",
+        )
+        create_session(user, device_id="old-tablet")
+
+    changed = client.post(
+        CHANGE_URL,
+        {"old_password": PASSWORD, "new_password": NEW_PASSWORD},
+        format="json",
+    )
+
+    assert changed.status_code == 200, changed.content
+    new_key = changed.json()["data"]["access"]
+    with schema_context(tenant_a.schema_name):
+        fresh_session = validate_session_key(new_key)
+        assert fresh_session is not None
+        assert fresh_session.device_id == "current-phone"
+        current = Device.objects.get(user=user, device_id="current-phone")
+        old = Device.objects.get(user=user, device_id="old-tablet")
+        assert current.revoked_at is None
+        assert current.push_token == "current-private-token"
+        assert old.revoked_at is not None
+        assert old.push_token == ""
+        assert list(
+            notification_tasks._active_push_devices(user).values_list(
+                "device_id",
+                flat=True,
+            )
+        ) == ["current-phone"]
+
+
+def test_role_password_change_keeps_device_id_and_push_eligibility(
+    tenant_a,
+    client_for,
+):
+    import celery_tasks.notification_tasks as notification_tasks
+    from apps.students.tests.factories import StudentProfileFactory
+    from apps.users.models import Device
+    from core.session_auth import validate_session_key
+
+    with schema_context(tenant_a.schema_name):
+        student = StudentProfileFactory(username="push.student")
+        student.set_password(PASSWORD)
+        student.save(update_fields=["password"])
+        user = student.user
+
+    login = client_for(tenant_a).post(
+        ROLE_LOGIN_URL,
+        {
+            "username": student.username,
+            "password": PASSWORD,
+            "device_id": "role-phone",
+            "platform": "android",
+        },
+        format="json",
+    )
+    assert login.status_code == 200, login.content
+    client = client_for(tenant_a)
+    client.credentials(HTTP_AUTHORIZATION=f"Bearer {login.json()['data']['access']}")
+    registered = client.post(
+        "/api/v1/users/devices/",
+        {
+            "device_id": "role-phone",
+            "platform": "android",
+            "push_token": "role-private-token",
+        },
+        format="json",
+    )
+    assert registered.status_code == 201
+
+    changed = client.post(
+        CHANGE_URL,
+        {"old_password": PASSWORD, "new_password": NEW_PASSWORD},
+        format="json",
+    )
+
+    assert changed.status_code == 200, changed.content
+    with schema_context(tenant_a.schema_name):
+        fresh_session = validate_session_key(changed.json()["data"]["access"])
+        assert fresh_session is not None
+        assert fresh_session.device_id == "role-phone"
+        device = Device.objects.get(user=user, device_id="role-phone")
+        assert device.push_token == "role-private-token"
+        assert list(
+            notification_tasks._active_push_devices(user).values_list(
+                "device_id",
+                flat=True,
+            )
+        ) == ["role-phone"]
+
+
 # ---------------------------------------------------------------------------
 # Password reset (OTP repurposed — request/confirm)
 # ---------------------------------------------------------------------------
@@ -258,6 +388,110 @@ def test_password_reset_unknown_identifier_silent_202(tenant_a, client_for, sms_
     resp = client_for(tenant_a).post(RESET_REQUEST_URL, {"identifier": "+998905550001"}, format="json")
     assert resp.status_code == 202
     assert len(sms_outbox) == 0
+
+
+@override_settings(SMS_ENABLED=False)
+def test_password_reset_disabled_sms_is_uniform_and_never_dispatches(
+    tenant_a,
+    client_for,
+    user_in,
+    sms_outbox,
+):
+    """A disabled transport is reported before account lookup, with no OTP side effect."""
+    from apps.users.models import OTP
+
+    user = _password_user(tenant_a, user_in)
+    client = client_for(tenant_a)
+    known = client.post(RESET_REQUEST_URL, {"identifier": user.phone}, format="json")
+    unknown = client.post(RESET_REQUEST_URL, {"identifier": "+998905550099"}, format="json")
+
+    assert known.status_code == unknown.status_code == 503
+    assert known.json() == unknown.json()
+    assert known.json()["code"] == "password_reset_unavailable"
+    assert sms_outbox == []
+    with schema_context(tenant_a.schema_name):
+        assert not OTP.objects.exists()
+
+
+@override_settings(EMAIL_ENABLED=False)
+def test_password_reset_disabled_email_is_uniform_and_never_dispatches(
+    tenant_a,
+    client_for,
+    user_in,
+    monkeypatch,
+):
+    from apps.users.models import OTP
+
+    user = _password_user(tenant_a, user_in, email="known@example.com")
+    monkeypatch.setattr(
+        "apps.auth.services.send_email",
+        lambda **kwargs: pytest.fail("disabled email transport was called"),
+    )
+    client = client_for(tenant_a)
+    known = client.post(RESET_REQUEST_URL, {"identifier": user.email}, format="json")
+    unknown = client.post(RESET_REQUEST_URL, {"identifier": "unknown@example.com"}, format="json")
+
+    assert known.status_code == unknown.status_code == 503
+    assert known.json() == unknown.json()
+    assert known.json()["code"] == "password_reset_unavailable"
+    with schema_context(tenant_a.schema_name):
+        assert not OTP.objects.exists()
+
+
+def test_disabling_sms_rejects_an_already_issued_reset_capability(
+    tenant_a,
+    client_for,
+    user_in,
+    sms_outbox,
+):
+    user = _password_user(tenant_a, user_in)
+    client = client_for(tenant_a)
+    assert client.post(RESET_REQUEST_URL, {"identifier": user.phone}, format="json").status_code == 202
+    code = _code_from(sms_outbox[-1]["text"])
+
+    with override_settings(SMS_ENABLED=False):
+        disabled = client.post(
+            RESET_CONFIRM_URL,
+            {"identifier": user.phone, "code": code, "new_password": NEW_PASSWORD},
+            format="json",
+        )
+
+    assert disabled.status_code == 503
+    assert disabled.json()["code"] == "password_reset_unavailable"
+    with schema_context(tenant_a.schema_name):
+        user.refresh_from_db()
+        assert user.check_password(PASSWORD)
+
+
+def test_password_reset_confirm_does_not_reveal_account_existence(
+    tenant_a,
+    client_for,
+    user_in,
+    sms_outbox,
+):
+    user = _password_user(tenant_a, user_in)
+    client = client_for(tenant_a)
+    client.post(RESET_REQUEST_URL, {"identifier": user.phone}, format="json")
+    issued_code = _code_from(sms_outbox[-1]["text"])
+    wrong_code = str((int(issued_code) + 1) % (10**settings.OTP_LENGTH)).zfill(settings.OTP_LENGTH)
+
+    known = client.post(
+        RESET_CONFIRM_URL,
+        {"identifier": user.phone, "code": wrong_code, "new_password": NEW_PASSWORD},
+        format="json",
+    )
+    unknown = client.post(
+        RESET_CONFIRM_URL,
+        {
+            "identifier": "+998905550099",
+            "code": wrong_code,
+            "new_password": NEW_PASSWORD,
+        },
+        format="json",
+    )
+
+    assert known.status_code == unknown.status_code == 400
+    assert known.json() == unknown.json()
 
 
 @override_settings(OTP_IDENTIFIER_RATE_LIMIT=2, OTP_IDENTIFIER_RATE_WINDOW_SECONDS=60)
@@ -326,8 +560,10 @@ def test_password_reset_wrong_code_5x_invalidates(tenant_a, client_for, user_in,
         {"identifier": user.phone, "code": code, "new_password": NEW_PASSWORD},
         format="json",
     )
-    assert resp.status_code == 429
-    assert resp.json()["code"] == "throttled"
+    # Confirm failures are deliberately indistinguishable from an unknown
+    # identifier; the endpoint's IP limiter still bounds brute-force traffic.
+    assert resp.status_code == 400
+    assert resp.json()["code"] == "validation_error"
 
 
 def test_reset_request_cooldown_silently_202_no_resend(tenant_a, client_for, user_in, sms_outbox):

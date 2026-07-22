@@ -282,3 +282,35 @@ def test_whitespace_only_name_is_rejected(tenant_a, as_role):
     r = director.post(ACH, {"name": "   ", "scope": "global"}, format="json")
     assert r.status_code == 400
     assert "name" in r.json()["errors"]
+
+
+def test_detail_scope_head_and_multi_codepoint_emoji(tenant_a, user_in, as_user, as_role):
+    """Detail reads must obey branch scope, and every safe read route supports HEAD."""
+    from apps.cohorts.tests.factories import CohortFactory
+    from apps.org.tests.factories import BranchFactory
+
+    director, _ = as_role(Role.DIRECTOR)
+    with schema_context(tenant_a.schema_name):
+        branch_a = BranchFactory.create()
+        branch_b = BranchFactory.create()
+        cohort_a = CohortFactory.create(branch=branch_a)
+
+    teacher_a = _teacher_in_branch(tenant_a, user_in, as_user, branch_a)
+    teacher_b = _teacher_in_branch(tenant_a, user_in, as_user, branch_b)
+    emoji = "👩\u200d🏫"
+    response = teacher_a.post(
+        ACH,
+        {"name": "Video mentor", "scope": "group", "cohort": cohort_a.id, "emoji": emoji},
+        format="json",
+    )
+    assert response.status_code == 201, response.content
+    achievement_id = response.json()["data"]["id"]
+    assert response.json()["data"]["emoji"] == emoji
+
+    detail_url = f"{ACH}{achievement_id}/"
+    assert teacher_a.get(detail_url).status_code == 200
+    assert teacher_b.get(detail_url).status_code == 404
+    assert director.head(ACH).status_code == 200
+    assert teacher_a.head(detail_url).status_code == 200
+    assert director.head(f"{ACH}{achievement_id}/grants/").status_code == 200
+    assert teacher_a.head(f"{ACH}mine/").status_code == 200

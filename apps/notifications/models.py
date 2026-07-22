@@ -50,6 +50,15 @@ class EventType(models.TextChoices):
     APPROVAL_DISBURSED = "approval.disbursed", _("Request disbursed")
     # F24-1: a student crossed the center's penalty-point escalation threshold.
     PENALTY_ESCALATED = "penalty.escalated", _("Penalty: escalation threshold crossed")
+    # Cross-domain events already emitted by their owning services. Keeping the
+    # canonical choices here makes preferences and localized templates available
+    # for every event that can reach dispatch().
+    MESSAGE_RECEIVED = "message.received", _("Message received")
+    REPORT_READY = "report.ready", _("Report ready")
+    COVER_REQUESTED = "cover.requested", _("Cover requested")
+    COVER_APPROVED = "cover.approved", _("Cover approved")
+    COVER_POOL_OPENED = "cover.pool_opened", _("Cover pool opened")
+    COVER_REJECTED = "cover.rejected", _("Cover rejected")
 
 
 class Channel(models.TextChoices):
@@ -99,6 +108,7 @@ class NotificationDelivery(models.Model):
         SENT = "sent", _("Sent")
         FAILED = "failed", _("Failed")
         SKIPPED_PREF = "skipped_pref", _("Skipped (preference off)")
+        SKIPPED_DISABLED = "skipped_disabled", _("Skipped (channel disabled by operator)")
         SKIPPED_QUIET_HOURS = "skipped_quiet_hours", _("Skipped (quiet hours)")
         DEAD_TOKEN = "dead_token", _("Dead push token")
 

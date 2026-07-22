@@ -35,6 +35,11 @@ class Term(models.Model):
         ordering = ("-start_date",)
         constraints = [
             models.UniqueConstraint(fields=("academic_year", "name"), name="term_unique_year_name"),
+            models.UniqueConstraint(
+                fields=("is_current",),
+                condition=Q(is_current=True),
+                name="term_one_current",
+            ),
             models.CheckConstraint(
                 condition=Q(end_date__gt=models.F("start_date")), name="term_dates_ordered"
             ),
@@ -147,6 +152,10 @@ class Lesson(models.Model):
     detached_from_rule = models.BooleanField(default=False)
     cancel_reason = models.CharField(max_length=255, blank=True)
     reminder_sent_at = models.DateTimeField(null=True, blank=True)
+    # Set once the post-start absence sweep has reconciled this lesson's historical
+    # roster.  Without this marker every 15-minute beat re-read every past lesson for
+    # the whole term, producing an ever-growing 2N+1 no-op query load.
+    auto_absence_processed_at = models.DateTimeField(null=True, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -157,6 +166,10 @@ class Lesson(models.Model):
             models.Index(fields=("cohort", "starts_at")),
             models.Index(fields=("teacher", "starts_at")),
             models.Index(fields=("room", "starts_at")),
+            models.Index(
+                fields=("status", "auto_absence_processed_at", "starts_at"),
+                name="lesson_auto_absence_idx",
+            ),
         ]
         constraints = [
             models.CheckConstraint(

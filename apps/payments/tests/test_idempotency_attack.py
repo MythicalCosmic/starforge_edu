@@ -97,7 +97,7 @@ def test_payment_idempotency_key_unique_constraint(invoice_a):
 # --------------------------------------------------------------------------- #
 def test_checkout_endpoint_idempotency_header_one_payment(invoice_a, user_in, as_user):
     tenant_a, inv = invoice_a
-    cashier = user_in(tenant_a, roles=["accountant"])
+    cashier = user_in(tenant_a, roles=["accountant"], branch=inv.student.branch)
     client = as_user(tenant_a, cashier)
     # CheckoutSerializer field is `invoice` (an int), not `invoice_id`.
     body = {"invoice": inv.id, "provider": "payme"}
@@ -121,14 +121,13 @@ def test_two_cash_payments_same_invoice_are_both_recorded(invoice_a, user_in, as
     the old derived per-(invoice, shift) key swallowed every payment after the first
     (silent cash loss). Two headerless POSTs must create TWO completed payments."""
     from apps.finance import services as finance_services
-    from apps.org.tests.factories import BranchFactory
     from apps.payments.models import Payment
 
     tenant_a, inv = invoice_a
-    cashier = user_in(tenant_a, roles=["cashier"])
+    cashier = user_in(tenant_a, roles=["cashier"], branch=inv.student.branch)
     with schema_context(tenant_a.schema_name):
         finance_services.open_cashier_shift(
-            cashier=cashier, branch=BranchFactory(), opening_cash_uzs=Decimal("0.00")
+            cashier=cashier, branch=inv.student.branch, opening_cash_uzs=Decimal("0.00")
         )
     client = as_user(tenant_a, cashier)
     r1 = client.post("/api/v1/payments/cash/", {"invoice": inv.id, "amount_uzs": "50000.00"}, format="json")
@@ -145,14 +144,13 @@ def test_cash_double_submit_same_amount_is_coalesced(invoice_a, user_in, as_user
     network retry) must NOT double-credit the drawer. The amount-derived fallback key
     coalesces it to ONE payment; distinct amounts (covered elsewhere) still split."""
     from apps.finance import services as finance_services
-    from apps.org.tests.factories import BranchFactory
     from apps.payments.models import Payment
 
     tenant_a, inv = invoice_a
-    cashier = user_in(tenant_a, roles=["cashier"])
+    cashier = user_in(tenant_a, roles=["cashier"], branch=inv.student.branch)
     with schema_context(tenant_a.schema_name):
         finance_services.open_cashier_shift(
-            cashier=cashier, branch=BranchFactory(), opening_cash_uzs=Decimal("0.00")
+            cashier=cashier, branch=inv.student.branch, opening_cash_uzs=Decimal("0.00")
         )
     client = as_user(tenant_a, cashier)
     body = {"invoice": inv.id, "amount_uzs": "50000.00"}
@@ -172,17 +170,16 @@ def test_cash_equal_amount_installments_in_different_windows_both_record(invoice
     import time_machine
 
     from apps.finance import services as finance_services
-    from apps.org.tests.factories import BranchFactory
     from apps.payments.models import Payment
 
     tenant_a, inv = invoice_a
-    cashier = user_in(tenant_a, roles=["cashier"])
+    cashier = user_in(tenant_a, roles=["cashier"], branch=inv.student.branch)
     client = as_user(tenant_a, cashier)
     body = {"invoice": inv.id, "amount_uzs": "50000.00"}
     with time_machine.travel("2026-06-16 10:00:00 +05:00", tick=False):
         with schema_context(tenant_a.schema_name):
             finance_services.open_cashier_shift(
-                cashier=cashier, branch=BranchFactory(), opening_cash_uzs=Decimal("0.00")
+                cashier=cashier, branch=inv.student.branch, opening_cash_uzs=Decimal("0.00")
             )
         r1 = client.post("/api/v1/payments/cash/", body, format="json")
     with time_machine.travel("2026-06-16 10:05:00 +05:00", tick=False):  # 5 min later, new window

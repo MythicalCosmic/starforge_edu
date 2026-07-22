@@ -80,7 +80,7 @@ def test_cohort_move_keeps_history(director, tenant_a):
 
     with schema_context(tenant_a.schema_name):
         old.refresh_from_db()  # end-dated, never deleted
-        assert old.end_date == timezone.now().date()
+        assert old.end_date == timezone.localdate()
         assert old.moved_reason == "schedule_conflict"
         active = CohortMembership.objects.get(student=student, end_date__isnull=True)
         assert active.cohort_id == cohort_b.id
@@ -109,9 +109,7 @@ def test_archived_write_precedes_body_validation(director, tenant_a):
     malformed field — the archived guard runs before body parsing (code parity)."""
     with schema_context(tenant_a.schema_name):
         cohort = CohortFactory.create(is_archived=True)
-    resp = director.patch(
-        f"/api/v1/cohorts/{cohort.id}/", {"start_date": "not-a-date"}, format="json"
-    )
+    resp = director.patch(f"/api/v1/cohorts/{cohort.id}/", {"start_date": "not-a-date"}, format="json")
     assert resp.status_code == 400
     assert resp.json()["code"] == "cohort_archived"
 

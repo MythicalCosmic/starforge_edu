@@ -18,7 +18,9 @@ class MeetingRepository(BaseRepository[StaffMeeting], IMeetingRepository):
             "attendees"
         )
 
-    def scoped(self, *, user, is_unscoped: bool, is_manager: bool, branch_ids: set[int]) -> QuerySet[StaffMeeting]:
+    def scoped(
+        self, *, user, is_unscoped: bool, is_manager: bool, branch_ids: set[int]
+    ) -> QuerySet[StaffMeeting]:
         qs = self.get_queryset()
         if is_unscoped:
             return qs

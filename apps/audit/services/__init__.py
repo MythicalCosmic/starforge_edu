@@ -19,10 +19,9 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from django.db import transaction
-from django_tenants.utils import get_public_schema_name
 
 from apps.audit.models import AuditLog
-from core.utils import client_ip, current_schema, user_agent
+from core.utils import client_ip, user_agent
 
 if TYPE_CHECKING:
     from rest_framework.request import Request
@@ -43,20 +42,6 @@ MASKED_FIELDS: frozenset[str] = frozenset(
 )
 
 _MASK = "***"
-
-
-def _on_public_schema() -> bool:
-    """True when the active connection is the public/platform schema.
-
-    ``apps.audit`` is TENANT-ONLY, so ``audit_auditlog`` exists only inside tenant
-    schemas. Platform-staff writes to the SHARED ``users.User`` /
-    ``users.RoleMembership`` tables fire the audit receivers while
-    ``connection.schema_name == public`` — without this guard those writes hit a
-    non-existent table and raise ProgrammingError, breaking every public-schema
-    User/RoleMembership operation (createsuperuser, apex admin, last_login on
-    login). Auditing is tenant-scoped, so a public-schema write simply no-ops.
-    """
-    return current_schema() == get_public_schema_name()
 
 
 def mask_snapshot(data: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -81,19 +66,44 @@ def audit_log(
     request: Request | None = None,
     ip: str | None = None,
     user_agent: str | None = None,
-) -> AuditLog | None:
+) -> AuditLog:
     """Append one immutable audit row.
 
     `actor` may be a `User` instance, an anonymous user, or ``None`` (system).
     `ip`/`user_agent` are extracted from `request` when not passed explicitly.
     `before`/`after` are masked before persistence (see `MASKED_FIELDS`).
 
-    Never raises on a missing/anonymous actor — auditing must not break the
-    operation it records. Returns ``None`` (writes nothing) on the public schema,
-    where the tenant-only ``audit_auditlog`` table does not exist.
+    Missing/anonymous actors are recorded as system events. AuditLog exists in
+    both public and tenant schemas so platform mutations are never discarded.
     """
-    if _on_public_schema():
-        return None
+    row = _build_audit_log(
+        actor=actor,
+        action=action,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        before=before,
+        after=after,
+        request=request,
+        ip=ip,
+        user_agent=user_agent,
+    )
+    row.save(force_insert=True)
+    return row
+
+
+def _build_audit_log(
+    *,
+    actor: Any = None,
+    action: str,
+    resource_type: str = "",
+    resource_id: str | int = "",
+    before: dict[str, Any] | None = None,
+    after: dict[str, Any] | None = None,
+    request: Request | None = None,
+    ip: str | None = None,
+    user_agent: str | None = None,
+) -> AuditLog:
+    """Build one unsaved, centrally masked audit row."""
     resolved_ip = ip
     resolved_ua = user_agent
     if request is not None:
@@ -101,8 +111,7 @@ def audit_log(
             resolved_ip = client_ip(request) or None
         if resolved_ua is None:
             resolved_ua = _user_agent(request)
-
-    return AuditLog.objects.create(
+    return AuditLog(
         actor=_actor_instance(actor),
         actor_repr=_actor_repr(actor),
         action=action,
@@ -186,11 +195,18 @@ def audit_log_on_commit(**kwargs: Any) -> None:
     commits — used by model receivers so they never record a write that later
     rolls back.
 
-    No-ops on the public schema: ``audit_auditlog`` is tenant-only, so a
-    public-schema User/RoleMembership write must not even register the commit
-    hook (it would raise ProgrammingError at commit). Checked here at scheduling
-    time, when the emitting schema is still active.
+    The callback is registered in public and tenant schemas and only runs after
+    the surrounding mutation commits.
     """
-    if _on_public_schema():
-        return
     transaction.on_commit(lambda: audit_log(**kwargs))
+
+
+def audit_logs_bulk_on_commit(entries: list[dict[str, Any]]) -> None:
+    """Insert many audit events in one query after their mutation commits."""
+    frozen_entries = [dict(entry) for entry in entries]
+
+    def write() -> None:
+        if frozen_entries:
+            AuditLog.objects.bulk_create([_build_audit_log(**entry) for entry in frozen_entries])
+
+    transaction.on_commit(write)

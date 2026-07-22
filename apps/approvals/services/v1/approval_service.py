@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import Any
 
 from django.db.models import QuerySet
+from django.utils.translation import gettext_lazy as _
 
 from apps.approvals import services as domain
 from apps.approvals.interfaces.repositories import (
@@ -36,7 +37,9 @@ class ApprovalService(IApprovalService):
             branch = Branch.objects.filter(pk=branch_id, archived_at__isnull=True).first()
             if branch is None:
                 raise ValidationException(
-                    "Invalid input.", code="validation_error", fields={"branch": ["Branch does not exist."]}
+                    _("Invalid input."),
+                    code="validation_error",
+                    fields={"branch": ["Branch does not exist."]},
                 )
         return domain.create_request(
             requested_by=requested_by,

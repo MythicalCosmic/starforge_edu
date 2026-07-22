@@ -2,12 +2,30 @@
 
 from __future__ import annotations
 
-from django.db.models import Count, Exists, F, OuterRef, Q, QuerySet, Subquery
+from django.db.models import Count, Exists, F, OuterRef, Prefetch, Q, QuerySet, Subquery
 
+from apps.access.models import AccountType
+from apps.cohorts.selectors import taught_cohorts
 from apps.messaging.interfaces.repositories import IThreadRepository
 from apps.messaging.models import Message, Thread, ThreadParticipant
+from apps.students.models import StudentProfile
+from apps.teachers.models import TeacherProfile
 from apps.users.models import RoleMembership, User
+from core.permissions import Role
 from core.repositories import BaseRepository
+
+_NON_STAFF_ROLES = {Role.STUDENT, Role.PARENT}
+_MANAGEMENT_ROLES = {Role.DIRECTOR, Role.HEAD_OF_DEPT}
+_LEGACY_STAFF_TEACHER_ROLES = tuple(role for role in Role.ALL if role not in _NON_STAFF_ROLES)
+_MANAGEMENT_ACCOUNT_TYPE_SLUG = (
+    Q(account_type__slug__icontains="ceo")
+    | Q(account_type__slug__icontains="owner")
+    | Q(account_type__slug__icontains="director")
+    | Q(account_type__slug__icontains="manager")
+    | Q(account_type__slug__icontains="head_of_dept")
+    | Q(account_type__slug__icontains="head-of-dept")
+    | Q(account_type__slug__iregex=r"(^|[-_])hod($|[-_])")
+)
 
 
 class ThreadRepository(BaseRepository[Thread], IThreadRepository):
@@ -61,3 +79,92 @@ class ThreadRepository(BaseRepository[Thread], IThreadRepository):
         # LEFT JOIN would let membership-less users slip through).
         active_member = RoleMembership.objects.filter(user_id=OuterRef("pk"), revoked_at__isnull=True)
         return list(User.objects.filter(id__in=ids, is_active=True).filter(Exists(active_member)))
+
+    def is_active_teacher(self, *, user) -> bool:
+        """Whether this bridge principal belongs to an active role-native teacher."""
+        return TeacherProfile.objects.filter(user=user, is_active=True).exists()
+
+    def contacts_for(self, *, user, category: str = "") -> QuerySet[User]:
+        """Purpose-limited messaging directory.
+
+        Every returned primary key is a real ``users.User`` bridge id accepted by
+        thread creation. Staff/teacher contacts are active role-native accounts.
+        An active teacher additionally sees only students in cohorts they actually
+        teach, never the broader branch/department student directory.
+        """
+        active_staff_membership = RoleMembership.objects.filter(
+            user_id=OuterRef("pk"), revoked_at__isnull=True
+        ).filter(
+            Q(
+                account_type__is_active=True,
+                account_type__account_kind__in=(
+                    AccountType.AccountKind.STAFF,
+                    AccountType.AccountKind.TEACHER,
+                ),
+            )
+            | Q(account_type__isnull=True, role__in=_LEGACY_STAFF_TEACHER_ROLES)
+        )
+        active_student_membership = RoleMembership.objects.filter(
+            user_id=OuterRef("pk"), revoked_at__isnull=True
+        ).filter(
+            Q(
+                account_type__is_active=True,
+                account_type__account_kind=AccountType.AccountKind.STUDENT,
+            )
+            | Q(account_type__isnull=True, role=Role.STUDENT)
+        )
+        management_membership = RoleMembership.objects.filter(
+            user_id=OuterRef("pk"), revoked_at__isnull=True
+        ).filter(
+            (Q(account_type__is_active=True) & _MANAGEMENT_ACCOUNT_TYPE_SLUG)
+            | Q(account_type__isnull=True, role__in=_MANAGEMENT_ROLES)
+        )
+
+        qs = (
+            User.objects.filter(is_active=True)
+            .exclude(pk=user.pk)
+            .annotate(
+                contact_is_staff=Exists(active_staff_membership),
+                contact_is_student=Exists(active_student_membership),
+                contact_is_management=Exists(management_membership),
+            )
+            .select_related("staff_profile", "teacher_profile", "student_profile")
+        )
+
+        staff_visible = Q(contact_is_staff=True, contact_is_management=False) & (
+            Q(staff_profile__is_active=True) | Q(teacher_profile__is_active=True)
+        )
+        student_visible = Q(pk__in=[])
+        if self.is_active_teacher(user=user):
+            owned_student_ids = StudentProfile.objects.filter(
+                user__is_active=True,
+                is_active=True,
+                status__in=(StudentProfile.Status.ENROLLED, StudentProfile.Status.ACTIVE),
+                current_cohort__in=taught_cohorts(user=user),
+            ).values("user_id")
+            student_visible = Q(contact_is_student=True, pk__in=owned_student_ids)
+
+        if category == "staff":
+            visible = staff_visible
+        elif category == "student":
+            visible = student_visible
+        else:
+            visible = staff_visible | student_visible
+
+        active_memberships = (
+            RoleMembership.objects.filter(revoked_at__isnull=True)
+            .filter(Q(account_type__isnull=True) | Q(account_type__is_active=True))
+            .select_related("account_type")
+            .order_by("-granted_at", "-id")
+        )
+        return (
+            qs.filter(visible)
+            .prefetch_related(
+                Prefetch(
+                    "role_memberships",
+                    queryset=active_memberships,
+                    to_attr="messaging_memberships",
+                )
+            )
+            .order_by("id")
+        )

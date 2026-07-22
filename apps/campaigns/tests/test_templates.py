@@ -86,6 +86,38 @@ def test_ai_generation_fills_the_template_body(tenant_a, user_in, as_user, monke
         assert "class tomorrow" in tpl.body or tpl.body.startswith("Dear guardian")
 
 
+def test_template_generation_http_contract(
+    tenant_a,
+    user_in,
+    as_user,
+    as_role,
+    monkeypatch,
+    django_capture_on_commit_callbacks,
+):
+    from celery_tasks.ai_tasks import run_template_generation
+
+    _, client = _staff(tenant_a, user_in, as_user)
+    _seed_template_ai(tenant_a)
+    tid = client.post(TEMPLATES, {"name": "Reminder", "purpose": "class tomorrow"}, format="json").json()[
+        "data"
+    ]["id"]
+    queued = []
+    monkeypatch.setattr(
+        run_template_generation, "delay", lambda *args, **kwargs: queued.append((args, kwargs))
+    )
+
+    with django_capture_on_commit_callbacks(execute=True):
+        response = client.post(f"{TEMPLATES}{tid}/generate/", {}, format="json")
+    assert response.status_code == 202
+    assert set(response.json()["data"]) == {"request_id", "status"}
+    assert len(queued) == 1
+
+    assert client.get(f"{TEMPLATES}{tid}/generate/").status_code == 405
+    assert client.post(f"{TEMPLATES}999999/generate/", {}, format="json").status_code == 404
+    student, _ = as_role(Role.STUDENT)
+    assert student.post(f"{TEMPLATES}{tid}/generate/", {}, format="json").status_code == 403
+
+
 def test_edit_a_template(tenant_a, user_in, as_user):
     _, client = _staff(tenant_a, user_in, as_user)
     tid = client.post(TEMPLATES, {"name": "t"}, format="json").json()["data"]["id"]
@@ -93,6 +125,31 @@ def test_edit_a_template(tenant_a, user_in, as_user):
     assert r.status_code == 200
     assert r.json()["data"]["body"] == "Edited body"
     assert r.json()["data"]["category"] == "payment"
+
+
+def test_template_patch_strips_name_and_rejects_unknown_boolean(tenant_a, user_in, as_user):
+    _, client = _staff(tenant_a, user_in, as_user)
+    tid = client.post(TEMPLATES, {"name": "t"}, format="json").json()["data"]["id"]
+
+    invalid = client.patch(f"{TEMPLATES}{tid}/", {"is_active": "active"}, format="json")
+    assert invalid.status_code == 400
+    assert invalid.json()["code"] == "validation_error"
+    assert client.patch(f"{TEMPLATES}{tid}/", {"is_active": None}, format="json").status_code == 400
+
+    updated = client.patch(
+        f"{TEMPLATES}{tid}/",
+        {"name": "  Clean name  ", "is_active": "on"},
+        format="json",
+    )
+    assert updated.status_code == 200
+    assert updated.json()["data"]["name"] == "Clean name"
+    assert updated.json()["data"]["is_active"] is True
+
+
+def test_template_collections_support_head(tenant_a, user_in, as_user):
+    _, client = _staff(tenant_a, user_in, as_user)
+    assert client.head(TEMPLATES).status_code == 200
+    assert client.head("/api/v1/campaigns/do-not-contact/").status_code == 200
 
 
 def test_compose_a_campaign_from_a_template(tenant_a, user_in, as_user):

@@ -37,7 +37,10 @@ from core.http import bool_field, parse_bool, read_json
 from core.listing import apply_filters, paginate
 from core.permissions import get_user_roles
 from core.responses import created, error, no_content, paginated, success
-from core.scoping import assert_branch_id_in_scope, assert_in_branch_scope
+from core.scoping import (
+    assert_permission_membership_scope,
+    scope_to_permission_memberships,
+)
 
 # --- service accessors -----------------------------------------------------
 
@@ -276,7 +279,13 @@ def time_slots_collection_view(request: HttpRequest) -> HttpResponse:
         check_perm(request, "schedule:read")
         qs = apply_filters(
             request,
-            _slot_service().list_slots(),
+            scope_to_permission_memberships(
+                request,
+                _slot_service().list_slots(),
+                permission="schedule:read",
+                branch_field="branch_id",
+                account_kinds={"staff", "teacher"},
+            ),
             filter_fields=("branch",),
             ordering_fields=("order", "start_time"),
         )
@@ -285,7 +294,13 @@ def time_slots_collection_view(request: HttpRequest) -> HttpResponse:
     if request.method == "POST":
         check_perm(request, "schedule:write")
         data = _slot_create_data(request)
-        assert_branch_id_in_scope(request, data["branch_id"])
+        assert_permission_membership_scope(
+            request,
+            permission="schedule:write",
+            branch_id=data["branch_id"],
+            enforce_department=False,
+            account_kinds={"staff", "teacher"},
+        )
         slot = _slot_service().create(data=data)
         return created(time_slot_to_dict(slot))
     return _method_not_allowed()
@@ -299,13 +314,26 @@ def time_slot_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
     slot = _slot_service().get(pk=pk)
     if slot is None:
         raise NotFoundException(code="not_found")
-    assert_in_branch_scope(request, slot)
+    permission = "schedule:read" if read else "schedule:write"
+    assert_permission_membership_scope(
+        request,
+        permission=permission,
+        branch_id=slot.branch_id,
+        enforce_department=False,
+        account_kinds={"staff", "teacher"},
+    )
     if read:
         return success(time_slot_to_dict(slot))
     if request.method in ("PUT", "PATCH"):
         changes = _slot_changes(request)
         if "branch_id" in changes:
-            assert_branch_id_in_scope(request, changes["branch_id"])
+            assert_permission_membership_scope(
+                request,
+                permission="schedule:write",
+                branch_id=changes["branch_id"],
+                enforce_department=False,
+                account_kinds={"staff", "teacher"},
+            )
         return success(time_slot_to_dict(_slot_service().update(slot, changes=changes)))
     if request.method == "DELETE":
         _slot_service().delete(slot)
@@ -399,7 +427,7 @@ def _rule_write_data(request: HttpRequest, *, partial: bool) -> dict[str, Any]:
     # required scalars
     scalar_specs = (
         ("title", lambda v: _str_value(v, "title", max_length=200)),
-        ("rrule", lambda v: _str_value(v, "rrule", strip=False)),
+        ("rrule", lambda v: _str_value(v, "rrule", max_length=2048, strip=False)),
         ("start_date", lambda v: _date_value(v, "start_date")),
         ("end_date", lambda v: _date_value(v, "end_date")),
         ("start_time", lambda v: _time_value(v, "start_time")),
@@ -430,7 +458,7 @@ def _assert_rule_branch_scope(request: HttpRequest, changes: dict[str, Any]) -> 
     writer could POST a rule naming branch-B's cohort/teacher/room (resolved by bare pk),
     materializing lessons + downstream attendance/absence-deduction rows in a branch they
     don't control, and use the endpoint as a cross-branch pk existence oracle. Mirrors the
-    TimeSlot assert_branch_id_in_scope guard in this same file."""
+    TimeSlot permission-scope guard in this same file."""
     from apps.cohorts.models import Cohort
     from apps.org.models import Room
     from apps.teachers.models import TeacherProfile
@@ -442,7 +470,15 @@ def _assert_rule_branch_scope(request: HttpRequest, changes: dict[str, Any]) -> 
         obj = model.objects.filter(pk=changes[field]).first()
         if obj is None:
             raise _reject(field, f"{field} does not exist.")
-        assert_branch_id_in_scope(request, obj.branch_id)
+        department_id = getattr(obj, "department_id", None)
+        assert_permission_membership_scope(
+            request,
+            permission="schedule:write",
+            branch_id=obj.branch_id,
+            department_id=department_id,
+            enforce_department=field != "room",
+            account_kinds={"staff", "teacher"},
+        )
         branches.add(obj.branch_id)
     if len(branches) > 1:
         raise _reject("cohort", "cohort, teacher and room must belong to the same branch.")
@@ -476,11 +512,7 @@ def rules_collection_view(request: HttpRequest) -> HttpResponse:
 def rule_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
     read = request.method in ("GET", "HEAD")
     check_perm(request, "schedule:read" if read else "schedule:write")
-    rule = (
-        _rule_service().get_scoped(pk=pk, user=request.user, roles=get_user_roles(request))
-        if read
-        else _rule_service().get(pk=pk)
-    )
+    rule = _rule_service().get_scoped(pk=pk, user=request.user, roles=get_user_roles(request))
     if rule is None:
         raise NotFoundException(code="not_found")
     if read:
@@ -488,7 +520,13 @@ def rule_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
     # A branch-scoped writer may only mutate a rule in their own branch (the rule's
     # branch is its cohort's branch) — else a bare-pk detail fetch is a cross-branch
     # write/delete + existence oracle.
-    assert_branch_id_in_scope(request, rule.cohort.branch_id)
+    assert_permission_membership_scope(
+        request,
+        permission="schedule:write",
+        branch_id=rule.cohort.branch_id,
+        department_id=rule.cohort.department_id,
+        account_kinds={"staff", "teacher"},
+    )
     if request.method in ("PUT", "PATCH"):
         changes = _rule_write_data(request, partial=(request.method == "PATCH"))
         _assert_rule_branch_scope(request, changes)
@@ -505,14 +543,20 @@ def rule_bulk_reschedule_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method != "POST":
         return _method_not_allowed()
     check_perm(request, "schedule:write")
-    rule = _rule_service().get(pk=pk)
+    rule = _rule_service().get_scoped(pk=pk, user=request.user, roles=get_user_roles(request))
     if rule is None:
         raise NotFoundException(code="not_found")
     # Object-level branch scope, same as rule_detail_view's mutating verbs: bulk-reschedule
     # shifts every lesson of the rule (and notifies its cohort), so a branch-scoped writer
     # must not drive it on another branch's rule via a bare-pk fetch (cross-branch mass
     # write + existence oracle). The rule's branch is its cohort's branch.
-    assert_branch_id_in_scope(request, rule.cohort.branch_id)
+    assert_permission_membership_scope(
+        request,
+        permission="schedule:write",
+        branch_id=rule.cohort.branch_id,
+        department_id=rule.cohort.department_id,
+        account_kinds={"staff", "teacher"},
+    )
     data = read_json(request)
     # Bound the shift so an absurd value can't overflow datetime.timedelta / a lesson's
     # date arithmetic into a raw 500 (100 years in minutes — far beyond any real reschedule).
@@ -583,11 +627,14 @@ def lesson_cancel_view(request: HttpRequest, pk: int) -> HttpResponse:
     lesson = _lesson_service().get_scoped(pk=pk, user=request.user, roles=get_user_roles(request))
     if lesson is None:
         raise NotFoundException(code="not_found")
-    # A branch-scoped writer (HEAD_OF_DEPT / REGISTRAR) may only cancel a lesson in their own
-    # branch: scoped_lessons returns EVERY lesson for STAFF_ROLES, so without this a bare-pk
-    # fetch is a cross-branch write + a cancellation-notification blast to another branch's
-    # cohort. Mirrors rule_detail_view / rule_bulk_reschedule_view. cohort is select_related.
-    assert_branch_id_in_scope(request, lesson.cohort.branch_id)
+    # Defense in depth after the scoped lookup: never let an action cross its branch.
+    assert_permission_membership_scope(
+        request,
+        permission="schedule:write",
+        branch_id=lesson.cohort.branch_id,
+        department_id=lesson.cohort.department_id,
+        account_kinds={"staff", "teacher"},
+    )
     data = read_json(request)
     raw = data.get("reason", "")
     reason = "" if raw in (None, "") else _str_value(raw, "reason", max_length=255, allow_blank=True)
@@ -606,7 +653,13 @@ def lesson_move_view(request: HttpRequest, pk: int) -> HttpResponse:
         raise NotFoundException(code="not_found")
     # Branch-scope the write (same as lesson_cancel_view): a move reschedules the class and
     # notifies its cohort, so a branch-scoped writer must not drive it on another branch's lesson.
-    assert_branch_id_in_scope(request, lesson.cohort.branch_id)
+    assert_permission_membership_scope(
+        request,
+        permission="schedule:write",
+        branch_id=lesson.cohort.branch_id,
+        department_id=lesson.cohort.department_id,
+        account_kinds={"staff", "teacher"},
+    )
     data = read_json(request)
     starts_at = _datetime_value(_require(data, "starts_at"), "starts_at")
     ends_at = _datetime_value(_require(data, "ends_at"), "ends_at")

@@ -10,6 +10,8 @@ belong in apps.org under the tenant schemas.
 
 from __future__ import annotations
 
+import uuid
+
 from django.db import models
 from django.utils.translation import gettext_lazy as _
 from django_tenants.models import DomainMixin, TenantMixin
@@ -47,7 +49,12 @@ class Center(TenantMixin):
 
 
 class Domain(DomainMixin):
-    """Hostname → Center mapping. One Center can have multiple Domains."""
+    """Verified, routable hostname → Center mapping.
+
+    Keep this schema compatible with older application images: django-tenants'
+    middleware treats every row as routable. Unverified hostnames therefore live
+    only in :class:`DomainClaim` and are promoted here after DNS proof succeeds.
+    """
 
     class Meta:
         constraints = [
@@ -57,8 +64,43 @@ class Domain(DomainMixin):
                 fields=["tenant"],
                 condition=models.Q(is_primary=True),
                 name="one_primary_domain_per_tenant",
-            ),
+            )
         ]
+
+
+class DomainClaim(models.Model):
+    """Unroutable DNS ownership proof, deliberately separate from ``Domain``."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    domain = models.CharField(max_length=253, unique=True)
+    tenant = models.ForeignKey(Center, on_delete=models.CASCADE, related_name="domain_claims")
+    verification_token = models.CharField(max_length=64, unique=True)
+    pending_primary = models.BooleanField(default=False)
+    verified_at = models.DateTimeField(null=True, blank=True)
+    domain_record = models.OneToOneField(
+        Domain,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="ownership_claim",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("domain",)
+        indexes = [models.Index(fields=("tenant", "created_at"), name="dc_tenant_created_idx")]
+
+    def __str__(self) -> str:  # pragma: no cover
+        return f"{self.domain} (pending for {self.tenant_id})"
+
+    @property
+    def is_verified(self) -> bool:
+        return self.verified_at is not None and self.domain_record_id is not None
+
+    @property
+    def is_primary(self) -> bool:
+        return bool(self.domain_record_id and self.domain_record and self.domain_record.is_primary)
 
 
 class PlatformEvent(models.Model):
@@ -77,7 +119,12 @@ class PlatformEvent(models.Model):
         CENTER_SUSPENDED = "center.suspended", _("Center suspended")
         CENTER_ACTIVATED = "center.activated", _("Center activated")
         CENTER_TRIAL_EXTENDED = "center.trial_extended", _("Center trial extended")
+        CENTER_TRIAL_EXPIRED = "center.trial_expired", _("Center trial expired")
         CENTER_CREATED = "center.created", _("Center created")
+        CENTER_CONTACT_UPDATED = "center.contact_updated", _("Center contact updated")
+        DOMAIN_ADDED = "domain.added", _("Domain added")
+        DOMAIN_VERIFIED = "domain.verified", _("Domain verified")
+        DOMAIN_PRIMARY_CHANGED = "domain.primary_changed", _("Primary domain changed")
         SUBSCRIPTION_CHANGED = "subscription.changed", _("Subscription changed")
         IMPERSONATION_MINTED = "impersonation.minted", _("Impersonation token minted")
 

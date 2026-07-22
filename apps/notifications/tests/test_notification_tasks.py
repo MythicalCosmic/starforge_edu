@@ -9,10 +9,12 @@ Covers the verified bugs in the messaging cluster:
 
 from __future__ import annotations
 
-from datetime import time
+from datetime import time, timedelta
 
 import pytest
 import time_machine
+from django.test import override_settings
+from django.utils import timezone
 from django_tenants.utils import schema_context
 
 pytestmark = pytest.mark.django_db
@@ -42,6 +44,112 @@ def _set_quiet_hours(tenant, *, start, end):
         cs.quiet_hours_start = start
         cs.quiet_hours_end = end
         cs.save(update_fields=["quiet_hours_start", "quiet_hours_end"])
+
+
+@pytest.mark.parametrize(
+    ("channel", "setting_name"),
+    [
+        ("sms", "SMS_ENABLED"),
+        ("email", "EMAIL_ENABLED"),
+        ("push", "PUSH_NOTIFICATIONS_ENABLED"),
+    ],
+)
+def test_operator_disabled_channel_is_truthfully_skipped_and_idempotent(
+    tenant_a, monkeypatch, channel, setting_name
+):
+    import celery_tasks.notification_tasks as nt
+    from apps.notifications.models import Notification, NotificationDelivery
+
+    monkeypatch.setattr(
+        nt,
+        "_deliver",
+        lambda *_args, **_kwargs: pytest.fail("an operator-disabled channel reached its adapter"),
+    )
+    user = _user_with_phone(tenant_a)
+    with schema_context(tenant_a.schema_name):
+        notification = Notification.objects.create(
+            user=user,
+            event_type="attendance.absent",
+            title="Absent",
+            body="A learner is absent.",
+        )
+        with override_settings(**{setting_name: False}):
+            first = nt.dispatch_notification(notification.pk, channels=[channel])
+            second = nt.dispatch_notification(notification.pk, channels=[channel])
+
+        assert first["results"][channel] == "skipped_disabled"
+        assert second["results"][channel] == "already_handled"
+        delivery = NotificationDelivery.objects.get(notification=notification, channel=channel)
+        assert delivery.status == NotificationDelivery.Status.SKIPPED_DISABLED
+        assert delivery.provider_response == {"reason": "operator_disabled"}
+
+
+@override_settings(SMS_ENABLED=False, EMAIL_ENABLED=False, PUSH_NOTIFICATIONS_ENABLED=False)
+def test_all_external_channels_disabled_preserves_in_app_delivery(tenant_a, monkeypatch):
+    import celery_tasks.notification_tasks as nt
+    from apps.notifications.models import Channel, Notification, NotificationDelivery
+
+    pushed: list[int] = []
+    monkeypatch.setattr(
+        "apps.notifications.services.push_in_app",
+        lambda notification, _title, _body: pushed.append(notification.pk),
+    )
+    user = _user_with_phone(tenant_a)
+    with schema_context(tenant_a.schema_name):
+        notification = Notification.objects.create(
+            user=user,
+            event_type="attendance.absent",
+            title="Absent",
+            body="A learner is absent.",
+        )
+        result = nt.dispatch_notification(notification.pk, channels=[Channel.IN_APP])
+
+        assert result["results"][Channel.IN_APP] == "sent"
+        assert (
+            NotificationDelivery.objects.get(notification=notification, channel=Channel.IN_APP).status
+            == NotificationDelivery.Status.SENT
+        )
+        assert pushed == [notification.pk]
+
+
+@override_settings(SMS_ENABLED=False)
+def test_deferred_delivery_rechecks_operator_channel_switch(tenant_a, monkeypatch):
+    import celery_tasks.notification_tasks as nt
+    from apps.notifications.models import Channel, Notification, NotificationDelivery
+
+    monkeypatch.setattr(
+        nt,
+        "_deliver",
+        lambda *_args, **_kwargs: pytest.fail("a stale deferred task reached its adapter"),
+    )
+    user = _user_with_phone(tenant_a)
+    with schema_context(tenant_a.schema_name):
+        notification = Notification.objects.create(
+            user=user,
+            event_type="attendance.absent",
+            title="Absent",
+            body="A learner is absent.",
+        )
+        NotificationDelivery.objects.create(
+            notification=notification,
+            channel=Channel.SMS,
+            status=NotificationDelivery.Status.SKIPPED_QUIET_HOURS,
+        )
+
+        assert nt.deliver_single_channel(notification.pk, Channel.SMS) == "skipped_disabled"
+        assert not NotificationDelivery.objects.filter(
+            notification=notification,
+            channel=Channel.SMS,
+            status=NotificationDelivery.Status.SKIPPED_QUIET_HOURS,
+        ).exists()
+        assert (
+            NotificationDelivery.objects.filter(
+                notification=notification,
+                channel=Channel.SMS,
+                status=NotificationDelivery.Status.SKIPPED_DISABLED,
+            ).count()
+            == 1
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -129,16 +237,25 @@ def test_lesson_reschedule_dedupe_key_varies_per_move(tenant_a, monkeypatch):
         # (the lesson's updated_at) is monotonic, so all three keys are distinct — the
         # 3rd move must still notify (old_start alone would collide keys[0]==keys[2]).
         lesson_rescheduled.send(
-            sender=None, lesson_id=42, old_start="2026-01-05T10:00:00+00:00",
-            moved_at="2026-01-01T08:00:00.000001+00:00", schema_name=tenant_a.schema_name,
+            sender=None,
+            lesson_id=42,
+            old_start="2026-01-05T10:00:00+00:00",
+            moved_at="2026-01-01T08:00:00.000001+00:00",
+            schema_name=tenant_a.schema_name,
         )
         lesson_rescheduled.send(
-            sender=None, lesson_id=42, old_start="2026-01-12T10:00:00+00:00",
-            moved_at="2026-01-01T08:00:00.000002+00:00", schema_name=tenant_a.schema_name,
+            sender=None,
+            lesson_id=42,
+            old_start="2026-01-12T10:00:00+00:00",
+            moved_at="2026-01-01T08:00:00.000002+00:00",
+            schema_name=tenant_a.schema_name,
         )
         lesson_rescheduled.send(
-            sender=None, lesson_id=42, old_start="2026-01-05T10:00:00+00:00",  # same old_start as #1
-            moved_at="2026-01-01T08:00:00.000003+00:00", schema_name=tenant_a.schema_name,
+            sender=None,
+            lesson_id=42,
+            old_start="2026-01-05T10:00:00+00:00",  # same old_start as #1
+            moved_at="2026-01-01T08:00:00.000003+00:00",
+            schema_name=tenant_a.schema_name,
         )
 
     assert len(keys) == 3, "all three moves must dispatch"
@@ -343,6 +460,7 @@ def test_push_retry_targets_only_the_failed_device(
     import celery_tasks.notification_tasks as nt
     from apps.notifications.models import Channel, EventType, Notification, NotificationDelivery
     from apps.users.models import Device
+    from core.session_auth import create_session
     from infrastructure.push import fcm_client
 
     user = _user_with_phone(tenant_a)
@@ -365,6 +483,8 @@ def test_push_retry_targets_only_the_failed_device(
     with schema_context(tenant_a.schema_name):
         Device.objects.create(user=user, device_id="device-1", platform="android", push_token="fails-once")
         Device.objects.create(user=user, device_id="device-2", platform="ios", push_token="already-sent")
+        create_session(user, device_id="device-1")
+        create_session(user, device_id="device-2")
         notification = Notification.objects.create(
             user=user,
             event_type=EventType.ASSIGNMENTS_CREATED,
@@ -393,3 +513,105 @@ def test_push_retry_targets_only_the_failed_device(
         monkeypatch.setattr(fcm_client, "get_push_client", lambda: RecoveredPush())
         assert nt.deliver_single_channel(notification.pk, Channel.PUSH, attempt=1) == "sent"
         assert retried_tokens == ["fails-once"]
+
+
+@override_settings(PUSH_NOTIFICATIONS_ENABLED=True)
+@time_machine.travel("2026-06-16 12:00:00 +05:00", tick=False)
+def test_push_targets_only_devices_with_active_unexpired_sessions(tenant_a, monkeypatch):
+    import celery_tasks.notification_tasks as nt
+    from apps.notifications.models import Channel, EventType, Notification
+    from apps.users.models import Device, Session
+    from core.session_auth import create_session
+    from infrastructure.push import fcm_client
+
+    user = _user_with_phone(tenant_a)
+    sent_tokens: list[str] = []
+    sent_payloads: list[dict[str, str]] = []
+
+    class RecordingPush:
+        def send(self, *, token, **kwargs):
+            sent_tokens.append(token)
+            sent_payloads.append(kwargs["data"])
+            return {"success": True, "message_id": f"sent-{token}"}
+
+    monkeypatch.setattr(fcm_client, "get_push_client", lambda: RecordingPush())
+
+    with schema_context(tenant_a.schema_name):
+        Device.objects.create(
+            user=user,
+            device_id="live-device",
+            platform="ios",
+            push_token="live-token",
+        )
+        Device.objects.create(
+            user=user,
+            device_id="expired-device",
+            platform="android",
+            push_token="expired-token",
+        )
+        Device.objects.create(
+            user=user,
+            device_id="revoked-device",
+            platform="android",
+            push_token="revoked-token",
+        )
+        create_session(user, device_id="live-device")
+        expired = create_session(user, device_id="expired-device")
+        revoked = create_session(user, device_id="revoked-device")
+        Session.objects.filter(pk=expired.pk).update(expires_at=timezone.now() - timedelta(seconds=1))
+        Session.objects.filter(pk=revoked.pk).update(revoked_at=timezone.now())
+        notification = Notification.objects.create(
+            user=user,
+            event_type=EventType.ASSIGNMENTS_CREATED,
+            title="Assignment",
+            body="A new assignment is ready.",
+        )
+
+        result = nt.dispatch_notification(notification.pk, channels=[Channel.PUSH])
+
+    assert result["results"][Channel.PUSH] == "sent"
+    assert sent_tokens == ["live-token"]
+    assert sent_payloads[0]["tenant_slug"] == tenant_a.schema_name
+
+
+@override_settings(PUSH_NOTIFICATIONS_ENABLED=True)
+@time_machine.travel("2026-06-16 12:00:00 +05:00", tick=False)
+def test_push_with_only_expired_session_records_no_devices(tenant_a, monkeypatch):
+    import celery_tasks.notification_tasks as nt
+    from apps.notifications.models import Channel, EventType, Notification, NotificationDelivery
+    from apps.users.models import Device, Session
+    from core.session_auth import create_session
+    from infrastructure.push import fcm_client
+
+    user = _user_with_phone(tenant_a)
+
+    class UnexpectedPush:
+        def send(self, **kwargs):
+            pytest.fail("an expired app session received a private push")
+
+    monkeypatch.setattr(fcm_client, "get_push_client", lambda: UnexpectedPush())
+
+    with schema_context(tenant_a.schema_name):
+        Device.objects.create(
+            user=user,
+            device_id="expired-only",
+            platform="ios",
+            push_token="must-not-send",
+        )
+        session = create_session(user, device_id="expired-only")
+        Session.objects.filter(pk=session.pk).update(expires_at=timezone.now() - timedelta(seconds=1))
+        notification = Notification.objects.create(
+            user=user,
+            event_type=EventType.ASSIGNMENTS_CREATED,
+            title="Assignment",
+            body="A new assignment is ready.",
+        )
+
+        result = nt.dispatch_notification(notification.pk, channels=[Channel.PUSH])
+        delivery = NotificationDelivery.objects.get(
+            notification=notification,
+            channel=Channel.PUSH,
+        )
+
+    assert result["results"][Channel.PUSH] == "failed_no_devices"
+    assert delivery.provider_response == {"error": "no_devices"}

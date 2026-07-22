@@ -68,8 +68,10 @@ def test_journey_merges_all_event_types_newest_first(tenant_a, as_role):
 
 
 def test_journey_invoices_are_finance_gated(tenant_a, as_role):
-    teacher, _ = as_role(Role.TEACHER)  # staff, but no finance:read and not the family
-    student = _student_with_events(tenant_a, _branch(tenant_a))
+    teacher, teacher_user = as_role(Role.TEACHER)  # staff, but no finance:read and not the family
+    with schema_context(tenant_a.schema_name):
+        teacher_branch = teacher_user.role_memberships.get(role=Role.TEACHER).branch
+    student = _student_with_events(tenant_a, teacher_branch)
 
     types = {e["type"] for e in teacher.get(_journey_url(student.id)).json()["data"]["events"]}
     assert "grade" in types  # the academic story is visible
@@ -172,3 +174,25 @@ def test_journey_orders_by_timestamp_not_source_order(tenant_a, as_role):
         EnrollmentEvent.objects.filter(student=student).update(created_at=timezone.now() + timedelta(days=1))
     events = director.get(_journey_url(student.id)).json()["data"]["events"]
     assert events[0]["type"] == "enrollment"  # newest by timestamp, despite source order
+
+
+def test_journey_is_capped_at_one_hundred_events_and_supports_head(tenant_a, as_role):
+    from apps.students.models import EnrollmentEvent
+    from apps.students.tests.factories import StudentProfileFactory
+
+    director, _ = as_role(Role.DIRECTOR)
+    branch = _branch(tenant_a)
+    with schema_context(tenant_a.schema_name):
+        student = StudentProfileFactory.create(branch=branch)
+        EnrollmentEvent.objects.bulk_create(
+            [
+                EnrollmentEvent(student=student, from_status="lead", to_status="active", note=str(i))
+                for i in range(101)
+            ]
+        )
+
+    url = _journey_url(student.id)
+    response = director.get(url)
+    assert response.status_code == 200
+    assert len(response.json()["data"]["events"]) == 100
+    assert director.head(url).status_code == 200

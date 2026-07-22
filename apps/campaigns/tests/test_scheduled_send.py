@@ -41,9 +41,7 @@ def _dispatch(tenant):
         return dispatch_due_campaigns()
 
 
-def test_scheduled_campaign_is_created_draft_and_not_sent_until_due(
-    tenant_a, user_in, as_user, sms_outbox
-):
+def test_scheduled_campaign_is_created_draft_and_not_sent_until_due(tenant_a, user_in, as_user, sms_outbox):
     branch = _branch(tenant_a)
     with schema_context(tenant_a.schema_name):
         _student(branch)
@@ -128,9 +126,7 @@ def test_invalid_scheduled_at_is_400(tenant_a, user_in, as_user):
     assert resp.json()["code"] == "validation_error"
 
 
-def test_concurrent_send_does_not_double_text_recipients(
-    tenant_a, user_in, as_user, sms_outbox, monkeypatch
-):
+def test_concurrent_send_does_not_double_text_recipients(tenant_a, user_in, as_user, sms_outbox, monkeypatch):
     """Regression (self-review, HIGH double-send): the send loop runs outside the campaign
     row lock and SENDING is resumable, so the scheduled-dispatch beat can race a manual
     'send now' (or a redelivered task) on the same campaign. The per-recipient
@@ -167,7 +163,7 @@ def test_concurrent_send_does_not_double_text_recipients(
 
     monkeypatch.setattr("apps.campaigns.services.get_sms_client", lambda: _RacingClient())
     resp = client.post(f"{CAMPAIGNS}{cid}/send/", {}, format="json")
-    assert resp.status_code == 200
+    assert resp.status_code == 202
     # Only the FIRST recipient was actually texted; the two the "concurrent worker" claimed
     # were skipped by the CAS, never double-sent.
     assert len(sms_outbox) == 1
@@ -188,7 +184,7 @@ def test_scheduled_campaign_can_still_be_sent_manually(tenant_a, user_in, as_use
     ).json()["data"]["id"]
 
     sent = client.post(f"{CAMPAIGNS}{cid}/send/", {}, format="json")
-    assert sent.status_code == 200
+    assert sent.status_code == 202
     assert sent.json()["data"]["status"] == "sent"
     assert len(sms_outbox) == 1
     assert _dispatch(tenant_a) == 0  # sweep skips the already-sent campaign

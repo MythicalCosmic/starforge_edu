@@ -8,10 +8,13 @@ from __future__ import annotations
 
 from typing import Any
 
+from django.db.models import Q
+
 from apps.reports.generators.base import (
     ReportGenerator,
     enforce_report_row_cap,
     is_full_scope,
+    staff_report_scope_q,
     teacher_cohort_ids,
 )
 from apps.students.models import StudentProfile
@@ -36,8 +39,15 @@ class EnrollmentGenerator(ReportGenerator):
             qs = qs.filter(current_cohort_id=params["cohort_id"])
 
         if not is_full_scope(user=user, roles=roles):
-            # Teacher (or any non-staff) sees only students in cohorts they own.
-            qs = qs.filter(current_cohort_id__in=teacher_cohort_ids(user))
+            visible = staff_report_scope_q(
+                roles=roles,
+                user=user,
+                branch_field="branch_id",
+                department_field="current_cohort__department_id",
+            )
+            if "teacher" in roles:
+                visible |= Q(current_cohort_id__in=teacher_cohort_ids(user))
+            qs = qs.filter(visible).distinct()
 
         enforce_report_row_cap(qs)
         rows: list[dict[str, str]] = [

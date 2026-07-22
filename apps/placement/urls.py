@@ -24,8 +24,14 @@ urlpatterns = [
     # --- attempts ---
     path("attempts/", views.attempts_collection_view, name="placement-attempt-collection"),
     path("attempts/<int:pk>/submit/", views.attempt_submit_view, name="placement-attempt-submit"),
-    path("attempts/<int:pk>/suggestions/", views.attempt_suggestions_view, name="placement-attempt-suggestions"),
-    path("attempts/<int:pk>/mark-writing/", views.attempt_mark_writing_view, name="placement-attempt-mark-writing"),
+    path(
+        "attempts/<int:pk>/suggestions/", views.attempt_suggestions_view, name="placement-attempt-suggestions"
+    ),
+    path(
+        "attempts/<int:pk>/mark-writing/",
+        views.attempt_mark_writing_view,
+        name="placement-attempt-mark-writing",
+    ),
     path(
         "attempts/<int:pk>/mark-writing-manual/",
         views.attempt_mark_writing_manual_view,

@@ -36,11 +36,16 @@ class FiscalReceiptInline(admin.TabularInline):
     extra = 0
     max_num = 1
     fields = ("status", "fiscal_sign", "attempts", "submitted_at", "confirmed_at")
+    readonly_fields = fields
+    can_delete = False
     show_change_link = True
+
+    def has_add_permission(self, request, obj=None) -> bool:
+        return False
 
 
 @admin.register(Payment)
-class PaymentAdmin(admin.ModelAdmin):
+class PaymentAdmin(ReadOnlyAdmin):
     list_display = (
         "id",
         "provider",
@@ -87,7 +92,7 @@ class WebhookEventAdmin(ReadOnlyAdmin):
 
 
 @admin.register(FiscalReceipt)
-class FiscalReceiptAdmin(admin.ModelAdmin):
+class FiscalReceiptAdmin(ReadOnlyAdmin):
     list_display = ("id", "payment", "status", "fiscal_sign", "attempts", "confirmed_at")
     list_filter = ("status",)
     search_fields = ("fiscal_sign", "payment__idempotency_key", "payment__provider_txn_id")

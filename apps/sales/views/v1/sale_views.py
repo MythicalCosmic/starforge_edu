@@ -22,10 +22,11 @@ from apps.sales.presenters import sale_to_dict
 from core.api_auth import check_perm, require_auth
 from core.container import container
 from core.exceptions import NotFoundException, PermissionException, ValidationException
-from core.http import decimal_field, int_field, read_json, str_field
+from core.http import decimal_field, int_field, read_json, trimmed_str_field
 from core.listing import apply_filters, paginate
-from core.permissions import Role, get_role_memberships, get_user_roles
+from core.permissions import get_user_roles
 from core.responses import created, error, paginated, success
+from core.scoping import is_unscoped, permission_membership_branch_ids
 
 _RESOURCE = "sale"
 _MAX_QUANTITY = 1_000_000  # old serializer IntegerField(max_value=1_000_000)
@@ -36,22 +37,21 @@ def _service() -> ISaleService:
     return container.resolve(ISaleService)  # type: ignore[type-abstract]
 
 
-def _scope(request: HttpRequest) -> tuple[bool, set[int]]:
+def _scope(request: HttpRequest, permission: str) -> tuple[bool, set[int]]:
     """(is_unscoped, branch_ids): a director/superuser sees every till; anyone else only
     the branches of their (non-null-branch) role memberships."""
     req: Any = request  # perm helpers are duck-typed on .user (typed Request upstream)
-    is_unscoped = bool(getattr(request.user, "is_superuser", False)) or Role.DIRECTOR in get_user_roles(req)
-    branch_ids = {m.branch_id for m in get_role_memberships(req) if m.branch_id}
-    return is_unscoped, branch_ids
+    roles = get_user_roles(req)
+    return is_unscoped(req), permission_membership_branch_ids(roles=roles, permission=permission)
 
 
 @csrf_exempt
 @require_auth
 def sales_collection_view(request: HttpRequest) -> HttpResponse:
-    if request.method == "GET":
+    if request.method in ("GET", "HEAD"):
         check_perm(request, f"{_RESOURCE}:read")
-        is_unscoped, branch_ids = _scope(request)
-        qs = _service().scoped_list(is_unscoped=is_unscoped, branch_ids=branch_ids)
+        unscoped, branch_ids = _scope(request, "sale:read")
+        qs = _service().scoped_list(is_unscoped=unscoped, branch_ids=branch_ids)
         qs = apply_filters(
             request,
             qs,
@@ -72,8 +72,8 @@ def sale_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method not in ("GET", "HEAD"):
         return error("Method not allowed.", code="method_not_allowed", status=405)
     check_perm(request, f"{_RESOURCE}:read")
-    is_unscoped, branch_ids = _scope(request)
-    sale = _service().get_visible(is_unscoped=is_unscoped, branch_ids=branch_ids, pk=pk)
+    unscoped, branch_ids = _scope(request, "sale:read")
+    sale = _service().get_visible(is_unscoped=unscoped, branch_ids=branch_ids, pk=pk)
     if sale is None:
         raise NotFoundException(code="not_found")  # out-of-scope -> 404, no existence leak
     return success(sale_to_dict(sale))
@@ -85,22 +85,32 @@ def sale_refund_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method != "POST":
         return error("Method not allowed.", code="method_not_allowed", status=405)
     check_perm(request, f"{_RESOURCE}:refund")
-    is_unscoped, branch_ids = _scope(request)
-    sale = _service().get_visible(is_unscoped=is_unscoped, branch_ids=branch_ids, pk=pk)
+    unscoped, branch_ids = _scope(request, "sale:refund")
+    sale = _service().get_visible(is_unscoped=unscoped, branch_ids=branch_ids, pk=pk)
     if sale is None:
         raise NotFoundException(code="not_found")  # cross-branch cashier -> 404 (not 422/403)
     body = read_json(request)
-    result = _service().refund(sale, actor=request.user, reason=str_field(body, "reason", max_length=255))
+    result = _service().refund(
+        sale,
+        actor=request.user,
+        reason=trimmed_str_field(body, "reason", max_length=255),
+    )
     return success(sale_to_dict(result))
 
 
 # --- helpers ---------------------------------------------------------------
 def _create_sale(request: HttpRequest) -> HttpResponse:
     body = read_json(request)
-    item = str_field(body, "item", max_length=200).strip()
+    item = trimmed_str_field(body, "item", max_length=200, required=True)
     if not item:
         raise ValidationException(
             "item is required.", code="validation_error", fields={"item": ["This field is required."]}
+        )
+    if "quantity" in body and body["quantity"] is None:
+        raise ValidationException(
+            "quantity may not be null.",
+            code="validation_error",
+            fields={"quantity": ["May not be null."]},
         )
     quantity = int_field(body, "quantity", default=1)
     if quantity is None or quantity < 1 or quantity > _MAX_QUANTITY:
@@ -124,8 +134,8 @@ def _create_sale(request: HttpRequest) -> HttpResponse:
         raise ValidationException(
             "Unknown student.", code="validation_error", fields={"student": ["No such student."]}
         )
-    is_unscoped, branch_ids = _scope(request)
-    if not is_unscoped and student.branch_id not in branch_ids:
+    unscoped, branch_ids = _scope(request, "sale:write")
+    if not unscoped and student.branch_id not in branch_ids:
         raise PermissionException(
             _("You can only sell to a student in your own branch."), code="branch_out_of_scope"
         )
@@ -135,7 +145,7 @@ def _create_sale(request: HttpRequest) -> HttpResponse:
         quantity=quantity,
         unit_price_uzs=unit_price,
         payment_method_id=payment_method_id,  # type: ignore[arg-type]  # required=True -> never None
-        note=str_field(body, "note", max_length=255),
+        note=trimmed_str_field(body, "note", max_length=255),
     )
     sale = _service().record(dto, student=student, sold_by=request.user)
     return created(sale_to_dict(sale))

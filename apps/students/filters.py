@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import django_filters
 from dateutil.relativedelta import relativedelta
-from django.db.models import Q
 from django.utils import timezone
 
 from apps.students.models import StudentProfile
@@ -43,10 +42,10 @@ class StudentFilter(django_filters.FilterSet):
         return qs.filter(blocked_at__isnull=not value)
 
     def _filter_teacher(self, qs, name, value):
-        return qs.filter(
-            Q(current_cohort__primary_teacher__user_id=value)
-            | Q(current_cohort__co_teachers__teacher__user_id=value)
-        ).distinct()
+        from apps.cohorts.selectors import taught_cohorts
+
+        cohort_ids = taught_cohorts(user_id=value, include_lesson_teacher=False).values("pk")
+        return qs.filter(current_cohort_id__in=cohort_ids).distinct()
 
     def _filter_age_min(self, qs, name, value):
         # age >= value  <=>  born on or before (today minus `value` years)

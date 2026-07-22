@@ -3,14 +3,16 @@
 Exam results upsert with a `grade_changed` audit signal on overwrite; CSV import
 is all-or-nothing; `compute_term_grade` rolls published results into a weighted
 0-100 `Grade` rendered per the Center's scheme; transcripts are generated
-off-request (weasyprint → S3) by `generate_transcript`. Emit-only — no audit
-write or notification dispatch here (D3-D consumes `grade_changed`).
+off-request (weasyprint → S3) by `generate_transcript`. No notification dispatch
+happens here (D3-D consumes `grade_changed`); bulk writes explicitly preserve the
+normal model audit trail.
 """
 
 from __future__ import annotations
 
 import csv
 import io
+from datetime import timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 from django.db import transaction
@@ -57,11 +59,30 @@ def record_results(*, exam: Exam, rows: list[dict], actor=None) -> dict:
     `0..max_score` abort the whole batch with **422**. Overwriting an existing
     result with a DIFFERENT score emits `grade_changed` exactly once (never on
     first entry, and never when the score is unchanged)."""
+    if not rows:
+        return {"created": 0, "updated": 0, "results": []}
+
+    # Serialize batches for one exam so the existing-result snapshot is stable
+    # and concurrent imports cannot race on (exam, student).
+    exam = Exam.objects.select_related("cohort").select_for_update().get(pk=exam.pk)
+
+    duplicate_errors: dict[str, list[str]] = {}
     field_errors: dict[str, list[str]] = {}
+    seen_student_ids: set[int] = set()
     for index, row in enumerate(rows):
         score = row["score"]
-        if score < 0 or score > exam.max_score:
+        student_id = row["student"].pk
+        if student_id in seen_student_ids:
+            duplicate_errors[str(index)] = [str(_("A student may appear only once per batch."))]
+        seen_student_ids.add(student_id)
+        if not score.is_finite() or score < 0 or score > exam.max_score:
             field_errors[str(index)] = [f"Score must be between 0 and {exam.max_score} (got {score})."]
+    if duplicate_errors:
+        raise UnprocessableEntity(
+            _("A student may appear only once per batch."),
+            code="duplicate_student",
+            fields=duplicate_errors,
+        )
     if field_errors:
         raise UnprocessableEntity(
             _("One or more scores are out of range."), code="score_out_of_range", fields=field_errors
@@ -88,26 +109,97 @@ def record_results(*, exam: Exam, rows: list[dict], actor=None) -> dict:
             fields=member_errors,
         )
 
+    existing_by_student = {
+        result.student_id: result
+        for result in ExamResult.objects.select_for_update().filter(
+            exam=exam, student_id__in=seen_student_ids
+        )
+    }
+    from apps.audit.context import current_request
+    from apps.audit.models import AuditLog
+    from apps.audit.services import (
+        audit_logs_bulk_on_commit,
+        diff_snapshots,
+        serialize_instance,
+    )
+
+    before_snapshots = {
+        student_id: serialize_instance(result) for student_id, result in existing_by_student.items()
+    }
+
     schema = current_schema()
-    created = updated = 0
-    results: list[ExamResult] = []
+    now = timezone.now()
+    to_create: list[ExamResult] = []
+    to_update: list[ExamResult] = []
+    changed_scores: list[tuple[ExamResult, Decimal]] = []
+    ordered_results: list[ExamResult] = []
     for row in rows:
         student = row["student"]
-        existing = ExamResult.objects.filter(exam=exam, student=student).first()
-        old_score = existing.score if existing else None
-        result, was_created = ExamResult.objects.update_or_create(
-            exam=exam,
-            student=student,
-            defaults={"score": row["score"], "note": row.get("note", ""), "graded_by": actor},
-        )
-        created += int(was_created)
-        updated += int(not was_created)
-        results.append(result)
+        result = existing_by_student.get(student.pk)
+        if result is None:
+            result = ExamResult(
+                exam=exam,
+                student=student,
+                score=row["score"],
+                note=row.get("note", ""),
+                graded_by=actor,
+                graded_at=now,
+            )
+            to_create.append(result)
+        else:
+            old_score = result.score
+            result.score = row["score"]
+            result.note = row.get("note", "")
+            result.graded_by = actor
+            result.graded_at = now
+            to_update.append(result)
+            if old_score != result.score:
+                changed_scores.append((result, old_score))
+        ordered_results.append(result)
         # Only emit on an actual change — re-entering an identical score is a
         # no-op and must not produce audit churn (D3-D consumes grade_changed).
-        if not was_created and old_score != result.score:
-            _emit_grade_changed(result, old_score, result.score, actor, schema)
-    return {"created": created, "updated": updated, "results": results}
+    if to_create:
+        ExamResult.objects.bulk_create(to_create)
+    if to_update:
+        ExamResult.objects.bulk_update(
+            to_update,
+            fields=("score", "note", "graded_by", "graded_at"),
+        )
+    request = current_request()
+    audit_entries = [
+        {
+            "actor": actor,
+            "action": AuditLog.Action.CREATE,
+            "resource_type": "academics.ExamResult",
+            "resource_id": result.pk,
+            "after": serialize_instance(result),
+            "request": request,
+        }
+        for result in to_create
+    ]
+    audit_entries.extend(
+        {
+            "actor": actor,
+            "action": AuditLog.Action.UPDATE,
+            "resource_type": "academics.ExamResult",
+            "resource_id": result.pk,
+            "before": before_snapshots[result.student_id],
+            "after": diff_snapshots(
+                before_snapshots[result.student_id],
+                serialize_instance(result),
+            ),
+            "request": request,
+        }
+        for result in to_update
+    )
+    audit_logs_bulk_on_commit(audit_entries)
+    for result, old_score in changed_scores:
+        _emit_grade_changed(result, old_score, result.score, actor, schema)
+    return {
+        "created": len(to_create),
+        "updated": len(to_update),
+        "results": ordered_results,
+    }
 
 
 @transaction.atomic
@@ -124,7 +216,12 @@ def bulk_grade_import(*, exam: Exam, csv_file, actor=None) -> dict:
             _("File exceeds the maximum upload size of %(mb)s MB.") % {"mb": settings_obj.max_upload_mb},
             code="file_too_large",
         )
-    raw = csv_file.read()
+    raw = csv_file.read(max_bytes + 1)
+    if len(raw) > max_bytes:
+        raise ValidationException(
+            _("File exceeds the maximum upload size of %(mb)s MB.") % {"mb": settings_obj.max_upload_mb},
+            code="file_too_large",
+        )
     if isinstance(raw, bytes):
         try:
             text = raw.decode("utf-8-sig")
@@ -147,16 +244,28 @@ def bulk_grade_import(*, exam: Exam, csv_file, actor=None) -> dict:
             "student_id", flat=True
         )
     )
-    rows: list[dict] = []
-    row_errors: list[dict] = []
+    raw_rows: list[tuple[int, str, dict]] = []
     for line_no, raw_row in enumerate(reader, start=2):  # line 1 is the header
         if line_no - 1 > MAX_IMPORT_ROWS:
             raise ValidationException(
                 _("CSV exceeds the maximum of %(n)s rows.") % {"n": MAX_IMPORT_ROWS},
                 code="too_many_rows",
             )
-        code = (raw_row.get("student_id") or "").strip()
-        student = StudentProfile.objects.filter(student_id=code).first()
+        raw_rows.append((line_no, (raw_row.get("student_id") or "").strip(), raw_row))
+
+    students_by_code = StudentProfile.objects.in_bulk(
+        {code for _line_no, code, _raw_row in raw_rows if code},
+        field_name="student_id",
+    )
+    rows: list[dict] = []
+    row_errors: list[dict] = []
+    seen_codes: set[str] = set()
+    for line_no, code, raw_row in raw_rows:
+        if code in seen_codes:
+            row_errors.append({"row": line_no, "error": f"Duplicate student_id '{code}'."})
+            continue
+        seen_codes.add(code)
+        student = students_by_code.get(code)
         if student is None:
             row_errors.append({"row": line_no, "error": f"Unknown student_id '{code}'."})
             continue
@@ -270,7 +379,53 @@ def recompute_cohort_term(*, cohort, subject, term, publish: bool = False) -> li
 
 @transaction.atomic
 def request_transcript(*, student, term=None, requested_by=None) -> Transcript:
-    """Create a pending Transcript and enqueue PDF generation after commit."""
+    """Idempotently admit a transcript under strict user/tenant queue caps."""
+    from django.conf import settings
+
+    from core.exceptions import ThrottledException
+    from core.job_limits import lock_tenant_job_queue
+
+    lock_tenant_job_queue("documents")
+    active = (Transcript.Status.PENDING, Transcript.Status.PROCESSING)
+    duplicate = (
+        Transcript.objects.filter(
+            student=student,
+            term=term,
+            requested_by=requested_by,
+            status__in=active,
+        )
+        .order_by("-created_at")
+        .first()
+    )
+    if duplicate is not None:
+        return duplicate
+
+    now = timezone.now()
+    user_active = Transcript.objects.filter(requested_by=requested_by, status__in=active).count()
+    tenant_active = Transcript.objects.filter(status__in=active).count()
+    user_hourly = Transcript.objects.filter(
+        requested_by=requested_by, created_at__gte=now - timedelta(hours=1)
+    ).count()
+    tenant_hourly = Transcript.objects.filter(created_at__gte=now - timedelta(hours=1)).count()
+    from apps.reports.models import ReportRun
+
+    report_active = ReportRun.objects.filter(
+        status__in=(ReportRun.Status.QUEUED, ReportRun.Status.RUNNING)
+    ).count()
+    report_hourly = ReportRun.objects.filter(created_at__gte=now - timedelta(hours=1)).count()
+    if user_active >= getattr(settings, "TRANSCRIPT_MAX_ACTIVE_PER_USER", 3):
+        raise ThrottledException(code="transcript_user_queue_full", wait=60)
+    if tenant_active >= getattr(settings, "TRANSCRIPT_MAX_ACTIVE_PER_TENANT", 20):
+        raise ThrottledException(code="transcript_tenant_queue_full", wait=60)
+    if tenant_active + report_active >= getattr(settings, "DOCUMENT_MAX_ACTIVE_PER_TENANT", 20):
+        raise ThrottledException(code="document_tenant_queue_full", wait=60)
+    if user_hourly >= getattr(settings, "TRANSCRIPT_MAX_HOURLY_PER_USER", 10):
+        raise ThrottledException(code="transcript_user_hourly_limit", wait=3600)
+    if tenant_hourly >= getattr(settings, "TRANSCRIPT_MAX_HOURLY_PER_TENANT", 100):
+        raise ThrottledException(code="transcript_tenant_hourly_limit", wait=3600)
+    if tenant_hourly + report_hourly >= getattr(settings, "DOCUMENT_MAX_HOURLY_PER_TENANT", 100):
+        raise ThrottledException(code="document_tenant_hourly_limit", wait=3600)
+
     transcript = Transcript.objects.create(student=student, term=term, requested_by=requested_by)
     schema = current_schema()
     transaction.on_commit(lambda: _enqueue_transcript(transcript.pk, schema))
@@ -309,6 +464,20 @@ def render_transcript_pdf(transcript: Transcript) -> bytes:
 
 
 def generate_transcript(transcript_id: int) -> str:
+    from core.exceptions import ConflictException
+    from core.job_limits import release_job_execution, try_acquire_job_execution
+
+    if not try_acquire_job_execution("transcript", transcript_id):
+        raise ConflictException(
+            _("This transcript is already being generated."), code="transcript_in_progress"
+        )
+    try:
+        return _generate_transcript(transcript_id)
+    finally:
+        release_job_execution("transcript", transcript_id)
+
+
+def _generate_transcript(transcript_id: int) -> str:
     """Idempotent task body: pending → processing → done, uploading the PDF to
     `{schema}/transcripts/{id}.pdf`. A `done` transcript short-circuits (re-run
     safe). Runs under the active tenant schema."""

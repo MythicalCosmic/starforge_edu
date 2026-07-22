@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 
+from django.conf import settings
 from django.dispatch import receiver
 
 from apps.assignments.signals import ai_feedback_requested
@@ -30,6 +31,8 @@ logger = logging.getLogger("starforge.ai")
 
 @receiver(ai_feedback_requested, dispatch_uid="ai.assignment_feedback", weak=False)
 def on_ai_feedback_requested(sender, *, submission_id, requested_by=None, schema_name, **kwargs):
+    if not getattr(settings, "AI_ENABLED", True):
+        return
     from celery_tasks.ai_tasks import run_assignment_feedback
 
     run_assignment_feedback.delay(submission_id, requested_by=requested_by, _schema_name=schema_name)
@@ -37,6 +40,8 @@ def on_ai_feedback_requested(sender, *, submission_id, requested_by=None, schema
 
 @receiver(file_upload_confirmed, dispatch_uid="ai.content_summary", weak=False)
 def on_file_upload_confirmed(sender, *, file_id, requested_by=None, schema_name, **kwargs):
+    if not getattr(settings, "AI_ENABLED", True):
+        return
     from celery_tasks.ai_tasks import run_content_summary
 
     run_content_summary.delay(file_id, requested_by=requested_by, _schema_name=schema_name)

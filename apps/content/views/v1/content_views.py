@@ -32,7 +32,7 @@ from apps.content.presenters import (
     material_to_dict,
     module_to_dict,
 )
-from apps.content.selectors import REVIEWER_ROLES, scoped_libraries
+from apps.content.selectors import scoped_libraries
 from core.api_auth import check_perm, require_auth
 from core.container import container
 from core.exceptions import NotFoundException, PermissionException, ValidationException
@@ -189,7 +189,9 @@ def _crud_detail(request, pk, service, presenter, *, create_data_fn, changes_fn)
     actor, roles = request.user, _roles(request)
     if request.method == "PUT":
         # Full replace (DRF parity): all required fields must be present, or 400.
-        return success(presenter(service.update(obj, changes=create_data_fn(request), actor=actor, roles=roles)))
+        return success(
+            presenter(service.update(obj, changes=create_data_fn(request), actor=actor, roles=roles))
+        )
     if request.method == "PATCH":
         return success(presenter(service.update(obj, changes=changes_fn(request), actor=actor, roles=roles)))
     if request.method == "DELETE":
@@ -539,7 +541,7 @@ def file_download_url_view(request: HttpRequest, pk: int) -> HttpResponse:
         return _method_not_allowed()
     check_perm(request, "content:read")
     file = _get_file_in_scope(request, pk)
-    is_staff = request.user.is_superuser or bool(_roles(request) & REVIEWER_ROLES)
+    is_staff = request.user.is_superuser or _manages_content(request)
     return success(_file_service().download_url(file=file, user=request.user, actor_is_staff=is_staff))
 
 

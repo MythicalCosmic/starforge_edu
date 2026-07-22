@@ -104,6 +104,88 @@ def test_teacher_cannot_give_manager_approval(tenant_a, user_in, as_user):
     assert blocked.json()["code"] == "not_a_manager"
 
 
+def test_custom_reviewer_and_publisher_types_are_permission_scoped(
+    tenant_a,
+    user_in,
+    as_user,
+):
+    """Custom STAFF types must not be reduced to their SUPPORT compatibility role.
+
+    Explicit approve/publish grants drive both workflow eligibility and the exact
+    branch/department row boundary.
+    """
+    from apps.access.models import AccountType, AccountTypePermission
+    from apps.content.tests.factories import ContentLibraryFactory, FolderFactory
+    from apps.org.tests.factories import BranchFactory, DepartmentFactory
+
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        department = DepartmentFactory(branch=branch)
+        other_branch = BranchFactory()
+        other_department = DepartmentFactory(branch=other_branch)
+        library = ContentLibraryFactory(
+            visibility="department",
+            department=department,
+        )
+        other_library = ContentLibraryFactory(
+            visibility="department",
+            department=other_department,
+        )
+        pending = LessonFileFactory(
+            folder=FolderFactory(library=library),
+            is_approved_teacher=False,
+            is_approved_manager=False,
+        )
+        out_of_scope = LessonFileFactory(
+            folder=FolderFactory(library=other_library),
+            is_approved_teacher=False,
+            is_approved_manager=False,
+        )
+        reviewer_type = AccountType.objects.create(
+            name="Content Reviewer",
+            slug="content-reviewer",
+            account_kind=AccountType.AccountKind.STAFF,
+        )
+        publisher_type = AccountType.objects.create(
+            name="Content Publisher",
+            slug="content-publisher",
+            account_kind=AccountType.AccountKind.STAFF,
+        )
+        AccountTypePermission.objects.create(
+            account_type=reviewer_type,
+            permission="content:approve",
+        )
+        AccountTypePermission.objects.create(
+            account_type=publisher_type,
+            permission="content:publish",
+        )
+
+    reviewer_user = user_in(tenant_a, roles=[Role.SUPPORT], branch=branch)
+    publisher_user = user_in(tenant_a, roles=[Role.SUPPORT], branch=branch)
+    with schema_context(tenant_a.schema_name):
+        reviewer_user.role_memberships.update(
+            account_type=reviewer_type,
+            department=department,
+        )
+        publisher_user.role_memberships.update(
+            account_type=publisher_type,
+            department=department,
+        )
+        reviewer_user.refresh_from_db()
+        publisher_user.refresh_from_db()
+
+    reviewer = as_user(tenant_a, reviewer_user)
+    publisher = as_user(tenant_a, publisher_user)
+    first = reviewer.post(f"{FILES}{pending.id}/approve-teacher/", {}, format="json")
+    assert first.status_code == 200, first.content
+    assert reviewer.post(f"{FILES}{out_of_scope.id}/approve-teacher/", {}, format="json").status_code == 404
+
+    second = publisher.post(f"{FILES}{pending.id}/approve-manager/", {}, format="json")
+    assert second.status_code == 200, second.content
+    assert second.json()["data"]["approved_manager_by"] == publisher_user.id
+    assert publisher.post(f"{FILES}{out_of_scope.id}/approve-manager/", {}, format="json").status_code == 404
+
+
 def test_double_teacher_approval_conflicts(tenant_a, user_in, as_user):
     f = _draft(tenant_a)
     teacher = as_user(tenant_a, user_in(tenant_a, roles=[Role.TEACHER]))

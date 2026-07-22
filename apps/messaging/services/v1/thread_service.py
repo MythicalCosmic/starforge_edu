@@ -10,8 +10,14 @@ from apps.messaging.dto.thread_dto import CreateThreadDTO
 from apps.messaging.interfaces.repositories import IThreadRepository
 from apps.messaging.interfaces.services import IThreadService
 from apps.messaging.models import Message, Thread
-from apps.messaging.services import create_thread, mark_read, post_message
-from core.exceptions import ValidationException
+from apps.messaging.services import (
+    create_thread,
+    mark_read,
+    post_message,
+    set_notifications_muted,
+)
+from apps.users.models import User
+from core.exceptions import PermissionException, ValidationException
 
 
 class ThreadService(IThreadService):
@@ -30,7 +36,22 @@ class ThreadService(IThreadService):
     def unread_counts(self, *, thread_ids: list[int], viewer_id: int) -> dict[int, int]:
         return self.repository.unread_counts(thread_ids=thread_ids, viewer_id=viewer_id)
 
+    def contacts(self, *, user, category: str = "") -> QuerySet[User]:
+        return self.repository.contacts_for(user=user, category=category)
+
     def create(self, data: CreateThreadDTO, *, creator) -> Thread:
+        if self.repository.is_active_teacher(user=creator):
+            requested_others = set(data.participant_ids) - {creator.pk}
+            allowed = set(
+                self.repository.contacts_for(user=creator)
+                .filter(pk__in=requested_others)
+                .values_list("pk", flat=True)
+            )
+            if allowed != requested_others:
+                raise PermissionException(
+                    _("One or more recipients are outside your messaging scope."),
+                    code="recipient_out_of_scope",
+                )
         users = self.repository.active_members(ids=data.participant_ids)
         if len(users) != len(data.participant_ids):
             raise ValidationException(
@@ -49,3 +70,21 @@ class ThreadService(IThreadService):
 
     def mark_read(self, *, thread: Thread, user) -> None:
         mark_read(thread=thread, user=user)
+
+    def set_notifications_muted(self, *, thread: Thread, user, muted: bool) -> None:
+        set_notifications_muted(thread=thread, user=user, muted=muted)
+
+    def presign_attachment(self, *, filename: str, content_type: str, size_bytes: int, requested_by) -> dict:
+        from apps.messaging.services import presign_attachment_upload
+
+        return presign_attachment_upload(
+            filename=filename,
+            content_type=content_type,
+            size_bytes=size_bytes,
+            requested_by=requested_by,
+        )
+
+    def attachment_download_url(self, *, thread: Thread, key: str) -> str:
+        from apps.messaging.services import attachment_download_url
+
+        return attachment_download_url(thread=thread, key=key)

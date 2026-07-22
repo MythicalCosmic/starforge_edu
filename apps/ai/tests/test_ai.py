@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from django.test import override_settings
 from django.utils import timezone
 from django_tenants.utils import schema_context
 
@@ -26,6 +27,106 @@ def _seed_ai(tenant, *, daily=100_000, monthly=1_000_000, enabled=True):
 # ---------------------------------------------------------------------------
 # Tasks (run synchronously via CELERY_TASK_ALWAYS_EAGER in test settings)
 # ---------------------------------------------------------------------------
+
+
+@override_settings(AI_ENABLED=False)
+def test_operator_disabled_ai_rejects_service_without_reserving_budget(tenant_a):
+    from apps.ai.models import AIFeature
+    from apps.ai.services import AIFeatureDisabled, check_and_reserve_budget
+
+    with schema_context(tenant_a.schema_name):
+        AIPromptFactory(feature=AIFeature.EXAM_GENERATION)
+        make_budget(daily_token_limit=100_000, monthly_token_limit=1_000_000)
+
+        with pytest.raises(AIFeatureDisabled):
+            check_and_reserve_budget(
+                feature=AIFeature.EXAM_GENERATION,
+                estimated_tokens=5_000,
+                source_app="academics",
+                source_id=991,
+            )
+
+        assert not AIRequest.objects.filter(source_app="academics", source_id=991).exists()
+        assert TenantAIBudget.objects.get(pk=1).tokens_used_today == 0
+
+
+@override_settings(AI_ENABLED=False)
+def test_operator_disabled_event_task_never_calls_provider(tenant_a, monkeypatch):
+    from celery_tasks import ai_tasks
+
+    monkeypatch.setattr(
+        ai_tasks,
+        "complete",
+        lambda **_kwargs: pytest.fail("disabled AI reached the model provider"),
+    )
+    with schema_context(tenant_a.schema_name):
+        submission = SubmissionFactory(text="This must remain local.")
+        assert ai_tasks.run_assignment_feedback(submission.pk) is None
+        assert not AIRequest.objects.filter(source_id=submission.pk).exists()
+
+
+@override_settings(AI_ENABLED=False)
+def test_operator_disabled_receivers_do_not_enqueue(monkeypatch):
+    from apps.ai import receivers
+    from celery_tasks.ai_tasks import run_assignment_feedback, run_content_summary
+
+    queued: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        run_assignment_feedback,
+        "delay",
+        lambda submission_id, **_kwargs: queued.append(("assignment", submission_id)),
+    )
+    monkeypatch.setattr(
+        run_content_summary,
+        "delay",
+        lambda file_id, **_kwargs: queued.append(("content", file_id)),
+    )
+
+    receivers.on_ai_feedback_requested(
+        sender=None,
+        submission_id=1,
+        requested_by=2,
+        schema_name="tenant_a",
+    )
+    receivers.on_file_upload_confirmed(
+        sender=None,
+        file_id=3,
+        requested_by=2,
+        schema_name="tenant_a",
+    )
+
+    assert queued == []
+
+
+def test_disabling_ai_terminalizes_stale_queued_work_and_releases_reservation(tenant_a, monkeypatch):
+    from apps.ai.models import AIFeature
+    from apps.ai.services import check_and_reserve_budget
+    from celery_tasks import ai_tasks
+
+    _seed_ai(tenant_a, daily=100_000)
+    monkeypatch.setattr(
+        ai_tasks,
+        "complete",
+        lambda **_kwargs: pytest.fail("stale queued work reached the model provider"),
+    )
+    with schema_context(tenant_a.schema_name), override_settings(AI_ENABLED=True):
+        request = check_and_reserve_budget(
+            feature=AIFeature.EXAM_GENERATION,
+            estimated_tokens=5_000,
+            source_app="academics",
+            source_id=992,
+        )
+        assert request.status == AIRequest.Status.QUEUED
+        assert TenantAIBudget.objects.get(pk=1).tokens_used_today == 5_000
+
+        with override_settings(AI_ENABLED=False):
+            assert ai_tasks.run_exam_generation(request.pk) == AIRequest.Status.FAILED
+
+        request.refresh_from_db()
+        assert request.status == AIRequest.Status.FAILED
+        assert request.reserved_tokens == 0
+        assert request.error_detail == "AI is disabled by the operator."
+        assert TenantAIBudget.objects.get(pk=1).tokens_used_today == 0
 
 
 def test_assignment_feedback_task_succeeds_and_records(tenant_a):

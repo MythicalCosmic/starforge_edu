@@ -136,10 +136,12 @@ async def test_notifications_bearer_subprotocol_is_echoed(tenant_a, user_in):
 @pytest.mark.channels
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_notifications_authed_joins_user_and_branch_groups(tenant_a, user_in):
-    """A connect joins {schema}.user.{id} AND {schema}.branch.{b} per active
-    membership — proven behaviorally: a group_send to each group is relayed to
-    the socket."""
+async def test_notifications_authed_joins_only_private_user_group(tenant_a, user_in):
+    """Notification sockets subscribe only to the recipient-specific group.
+
+    There is no branch notification producer; joining a broad branch group both
+    wastes a membership query/heartbeat work and creates a future privacy trap.
+    """
 
     @sync_to_async
     def _mint():
@@ -167,13 +169,12 @@ async def test_notifications_authed_joins_user_and_branch_groups(tenant_a, user_
     assert user_frame["type"] == "notification"
     assert user_frame["payload"]["id"] == 1
 
-    # Branch group reaches the socket too.
+    # A broad branch-group send must not reach this private notification feed.
     await _group_send(
         f"{tenant_a.schema_name}.branch.{branch_id}",
         {"type": "notification.message", "id": 2, "title": "b", "body": "b"},
     )
-    branch_frame = await comm.receive_json_from(timeout=5)
-    assert branch_frame["payload"]["id"] == 2
+    assert await comm.receive_nothing(timeout=0.3)
     await comm.disconnect()
 
 
@@ -214,7 +215,7 @@ async def test_notifications_e2e_delivery_via_dispatch(tenant_a, user_in):
 # --------------------------------------------------------------------------- #
 # AttendanceConsumer — permission on connect
 # --------------------------------------------------------------------------- #
-def _make_cohort_with_teacher(tenant, *, teacher_in_branch: bool):
+def _make_cohort_with_teacher(tenant, *, teacher_in_branch: bool, teaches: bool = True):
     """Returns (cohort_id, teacher_user, token) inside tenant's schema.
 
     teacher_in_branch True -> the teacher has a RoleMembership in the cohort's
@@ -222,6 +223,7 @@ def _make_cohort_with_teacher(tenant, *, teacher_in_branch: bool):
     """
     from apps.cohorts.tests.factories import CohortFactory
     from apps.org.tests.factories import BranchFactory
+    from apps.teachers.tests.factories import TeacherProfileFactory
     from apps.users.models import RoleMembership
     from apps.users.tests.factories import UserFactory
 
@@ -231,6 +233,10 @@ def _make_cohort_with_teacher(tenant, *, teacher_in_branch: bool):
         teacher = UserFactory()
         membership_branch = cohort_branch if teacher_in_branch else BranchFactory()
         RoleMembership.objects.create(user=teacher, branch=membership_branch, role="teacher")
+        profile = TeacherProfileFactory(user=teacher, branch=membership_branch)
+        if teaches:
+            cohort.primary_teacher = profile
+            cohort.save(update_fields=["primary_teacher"])
         teacher.refresh_from_db()
         token = _mint_access(tenant, teacher)
         return cohort.pk, teacher.pk, token
@@ -260,6 +266,56 @@ async def test_attendance_teacher_in_branch_connects(tenant_a):
 async def test_attendance_teacher_other_branch_denied_4403(tenant_a):
     cohort_id, _uid, token = await sync_to_async(_make_cohort_with_teacher)(tenant_a, teacher_in_branch=False)
     _comm, connected, code = await _connect(f"/ws/cohorts/{cohort_id}/attendance/", HOST_A, token)
+    assert not connected
+    assert code == 4403
+
+
+@pytest.mark.channels
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_attendance_same_branch_non_teaching_teacher_denied_4403(tenant_a):
+    cohort_id, _uid, token = await sync_to_async(_make_cohort_with_teacher)(
+        tenant_a,
+        teacher_in_branch=True,
+        teaches=False,
+    )
+    _comm, connected, code = await _connect(f"/ws/cohorts/{cohort_id}/attendance/", HOST_A, token)
+    assert not connected
+    assert code == 4403
+
+
+@pytest.mark.channels
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_attendance_hod_websocket_honors_department_scope(tenant_a):
+    from apps.cohorts.tests.factories import CohortFactory
+    from apps.org.tests.factories import BranchFactory, DepartmentFactory
+    from apps.users.models import RoleMembership
+    from apps.users.tests.factories import UserFactory
+
+    def _setup():
+        with schema_context(tenant_a.schema_name):
+            branch = BranchFactory()
+            own_department = DepartmentFactory(branch=branch)
+            sibling_department = DepartmentFactory(branch=branch)
+            own_cohort = CohortFactory(branch=branch, department=own_department)
+            sibling_cohort = CohortFactory(branch=branch, department=sibling_department)
+            hod = UserFactory()
+            RoleMembership.objects.create(
+                user=hod,
+                branch=branch,
+                department=own_department,
+                role="head_of_dept",
+            )
+            hod.refresh_from_db()
+            return own_cohort.id, sibling_cohort.id, _mint_access(tenant_a, hod)
+
+    own_cohort_id, sibling_cohort_id, token = await sync_to_async(_setup)()
+    own_comm, connected, _ = await _connect(f"/ws/cohorts/{own_cohort_id}/attendance/", HOST_A, token)
+    assert connected
+    await own_comm.disconnect()
+
+    _comm, connected, code = await _connect(f"/ws/cohorts/{sibling_cohort_id}/attendance/", HOST_A, token)
     assert not connected
     assert code == 4403
 
@@ -479,9 +535,7 @@ async def test_revoked_session_closes_live_socket_4401(tenant_a, user_in, monkey
     assert closed_code == 4401
 
     # Group membership discarded: a send to the user group now reaches nothing.
-    await _group_send(
-        f"{tenant_a.schema_name}.user.{user_pk}", {"type": "notification.message", "id": 9}
-    )
+    await _group_send(f"{tenant_a.schema_name}.user.{user_pk}", {"type": "notification.message", "id": 9})
     assert await comm.receive_nothing(timeout=0.3)
 
 
@@ -567,13 +621,17 @@ def test_group_send_producer_uniqueness():
     + infrastructure/websocket/. dispatch is the single producer (TD-15)."""
     pattern = re.compile(r"from\s+infrastructure\.websocket\.channel_layer\s+import\s+group_send")
     offenders: list[str] = []
-    for py in REPO_ROOT.rglob("*.py"):
-        rel = py.relative_to(REPO_ROOT).as_posix()
-        if "/tests/" in rel or rel.startswith("tests/"):
-            continue
-        if rel.startswith("apps/notifications/") or rel.startswith("infrastructure/websocket/"):
-            continue
-        text = py.read_text(encoding="utf-8", errors="ignore")
-        if pattern.search(text):
-            offenders.append(rel)
+    # Restrict the static check to project source. REPO_ROOT.rglob also traverses
+    # .venv and tool caches, turning this tiny invariant into a multi-minute scan
+    # (and potentially inspecting unrelated installed packages).
+    for source_dir in ("apps", "celery_tasks", "config", "core", "infrastructure"):
+        for py in (REPO_ROOT / source_dir).rglob("*.py"):
+            rel = py.relative_to(REPO_ROOT).as_posix()
+            if "/tests/" in rel:
+                continue
+            if rel.startswith("apps/notifications/") or rel.startswith("infrastructure/websocket/"):
+                continue
+            text = py.read_text(encoding="utf-8", errors="ignore")
+            if pattern.search(text):
+                offenders.append(rel)
     assert offenders == [], f"group_send imported outside the producer scope: {offenders}"

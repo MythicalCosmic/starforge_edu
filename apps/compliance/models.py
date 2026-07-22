@@ -35,7 +35,9 @@ class RuleAcknowledgment(models.Model):
     leaves the old ack in place but no longer counts as 'current', so the rule
     re-appears as pending."""
 
-    rule = models.ForeignKey(Rule, on_delete=models.CASCADE, related_name="acknowledgments")
+    # Acceptance records are compliance evidence. A rule may be retired, but a hard
+    # delete must never cascade away proof that a person accepted a specific version.
+    rule = models.ForeignKey(Rule, on_delete=models.PROTECT, related_name="acknowledgments")
     user = models.ForeignKey("users.User", on_delete=models.CASCADE, related_name="rule_acknowledgments")
     version = models.PositiveIntegerField()
     acknowledged_at = models.DateTimeField(auto_now_add=True)

@@ -53,7 +53,16 @@ def test_request_approve_disburse_writes_ledger(tenant_a, as_role):
     assert ap.status_code == 200
     assert ap.json()["data"]["status"] == "approved"
 
-    dis = cashier.post(f"{REQ}{rid}/disburse/", {"payment_method": method_id}, format="json")
+    dis = cashier.post(
+        f"{REQ}{rid}/disburse/",
+        {
+            "payment_method": method_id,
+            # A cashier cannot invert/reclassify an approved money-out request.
+            "direction": "in",
+            "entry_type": "donation",
+        },
+        format="json",
+    )
     assert dis.status_code == 200
     assert dis.json()["data"]["status"] == "disbursed"
     assert dis.json()["data"]["ledger_entry"] is not None
@@ -73,8 +82,12 @@ def test_reward_kind_not_accepted_by_generic_endpoint(tenant_a, as_role):
     director, _ = as_role(Role.DIRECTOR)
     r = director.post(
         REQ,
-        {"kind": "reward", "title": "Bonus", "amount_uzs": "5000000.00",
-         "payload": {"recipient_id": 999, "party_label": "Pay me"}},
+        {
+            "kind": "reward",
+            "title": "Bonus",
+            "amount_uzs": "5000000.00",
+            "payload": {"recipient_id": 999, "party_label": "Pay me"},
+        },
         format="json",
     )
     assert r.status_code == 400, r.content
@@ -103,10 +116,56 @@ def test_beneficiary_self_dealing_guard_int_coerces_id():
         _assert_not_beneficiary_self_dealing(_Req("5"), _Actor())  # string id == actor -> blocked
     with pytest.raises(PermissionException):
         _assert_not_beneficiary_self_dealing(_Req(5), _Actor())  # int id == actor -> blocked
+    superuser = _Actor()
+    superuser.is_superuser = True
+    with pytest.raises(PermissionException):
+        _assert_not_beneficiary_self_dealing(_Req(5), superuser)
     # different / garbage / missing id -> allowed, no crash
     _assert_not_beneficiary_self_dealing(_Req(999), _Actor())
     _assert_not_beneficiary_self_dealing(_Req("not-a-number"), _Actor())
     _assert_not_beneficiary_self_dealing(_Req(None), _Actor())
+
+
+def test_superuser_cannot_bypass_financial_separation_of_duties():
+    from apps.approvals.services import _assert_not_self_approval, _assert_separate_disburser
+    from core.exceptions import PermissionException
+
+    class _Req:
+        requested_by_id = 5
+        decided_by_id = 6
+
+    class _Actor:
+        is_superuser = True
+
+        def __init__(self, user_id):
+            self.id = user_id
+
+    with pytest.raises(PermissionException):
+        _assert_not_self_approval(_Req(), _Actor(5))
+    with pytest.raises(PermissionException):
+        _assert_separate_disburser(_Req(), _Actor(5))
+    with pytest.raises(PermissionException):
+        _assert_separate_disburser(_Req(), _Actor(6))
+
+
+def test_ledger_entries_are_database_immutable(tenant_a):
+    from django.db import DatabaseError, transaction
+
+    from apps.approvals.models import LedgerEntry
+
+    with schema_context(tenant_a.schema_name):
+        entry = LedgerEntry.objects.create(
+            direction=LedgerEntry.Direction.OUT,
+            entry_type="immutability_test",
+            amount_uzs="1.00",
+            note="original",
+        )
+        with pytest.raises(DatabaseError), transaction.atomic():
+            LedgerEntry.objects.filter(pk=entry.pk).update(note="rewritten")
+        with pytest.raises(DatabaseError), transaction.atomic():
+            LedgerEntry.objects.filter(pk=entry.pk).delete()
+        entry.refresh_from_db()
+        assert entry.note == "original"
 
 
 def test_requester_sees_own_handler_sees_all(tenant_a, as_role, user_in, as_user):

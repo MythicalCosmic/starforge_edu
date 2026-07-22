@@ -19,6 +19,7 @@ from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
 from apps.content.models import FileView, LessonFile, LibraryMaterial
+from apps.content.selectors import can_publish_content
 from apps.content.signals import file_upload_confirmed
 from apps.org.selectors import get_center_settings
 from core.exceptions import (
@@ -27,7 +28,6 @@ from core.exceptions import (
     PermissionException,
     UnprocessableEntity,
 )
-from core.permissions import Role
 from core.utils import current_schema
 from infrastructure.storage.s3_client import (
     copy_object,
@@ -215,7 +215,22 @@ def validate_uploaded_file(file_id: int) -> str:
     if file.status != LessonFile.Status.PENDING:
         return file.status
 
-    head = head_object(file.s3_key)
+    try:
+        head = head_object(file.s3_key)
+    except FileNotFoundError:
+        return _reject(file, "Uploaded object was not found.")
+    except Exception as exc:
+        # S3 reports a missing key as ClientError; transient/network errors must
+        # still bubble so Celery retries instead of permanently rejecting a file.
+        from botocore.exceptions import ClientError
+
+        if isinstance(exc, ClientError) and str(exc.response.get("Error", {}).get("Code")) in {
+            "404",
+            "NoSuchKey",
+            "NotFound",
+        }:
+            return _reject(file, "Uploaded object was not found.")
+        raise
     actual_size = int(head.get("ContentLength", file.size_bytes))
     settings = get_center_settings()
     if actual_size > settings.max_upload_mb * 1024 * 1024:
@@ -320,11 +335,6 @@ def track_view(*, file: LessonFile, user) -> None:
 # Dual publication approval (F4-5)
 # ---------------------------------------------------------------------------
 
-# Roles allowed to give the elevated manager (second) approval. The teacher's
-# ``content:*`` wildcard would otherwise also satisfy ``content:publish``, so the
-# manager leg is gated on a manager ROLE in addition to the permission code.
-_MANAGER_APPROVAL_ROLES = (Role.DIRECTOR, Role.HEAD_OF_DEPT)
-
 
 @transaction.atomic
 def approve_teacher_leg(*, file: LessonFile, actor) -> LessonFile:
@@ -355,7 +365,8 @@ def approve_manager_leg(
     *, file: LessonFile, actor, actor_roles, is_downloadable: bool | None = None
 ) -> LessonFile:
     """Second sign-off — publishes the file to learners. Maker-checker: requires
-    the teacher leg first AND a different person who holds a manager role. The
+    the teacher leg first AND a different person with an explicit publisher
+    grant. The
     manager may also set the view-only / downloadable toggle at publish time.
     The row is locked so concurrent approvals can't clobber the recorded signer
     or the view-only toggle (last-writer-wins) and the 409 guard stays authoritative."""
@@ -368,7 +379,7 @@ def approve_manager_leg(
         )
     if file.is_approved_manager:
         raise ConflictException(_("This file already has manager approval."), code="manager_already_approved")
-    if not actor.is_superuser and not (set(actor_roles) & set(_MANAGER_APPROVAL_ROLES)):
+    if not actor.is_superuser and not can_publish_content(actor_roles):
         raise PermissionException(_("Only a manager can give the second approval."), code="not_a_manager")
     if file.approved_teacher_by_id == actor.id:
         raise PermissionException(

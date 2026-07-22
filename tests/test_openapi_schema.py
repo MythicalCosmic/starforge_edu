@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import pytest
+from drf_spectacular.validation import validate_schema
 
 from core.openapi import build_schema
 
@@ -29,6 +30,15 @@ def test_schema_covers_the_layered_api():
     # Methods are introspected accurately from the views.
     assert set(m for m in paths["/api/v1/students/"] if m in ("get", "post")) == {"get", "post"}
     assert {"get", "patch", "put", "delete"} <= set(paths["/api/v1/students/{pk}/"])
+    validate_schema(s)
+
+    operation_ids = [
+        operation["operationId"]
+        for path_item in paths.values()
+        for method, operation in path_item.items()
+        if method in {"get", "post", "put", "patch", "delete"}
+    ]
+    assert len(operation_ids) == len(set(operation_ids))
 
 
 def test_reports_drf_app_is_covered():

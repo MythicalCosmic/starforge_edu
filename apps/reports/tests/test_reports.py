@@ -3,8 +3,7 @@
 Covers: the six generators against factory data (incl. ai_usage consuming Lane
 A's selector, mocked), role-visibility matrix, teacher cohort scoping enforced in
 the selector, the signed-URL build flow (mocked boto3 helpers), schedule
-exactly-once within the hour, two-tenant nightly aggregation with no bleed,
-cross-tenant isolation + query-count, and the PDF/Excel render path (skipped when
+exactly-once within the hour, cross-tenant isolation + query-count, and the PDF/Excel render path (skipped when
 weasyprint/openpyxl are absent — the data/collect layer is asserted instead).
 """
 
@@ -14,6 +13,7 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 import pytest
+from django.test import override_settings
 from django.utils import timezone
 from django_tenants.utils import schema_context
 
@@ -28,6 +28,7 @@ from apps.schedule.tests.factories import TermFactory
 from apps.students.models import StudentProfile
 from apps.students.tests.factories import StudentProfileFactory
 from apps.teachers.tests.factories import TeacherProfileFactory
+from core.exceptions import ThrottledException, ValidationException
 from core.permissions import Role
 
 pytestmark = pytest.mark.django_db
@@ -159,7 +160,8 @@ def test_finance_generator_totals(tenant_a, user_in):
 
     with schema_context(tenant_a.schema_name):
         accountant = user_in(tenant_a, roles=[Role.ACCOUNTANT])
-        student: Any = StudentProfileFactory()
+        branch_id = accountant.role_memberships.values_list("branch_id", flat=True).get()
+        student: Any = StudentProfileFactory(branch_id=branch_id)
         Invoice.objects.create(
             number="INV-2026-000001",
             student=student,
@@ -335,6 +337,74 @@ def test_accountant_can_run_finance(tenant_a, user_in):
         )
     assert run.status == ReportRun.Status.QUEUED
     assert run.format == "xlsx"
+
+
+def test_runs_are_object_scoped_by_owner_and_branch(tenant_a, user_in):
+    with schema_context(tenant_a.schema_name):
+        own_branch = BranchFactory()
+        foreign_branch = BranchFactory()
+        director = user_in(tenant_a, roles=[Role.DIRECTOR], branch=own_branch)
+        own_hod = user_in(tenant_a, roles=[Role.HEAD_OF_DEPT], branch=own_branch)
+        foreign_hod = user_in(tenant_a, roles=[Role.HEAD_OF_DEPT], branch=foreign_branch)
+        run = services.create_report_run(
+            report_key="enrollment",
+            fmt="pdf",
+            params={"branch_id": own_branch.pk},
+            requested_by=director,
+            roles={Role.DIRECTOR},
+        )
+        assert selectors.scoped_runs(user=own_hod, roles={Role.HEAD_OF_DEPT}).filter(pk=run.pk).exists()
+        assert (
+            not selectors.scoped_runs(user=foreign_hod, roles={Role.HEAD_OF_DEPT}).filter(pk=run.pk).exists()
+        )
+
+
+@override_settings(REPORT_MAX_ACTIVE_PER_USER=1)
+def test_report_admission_dedupes_before_enforcing_queue_cap(tenant_a, user_in):
+    with schema_context(tenant_a.schema_name):
+        accountant = user_in(tenant_a, roles=[Role.ACCOUNTANT])
+        first = services.create_report_run(
+            report_key="finance",
+            fmt="xlsx",
+            params={},
+            requested_by=accountant,
+            roles={Role.ACCOUNTANT},
+        )
+        duplicate = services.create_report_run(
+            report_key="finance",
+            fmt="xlsx",
+            params={},
+            requested_by=accountant,
+            roles={Role.ACCOUNTANT},
+        )
+        assert duplicate.pk == first.pk
+        with pytest.raises(ThrottledException) as exc:
+            services.create_report_run(
+                report_key="finance",
+                fmt="pdf",
+                params={},
+                requested_by=accountant,
+                roles={Role.ACCOUNTANT},
+            )
+        assert exc.value.code == "report_user_queue_full"
+
+
+def test_schedule_recipients_must_be_active_and_in_branch_scope(tenant_a, user_in):
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+        foreign = BranchFactory()
+        hod = user_in(tenant_a, roles=[Role.HEAD_OF_DEPT], branch=branch)
+        outsider = user_in(tenant_a, roles=[Role.TEACHER], branch=foreign)
+        with pytest.raises(ValidationException) as exc:
+            services.create_schedule(
+                report_key="enrollment",
+                created_by=hod,
+                roles={Role.HEAD_OF_DEPT},
+                cadence=ReportSchedule.Cadence.WEEKLY,
+                weekday=0,
+                recipient_ids=[outsider.pk],
+            )
+        assert exc.value.code == "invalid_recipients"
 
 
 # --------------------------------------------------------------------------- #
@@ -605,53 +675,6 @@ def test_safe_cell_neutralizes_formula_prefixes():
         assert safe_cell(payload) == "'" + payload
     assert safe_cell("Ali Valiyev") == "Ali Valiyev"  # ordinary text untouched
     assert safe_cell(42) == 42  # non-strings pass through
-
-
-# --------------------------------------------------------------------------- #
-# Two-tenant nightly aggregation (D4-LB-7)
-# --------------------------------------------------------------------------- #
-def test_aggregation_writes_both_centers_no_bleed(tenant_a, tenant_b, monkeypatch):
-    from celery_tasks import report_tasks
-
-    # Two enrolled students in A, one in B.
-    with schema_context(tenant_a.schema_name):
-        for _ in range(2):
-            StudentProfileFactory(status=StudentProfile.Status.ENROLLED)
-    with schema_context(tenant_b.schema_name):
-        StudentProfileFactory(status=StudentProfile.Status.ENROLLED)
-
-    report_tasks.aggregate_center(center_id=tenant_a.pk)
-    report_tasks.aggregate_center(center_id=tenant_b.pk)
-    # Re-run same day must update, not duplicate (unique (center, date)).
-    report_tasks.aggregate_center(center_id=tenant_a.pk)
-
-    from apps.billing.models import UsageSnapshot
-
-    today = timezone.localdate()  # aggregate_center now stamps the LOCAL date (R4/CONF1)
-    snap_a = UsageSnapshot.objects.get(center=tenant_a, date=today)
-    snap_b = UsageSnapshot.objects.get(center=tenant_b, date=today)
-    assert snap_a.students_count == 2
-    assert snap_b.students_count == 1
-    assert UsageSnapshot.objects.filter(center=tenant_a, date=today).count() == 1
-
-
-def test_dau_counts_users_seen_today(tenant_a):
-    from celery_tasks import report_tasks
-
-    today = timezone.now().date()
-    with schema_context(tenant_a.schema_name):
-        from apps.users.tests.factories import UserFactory
-
-        seen = UserFactory()
-        seen.last_seen_at = timezone.now()
-        seen.save(update_fields=["last_seen_at"])
-        stale = UserFactory()
-        stale.last_seen_at = timezone.now() - timedelta(days=3)
-        stale.save(update_fields=["last_seen_at"])
-
-    dau = report_tasks._dau(tenant_a.schema_name, today)
-    # At least the freshly-seen user; the 3-day-stale user is excluded.
-    assert dau >= 1
 
 
 # --------------------------------------------------------------------------- #

@@ -91,7 +91,11 @@ def mark_view(request: HttpRequest, lesson_id: int) -> HttpResponseBase:
     if request.method != "POST":
         return error("Method not allowed.", code="method_not_allowed", status=405)
     check_perm(request, f"{_RESOURCE}:write")
-    lesson = _service().get_lesson(lesson_id=lesson_id)
+    lesson = _service().get_lesson(
+        lesson_id=lesson_id,
+        user=request.user,
+        roles=_roles(request),
+    )
     if lesson is None:
         raise NotFoundException(code="not_found")  # incl. a cross-tenant lesson id
     entries = _mark_entries(request)

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from django.contrib import admin
 
-from apps.billing.models import Plan, Subscription, UsageSnapshot
+from apps.billing.models import AiUsageCharge, Plan, Subscription, UsageSnapshot
+from core.admin_mixins import ReadOnlyAdmin
 
 
 @admin.register(Plan)
@@ -31,3 +32,20 @@ class UsageSnapshotAdmin(admin.ModelAdmin):
     search_fields = ("center__name", "center__slug")
     date_hierarchy = "date"
     ordering = ("-date",)
+
+
+@admin.register(AiUsageCharge)
+class AiUsageChargeAdmin(ReadOnlyAdmin):
+    list_display = (
+        "center",
+        "period",
+        "included_tokens",
+        "used_tokens",
+        "overage_tokens",
+        "amount_uzs",
+        "cost_microusd",
+    )
+    list_filter = ("period",)
+    search_fields = ("center__name", "center__slug")
+    date_hierarchy = "period"
+    ordering = ("-period", "center_id")

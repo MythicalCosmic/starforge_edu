@@ -5,7 +5,7 @@ from __future__ import annotations
 import factory
 
 from apps.org.tests.factories import BranchFactory
-from apps.teachers.models import TeacherProfile
+from apps.teachers.models import TeacherProfile, TeacherType
 from apps.users.tests.factories import UserFactory
 
 
@@ -26,3 +26,15 @@ class TeacherProfileFactory(factory.django.DjangoModelFactory[TeacherProfile]):
     birthdate = factory.LazyAttribute(lambda o: o.user.birthdate)
     gender = factory.LazyAttribute(lambda o: o.user.gender)
     branch = factory.SubFactory(BranchFactory)
+
+
+class TeacherTypeFactory(factory.django.DjangoModelFactory[TeacherType]):
+    class Meta:
+        model = TeacherType
+
+    name = factory.Sequence(lambda n: f"Teacher Type {n}")
+    slug = factory.Sequence(lambda n: f"teacher-type-{n}")
+    is_active = True
+    is_system = False
+    is_default = False
+    sort_order = 100

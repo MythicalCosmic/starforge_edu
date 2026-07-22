@@ -13,18 +13,18 @@ from typing import Any
 import boto3
 from botocore.client import Config
 from django.conf import settings
+from django.core.exceptions import ImproperlyConfigured
 
 
 def _storage_options() -> dict[str, Any]:
     return settings.STORAGES["default"]["OPTIONS"]  # type: ignore[index]
 
 
-@lru_cache(maxsize=1)
-def get_s3_client():
+def _build_s3_client(endpoint_url: str | None):
     opts = _storage_options()
     return boto3.client(
         "s3",
-        endpoint_url=opts.get("endpoint_url") or None,
+        endpoint_url=endpoint_url,
         aws_access_key_id=opts["access_key"],
         aws_secret_access_key=opts["secret_key"],
         region_name=opts["region_name"],
@@ -35,8 +35,25 @@ def get_s3_client():
     )
 
 
+@lru_cache(maxsize=1)
+def get_s3_client():
+    """Return the private, server-side S3 client used for object I/O."""
+    return _build_s3_client(_storage_options().get("endpoint_url") or None)
+
+
+@lru_cache(maxsize=1)
+def get_s3_presign_client():
+    """Return a client that signs browser-reachable URLs without doing I/O."""
+    public_endpoint = getattr(settings, "AWS_S3_PUBLIC_ENDPOINT_URL", "").strip()
+    if not public_endpoint:
+        raise ImproperlyConfigured(
+            "AWS_S3_PUBLIC_ENDPOINT_URL is required to generate browser-facing storage URLs."
+        )
+    return _build_s3_client(public_endpoint)
+
+
 def presign_upload(key: str, *, expires_in: int = 600, content_type: str = "application/octet-stream") -> str:
-    return get_s3_client().generate_presigned_url(
+    return get_s3_presign_client().generate_presigned_url(
         "put_object",
         Params={
             "Bucket": _storage_options()["bucket_name"],
@@ -47,8 +64,35 @@ def presign_upload(key: str, *, expires_in: int = 600, content_type: str = "appl
     )
 
 
+def presign_post_upload(
+    key: str,
+    *,
+    size_bytes: int,
+    expires_in: int = 600,
+    content_type: str = "application/octet-stream",
+) -> dict[str, Any]:
+    """Presign a POST whose policy enforces type and exact content length.
+
+    Unlike a presigned PUT, an S3 POST policy can carry a
+    ``content-length-range`` condition which MinIO/S3 verifies before storing the
+    body.  The returned ``url`` and ``fields`` are submitted as multipart form
+    data by the client.
+    """
+
+    return get_s3_presign_client().generate_presigned_post(
+        Bucket=_storage_options()["bucket_name"],
+        Key=key,
+        Fields={"Content-Type": content_type},
+        Conditions=[
+            {"Content-Type": content_type},
+            ["content-length-range", size_bytes, size_bytes],
+        ],
+        ExpiresIn=expires_in,
+    )
+
+
 def presign_download(key: str, *, expires_in: int = 600) -> str:
-    return get_s3_client().generate_presigned_url(
+    return get_s3_presign_client().generate_presigned_url(
         "get_object",
         Params={
             "Bucket": _storage_options()["bucket_name"],

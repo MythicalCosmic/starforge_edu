@@ -25,12 +25,15 @@ from core.http import decimal_field, int_field, read_json, str_field
 from core.listing import apply_filters, paginate
 from core.permissions import get_user_roles
 from core.responses import created, error, paginated, success
-from core.viewsets import assert_tenant_context
+from core.tenant_context import assert_tenant_context
 
 # Documented request kinds (configured instances of the engine); "other" is the
 # escape hatch. (Formerly on the deleted ApprovalRequestCreateSerializer.)
 _REQUEST_KINDS = frozenset(
     {
+        # Generic expense requests use the approval/ledger spine directly. The
+        # separate finance.Expense record uses internal kind "expense_record"
+        # so legacy/generic requests cannot be mistaken for linked model rows.
         "expense",
         "loan",
         "procurement",

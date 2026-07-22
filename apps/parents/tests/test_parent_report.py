@@ -30,7 +30,9 @@ def family(tenant_a, user_in):
         parent = ParentProfile.objects.create(user=parent_user)
         other_parent = ParentProfile.objects.create(user=other_parent_user)
         Guardian.objects.create(parent=parent, student=own_child, relationship="mother", is_primary=True)
-        Guardian.objects.create(parent=other_parent, student=other_child, relationship="father", is_primary=True)
+        Guardian.objects.create(
+            parent=other_parent, student=other_child, relationship="father", is_primary=True
+        )
     return {
         "branch": branch,
         "own_child": own_child,

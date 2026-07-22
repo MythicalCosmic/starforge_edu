@@ -21,7 +21,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Sum
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
@@ -34,7 +34,6 @@ from apps.finance.models import (
     Invoice,
     InvoiceLine,
     PaymentAllocation,
-    PaymentMethod,
     PaymentPlan,
     PaymentPlanInstallment,
     Refund,
@@ -42,7 +41,13 @@ from apps.finance.models import (
 from apps.finance.signals import invoice_issued
 from apps.org.selectors import get_center_settings
 from apps.students.models import StudentProfile
-from core.exceptions import ConflictException, NotFoundException, UnprocessableEntity, ValidationException
+from core.exceptions import (
+    ConflictException,
+    NotFoundException,
+    PermissionException,
+    UnprocessableEntity,
+    ValidationException,
+)
 from core.utils import current_schema, stable_hash
 
 _ZERO = Decimal("0")
@@ -212,9 +217,16 @@ def issue_invoice(
     settings = get_center_settings()
     fee_schedule = None
     if fee_schedule_id is not None:
-        fee_schedule = FeeSchedule.objects.filter(pk=fee_schedule_id).first()
+        fee_schedule = FeeSchedule.objects.select_related("cohort").filter(pk=fee_schedule_id).first()
         if fee_schedule is None:
             raise NotFoundException(_("Fee schedule not found."), code="fee_schedule_not_found")
+        schedule_cohort = fee_schedule.cohort
+        if schedule_cohort is not None and schedule_cohort.branch_id != student.branch_id:
+            raise ValidationException(
+                _("The fee schedule belongs to another student branch."),
+                code="fee_schedule_branch_mismatch",
+                fields={"fee_schedule": ["branch_mismatch"]},
+            )
 
     line_specs: list[dict] = []
     if fee_schedule is not None:
@@ -315,9 +327,9 @@ def _build_discount_lines(*, student, base_uzs: Decimal, on: date, settings) -> 
         # transaction. So it can't double-credit even under concurrent issuance. The claim
         # runs only once we KNOW a positive amount applies (after the cap), so a credit is
         # never consumed on an already-zeroed invoice.
-        if discount.single_use and not Discount.objects.filter(
-            pk=discount.pk, is_active=True
-        ).update(is_active=False):
+        if discount.single_use and not Discount.objects.filter(pk=discount.pk, is_active=True).update(
+            is_active=False
+        ):
             continue
         remaining -= amount
         lines.append(
@@ -574,9 +586,7 @@ def allocate_payment(
 
 
 @transaction.atomic
-def allocate_payment_lines(
-    *, payment_id: int, lines: list[dict[str, Any]]
-) -> list[PaymentAllocation]:
+def allocate_payment_lines(*, payment_id: int, lines: list[dict[str, Any]]) -> list[PaymentAllocation]:
     """Allocate a payment across explicit ``(invoice, amount)`` lines — the manual
     allocation endpoint's contract, where the operator chooses exactly how much of the
     payment lands on each invoice (unlike ``allocate_payment``, which splits a single
@@ -592,9 +602,7 @@ def allocate_payment_lines(
     if existing:  # already allocated — idempotent no-op
         return existing
     if not lines:
-        raise ValidationException(
-            _("At least one allocation line is required."), code="no_allocations"
-        )
+        raise ValidationException(_("At least one allocation line is required."), code="no_allocations")
 
     # Aggregate per invoice first so duplicate lines sum against a single outstanding
     # balance, and lock every target row for the balance checks below.
@@ -603,9 +611,7 @@ def allocate_payment_lines(
         inv_id = int(line["invoice"])
         amount = Decimal(str(line["amount"])).quantize(_CENT)
         if amount <= _ZERO:
-            raise ValidationException(
-                _("Allocation amount must be positive."), code="invalid_amount"
-            )
+            raise ValidationException(_("Allocation amount must be positive."), code="invalid_amount")
         per_invoice[inv_id] = per_invoice.get(inv_id, _ZERO) + amount
 
     invoices = {
@@ -625,15 +631,12 @@ def allocate_payment_lines(
         owed = _outstanding_for(invoice)
         if amount > owed:
             raise ValidationException(
-                _("Allocation to invoice %(n)s exceeds its outstanding balance.")
-                % {"n": invoice.number},
+                _("Allocation to invoice %(n)s exceeds its outstanding balance.") % {"n": invoice.number},
                 code="over_allocation",
                 fields={"amount_uzs": [str(amount)], "outstanding_uzs": [str(owed)]},
             )
         allocations.append(
-            PaymentAllocation.objects.create(
-                invoice=invoice, payment_id=payment_id, amount_uzs=amount
-            )
+            PaymentAllocation.objects.create(invoice=invoice, payment_id=payment_id, amount_uzs=amount)
         )
         _refresh_invoice_status(invoice)
     return allocations
@@ -660,10 +663,15 @@ def request_refund(
     reason: str = "",
     payment_id: int | None = None,
     requested_by=None,
+    provider: str = "",
 ) -> Refund:
     amount = Decimal(amount_uzs).quantize(_CENT)
     if amount <= _ZERO:
         raise ValidationException(_("Refund amount must be positive."), code="invalid_amount")
+    # The invoice is the common lock for every refund slice. Without it, two
+    # simultaneous requests can both observe the same paid balance and each
+    # reserve the full amount before either Refund row becomes visible.
+    invoice = Invoice.objects.select_for_update().get(pk=invoice.pk)
     allocated = invoice.allocations.aggregate(s=Sum("amount_uzs"))["s"] or _ZERO
     # `allocated` is the amount STILL paid: a COMPLETED refund already deleted its
     # allocation rows (reverse_allocations_for_payment), so it is reflected here.
@@ -716,6 +724,7 @@ def request_refund(
         reason=reason,
         payment_id=payment_id,
         requested_by=requested_by,
+        provider=provider,
     )
 
 
@@ -742,6 +751,14 @@ def transition_refund(*, refund_id: int, to_state: str, actor=None) -> Refund:
             _("Cannot move refund from %(f)s to %(t)s.") % {"f": refund.state, "t": to_state},
             code="invalid_refund_transition",
         )
+    if to_state == Refund.State.APPROVED and actor is None:
+        raise PermissionException(_("An identified approver is required."), code="approver_required")
+    if (
+        to_state == Refund.State.APPROVED
+        and actor is not None
+        and refund.requested_by_id == getattr(actor, "id", None)
+    ):
+        raise PermissionException(_("You cannot approve your own refund request."), code="self_approval")
     refund.state = to_state
     fields = ["state", "updated_at"]
     if to_state == Refund.State.APPROVED and actor is not None:
@@ -752,7 +769,13 @@ def transition_refund(*, refund_id: int, to_state: str, actor=None) -> Refund:
 
 
 @transaction.atomic
-def register_refund_completion(refund_id: int, payment_id: int | None = None) -> Refund:
+def register_refund_completion(
+    refund_id: int,
+    payment_id: int | None = None,
+    *,
+    provider: str,
+    provider_refund_id: str,
+) -> Refund:
     """Lane B entry point: mark a refund completed once the provider confirms the
     reversal (e.g. Payme CancelTransaction state -2). Idempotent — a completed
     refund is returned unchanged. Stamps `payment_id` if supplied. Walks the
@@ -764,17 +787,57 @@ def register_refund_completion(refund_id: int, payment_id: int | None = None) ->
     rows (scoped to the refunded amount) and re-runs `_refresh_invoice_status`,
     so a fully-refunded invoice flips PAID -> PARTIALLY_PAID/ISSUED and the
     student's outstanding balance returns to its pre-payment value."""
+    if not provider or not provider_refund_id:
+        raise ValidationException(
+            _("Provider confirmation is required to complete a refund."),
+            code="provider_confirmation_required",
+        )
     refund = Refund.objects.select_for_update().filter(pk=refund_id).first()
     if refund is None:
         raise NotFoundException(_("Refund not found."), code="refund_not_found")
     if payment_id is not None and refund.payment_id is None:
         refund.payment_id = payment_id
+    if refund.provider and refund.provider != provider:
+        raise ValidationException(
+            _("Refund confirmation came from the wrong provider."),
+            code="refund_provider_mismatch",
+        )
     if refund.state == Refund.State.COMPLETED:
-        if payment_id is not None:
-            refund.save(update_fields=["payment_id", "updated_at"])
+        if refund.provider_refund_id != provider_refund_id:
+            raise ValidationException(
+                _("Refund is already confirmed under another provider reference."),
+                code="refund_confirmation_mismatch",
+            )
         return refund
     refund.state = Refund.State.COMPLETED
-    refund.save(update_fields=["state", "payment_id", "updated_at"])
+    refund.provider = provider
+    refund.provider_refund_id = provider_refund_id
+    refund.provider_confirmed_at = timezone.now()
+    if refund.ledger_entry_id is None:
+        from apps.approvals.models import LedgerEntry
+
+        refund.ledger_entry = LedgerEntry.objects.create(
+            direction=LedgerEntry.Direction.OUT,
+            entry_type="refund",
+            amount_uzs=refund.amount_uzs,
+            branch_id=refund.invoice.student.branch_id,
+            party_label=str(refund.invoice.student)[:200],
+            source_kind="refund",
+            source_id=refund.pk,
+            note=refund.reason[:255],
+            created_by=refund.requested_by,
+        )
+    refund.save(
+        update_fields=[
+            "state",
+            "payment_id",
+            "provider",
+            "provider_refund_id",
+            "provider_confirmed_at",
+            "ledger_entry",
+            "updated_at",
+        ]
+    )
     # Reverse the allocations this refund undoes so the invoice no longer reads
     # as fully paid (the money was returned). Scope to the refund amount so a
     # partial refund only releases that much.
@@ -789,6 +852,14 @@ def register_refund_completion(refund_id: int, payment_id: int | None = None) ->
         reverse_allocations_for_payment(
             payment_id=refund.payment_id, amount_uzs=refund.amount_uzs, invoice_id=refund.invoice_id
         )
+        from apps.payments.models import Payment
+
+        payment = Payment.objects.select_for_update().filter(pk=refund.payment_id).first()
+        if payment is not None:
+            completed = completed_refund_total_for_payment(payment.pk)
+            if completed >= payment.amount_uzs and payment.status != Payment.Status.REFUNDED:
+                payment.status = Payment.Status.REFUNDED
+                payment.save(update_fields=["status", "updated_at"])
     return refund
 
 
@@ -855,7 +926,13 @@ def create_payment_plan(*, invoice: Invoice, installments: list[dict], created_b
         raise ConflictException(_("This invoice already has a payment plan."), code="plan_exists")
     if not installments:
         raise ValidationException(_("A plan needs at least one installment."), code="empty_plan")
-    total = sum((Decimal(str(i["amount_uzs"])).quantize(_CENT) for i in installments), _ZERO)
+    amounts = [Decimal(str(i["amount_uzs"])).quantize(_CENT) for i in installments]
+    if any(amount <= _ZERO for amount in amounts):
+        raise ValidationException(
+            _("Every installment amount must be positive."),
+            code="invalid_installment_amount",
+        )
+    total = sum(amounts, _ZERO)
     if total != invoice.total_uzs:
         raise ValidationException(
             _("Installments must sum to the invoice total (%(t)s).") % {"t": invoice.total_uzs},
@@ -885,31 +962,59 @@ def open_cashier_shift(
 ) -> CashierShift:
     """Open a shift. A cashier may only have ONE open shift at a time
     (409-style `ConflictException`)."""
+    opening = Decimal(opening_cash_uzs).quantize(_CENT)
+    if opening < _ZERO:
+        raise ValidationException(_("Opening cash cannot be negative."), code="invalid_amount")
     if CashierShift.objects.filter(cashier=cashier, status=CashierShift.Status.OPEN).exists():
         raise ConflictException(_("This cashier already has an open shift."), code="shift_already_open")
-    return CashierShift.objects.create(
-        cashier=cashier,
-        branch=branch,
-        opening_cash_uzs=Decimal(opening_cash_uzs).quantize(_CENT),
-        notes=notes,
-    )
+    try:
+        with transaction.atomic():
+            return CashierShift.objects.create(
+                cashier=cashier,
+                branch=branch,
+                opening_cash_uzs=opening,
+                notes=notes,
+            )
+    except IntegrityError as exc:
+        raise ConflictException(
+            _("This cashier already has an open shift."), code="shift_already_open"
+        ) from exc
 
 
 @transaction.atomic
-def close_cashier_shift(*, shift: CashierShift, closing_cash_uzs: Decimal, notes: str = "") -> CashierShift:
+def close_cashier_shift(
+    *, shift: CashierShift, closing_cash_uzs: Decimal, notes: str = "", actor=None
+) -> CashierShift:
     """Close a shift, computing `discrepancy = closing_cash - (opening_cash +
     cash payments in shift)`."""
+    shift = CashierShift.objects.select_for_update().get(pk=shift.pk)
+    if actor is None:
+        raise PermissionException(_("An identified cashier is required."), code="cashier_required")
+    if shift.cashier_id != getattr(actor, "id", None) and not getattr(actor, "is_superuser", False):
+        raise PermissionException(_("Only the shift cashier may close it."), code="out_of_scope")
     if shift.status == CashierShift.Status.CLOSED:
         raise ConflictException(_("Shift is already closed."), code="shift_closed")
     closing = Decimal(closing_cash_uzs).quantize(_CENT)
+    if closing < _ZERO:
+        raise ValidationException(_("Closing cash cannot be negative."), code="invalid_amount")
     cash_in = _shift_cash_total(shift)
     shift.closing_cash_uzs = closing
     shift.discrepancy_uzs = (closing - (shift.opening_cash_uzs + cash_in)).quantize(_CENT)
     shift.status = CashierShift.Status.CLOSED
     shift.closed_at = timezone.now()
+    shift.closed_by = actor
     if notes:
         shift.notes = notes
-    shift.save(update_fields=["closing_cash_uzs", "discrepancy_uzs", "status", "closed_at", "notes"])
+    shift.save(
+        update_fields=[
+            "closing_cash_uzs",
+            "discrepancy_uzs",
+            "status",
+            "closed_at",
+            "closed_by",
+            "notes",
+        ]
+    )
     return shift
 
 
@@ -935,7 +1040,7 @@ def _shift_cash_total(shift: CashierShift) -> Decimal:
 
 
 def emit_payment_reminders(*, today: date | None = None) -> int:
-    """Scan invoices with `due_date < today` in status issued/partially_paid and
+    """Scan invoices with ``due_date < today`` that still owe money and
     emit `payment_reminder` once per invoice per `payment_reminder_interval_days`
     cycle. Dedupe via a cache key so re-running the same day sends nothing.
     Returns the count of reminders emitted. Runs in the active tenant schema."""
@@ -946,10 +1051,16 @@ def emit_payment_reminders(*, today: date | None = None) -> int:
     interval = getattr(settings, "payment_reminder_interval_days", None) or 3
     schema = current_schema()
 
-    # Also flip past-due open invoices to `overdue` (status hygiene).
+    # Keep already-overdue rows in the scan. Excluding them after the first status
+    # flip meant an invoice could receive its first reminder but never a later
+    # interval's reminder.
     overdue = Invoice.objects.filter(
         due_date__lt=today,
-        status__in=(Invoice.Status.ISSUED, Invoice.Status.PARTIALLY_PAID),
+        status__in=(
+            Invoice.Status.ISSUED,
+            Invoice.Status.PARTIALLY_PAID,
+            Invoice.Status.OVERDUE,
+        ),
     ).select_related("student")
 
     emitted = 0
@@ -958,30 +1069,35 @@ def emit_payment_reminders(*, today: date | None = None) -> int:
     for invoice in overdue.iterator():
         if invoice.due_date is None:  # overdue filter excludes these; guard for typing/safety
             continue
+        # Invoice is an audited model. Use model.save() so the pre/post-save
+        # receivers persist the overdue transition; QuerySet.update() would make
+        # this compliance-relevant status change invisible in the audit trail.
+        if invoice.status != Invoice.Status.OVERDUE:
+            invoice.status = Invoice.Status.OVERDUE
+            invoice.save(update_fields=["status", "updated_at"])
         # Per-invoice dedupe bucket: floor(days_overdue / interval) so we emit at
         # most once per interval window; cache TTL covers the window.
         days_overdue = (today - invoice.due_date).days
         bucket = days_overdue // interval
+        # Carry the exact cycle used by the producer through to notification
+        # deduplication.  A receiver-side "today" fallback can collapse or repeat
+        # events when a queued signal is retried on another day.
+        reminder_cycle = f"{invoice.due_date.isoformat()}:{interval}:{bucket}"
         key = f"finance:reminder:{schema}:{invoice.pk}:{bucket}"
-        if cache.get(key) is not None:
+        # ``add`` is atomic on the production Redis backend. A get/set pair lets
+        # two Beat invocations both observe a miss and double-dispatch the cycle.
+        if not cache.add(key, 1, timeout=interval * 24 * 60 * 60):
             continue
-        cache.set(key, 1, timeout=interval * 24 * 60 * 60)
         student_id = invoice.student_id
         payment_reminder.send(
             sender=Invoice,
             invoice_id=invoice.pk,
             student_id=student_id,
+            reminder_cycle=reminder_cycle,
             schema_name=schema,
         )
         emitted += 1
 
-    # Mark them overdue (separate UPDATE, after the scan, so iteration is stable).
-    # PARTIALLY_PAID past-due bills are included: a partial payment must not park a
-    # delinquent invoice out of the OVERDUE state (R2-P2). PAID is excluded (settled).
-    Invoice.objects.filter(
-        due_date__lt=today,
-        status__in=(Invoice.Status.ISSUED, Invoice.Status.PARTIALLY_PAID),
-    ).update(status=Invoice.Status.OVERDUE)
     return emitted
 
 
@@ -1027,13 +1143,31 @@ def generate_statement(student_id: int, *, locale: str = "en") -> str:
 def create_expense(
     *, branch, description: str, amount_uzs: Decimal, category: str = "", created_by=None
 ) -> Expense:
-    return Expense.objects.create(
+    expense = Expense.objects.create(
         branch=branch,
         description=description,
         amount_uzs=amount_uzs,
         category=category,
         created_by=created_by,
     )
+    from apps.approvals.services import KIND_EXPENSE, create_request
+
+    approval = create_request(
+        kind=KIND_EXPENSE,
+        title=description[:200],
+        description=description,
+        amount_uzs=expense.amount_uzs,
+        branch=branch,
+        requested_by=created_by,
+        payload={
+            "expense_id": expense.pk,
+            "category": category,
+            "party_label": description[:200],
+        },
+    )
+    expense.approval_request = approval
+    expense.save(update_fields=["approval_request"])
+    return expense
 
 
 def _locked_expense(expense_id: int) -> Expense:
@@ -1045,40 +1179,49 @@ def _locked_expense(expense_id: int) -> Expense:
 
 @transaction.atomic
 def approve_expense(*, expense_id: int, actor=None) -> Expense:
-    expense = _locked_expense(expense_id)
-    if expense.status != Expense.Status.PENDING:
-        raise UnprocessableEntity(_("Only a pending expense can be approved."), code="expense_not_pending")
-    expense.status = Expense.Status.APPROVED
-    expense.approved_by = actor
-    expense.approved_at = timezone.now()
-    expense.save(update_fields=["status", "approved_by", "approved_at"])
+    expense = Expense.objects.filter(pk=expense_id).only("id", "approval_request_id").first()
+    if expense is None:
+        raise NotFoundException(_("Expense not found."), code="expense_not_found")
+    if expense.approval_request_id is None:
+        raise UnprocessableEntity(_("Expense has no approval request."), code="expense_approval_missing")
+    from apps.approvals.services import approve
+
+    approve(request_id=expense.approval_request_id, actor=actor)
+    expense.refresh_from_db()
     return expense
 
 
 @transaction.atomic
 def reject_expense(*, expense_id: int, reason: str = "", actor=None) -> Expense:
-    expense = _locked_expense(expense_id)
-    if expense.status not in (Expense.Status.PENDING, Expense.Status.APPROVED):
-        raise UnprocessableEntity(_("This expense can no longer be rejected."), code="expense_not_rejectable")
-    expense.status = Expense.Status.REJECTED
-    expense.reject_reason = reason
-    expense.approved_by = actor
-    expense.save(update_fields=["status", "reject_reason", "approved_by"])
+    expense = Expense.objects.filter(pk=expense_id).only("id", "approval_request_id").first()
+    if expense is None:
+        raise NotFoundException(_("Expense not found."), code="expense_not_found")
+    if expense.approval_request_id is None:
+        raise UnprocessableEntity(_("Expense has no approval request."), code="expense_approval_missing")
+    from apps.approvals.services import reject
+
+    reject(request_id=expense.approval_request_id, actor=actor, note=reason)
+    expense.refresh_from_db()
     return expense
 
 
 @transaction.atomic
 def pay_expense(*, expense_id: int, payment_method_id: int, actor=None) -> Expense:
-    """Disburse an APPROVED expense via a chosen (active) PaymentMethod."""
-    expense = _locked_expense(expense_id)
-    if expense.status != Expense.Status.APPROVED:
-        raise UnprocessableEntity(_("Only an approved expense can be paid."), code="expense_not_approved")
-    method = PaymentMethod.objects.filter(pk=payment_method_id, is_active=True).first()
-    if method is None:
-        raise UnprocessableEntity(_("Unknown or inactive payment method."), code="payment_method_invalid")
-    expense.status = Expense.Status.PAID
-    expense.payment_method = method
-    expense.paid_by = actor
-    expense.paid_at = timezone.now()
-    expense.save(update_fields=["status", "payment_method", "paid_by", "paid_at"])
+    """Disburse via the approval engine, which atomically appends the ledger row."""
+    expense = Expense.objects.filter(pk=expense_id).only("id", "approval_request_id").first()
+    if expense is None:
+        raise NotFoundException(_("Expense not found."), code="expense_not_found")
+    if expense.approval_request_id is None:
+        raise UnprocessableEntity(_("Expense has no approval request."), code="expense_approval_missing")
+    from apps.approvals.services import disburse
+
+    disburse(
+        request_id=expense.approval_request_id,
+        payment_method_id=payment_method_id,
+        actor=actor,
+        direction="out",
+        entry_type="expense",
+        party_label="",
+    )
+    expense.refresh_from_db()
     return expense

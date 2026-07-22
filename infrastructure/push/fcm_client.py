@@ -18,6 +18,7 @@ Return shape (both clients): ``{"success": bool, "message_id": str|None,
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from abc import ABC, abstractmethod
 from typing import Any, ClassVar
@@ -55,9 +56,10 @@ class MockFCMClient(PushClient):
             result = {"success": False, "message_id": None, "error": "unregistered", "mock": True}
         else:
             # Deterministic message id derived from the input — no randomness.
+            digest = hashlib.sha256(f"{token}\0{title}\0{body}".encode()).hexdigest()[:16]
             result = {
                 "success": True,
-                "message_id": f"mock-fcm-{abs(hash((token, title, body))) % 10**12:012d}",
+                "message_id": f"mock-fcm-{digest}",
                 "error": None,
                 "mock": True,
             }
@@ -92,19 +94,40 @@ class FCMClient(PushClient):
         from firebase_admin import messaging
 
         self._ensure_app()
+        payload = {k: str(v) for k, v in (data or {}).items()}
+        thread_id = payload.get("thread_id", "").strip()
         message = messaging.Message(
             notification=messaging.Notification(title=title, body=body),
-            data={k: str(v) for k, v in (data or {}).items()},
+            data=payload,
+            android=messaging.AndroidConfig(
+                priority="high",
+                notification=messaging.AndroidNotification(
+                    channel_id="starforge_messages",
+                    sound="default",
+                    tag=f"thread-{thread_id}" if thread_id else None,
+                    visibility="private",
+                ),
+            ),
+            apns=messaging.APNSConfig(
+                headers={"apns-priority": "10", "apns-push-type": "alert"},
+                payload=messaging.APNSPayload(
+                    aps=messaging.Aps(
+                        sound="default",
+                        category="STARFORGE_MESSAGE",
+                        thread_id=f"thread-{thread_id}" if thread_id else None,
+                    )
+                ),
+            ),
             token=token,
         )
         try:
             message_id = messaging.send(message)
             return {"success": True, "message_id": message_id, "error": None}
-        except messaging.UnregisteredError as exc:
-            return {"success": False, "message_id": None, "error": "unregistered", "detail": str(exc)}
+        except messaging.UnregisteredError:
+            return {"success": False, "message_id": None, "error": "unregistered"}
         except Exception as exc:  # pragma: no cover - real-mode network errors
-            logger.warning("FCM send failed: %s", exc)
-            return {"success": False, "message_id": None, "error": "send_failed", "detail": str(exc)}
+            logger.warning("FCM send failed (%s)", type(exc).__name__)
+            return {"success": False, "message_id": None, "error": "send_failed"}
 
 
 def get_push_client() -> PushClient:

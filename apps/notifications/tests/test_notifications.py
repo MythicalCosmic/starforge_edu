@@ -279,8 +279,11 @@ def test_absence_signal_end_to_end_guardian_gets_sms_and_in_app(
     with schema_context(tenant_a.schema_name):
         student = StudentProfileFactory()
         guardian = GuardianFactory(student=student, is_primary=True)
-        guardian.parent.user.phone = "+998901112233"
+        guardian.parent.phone = "+998901112233"
+        guardian.parent.save(update_fields=["phone"])
+        guardian.parent.user.phone = None
         guardian.parent.user.save(update_fields=["phone"])
+        assert guardian.parent.user.phone is None
 
         with django_capture_on_commit_callbacks(execute=True):
             student_marked_absent.send(
@@ -329,6 +332,7 @@ def test_absence_signal_double_fire_dedupes(tenant_a, sms_outbox):
 @time_machine.travel("2026-06-10 12:00 +05:00", tick=False)
 def test_dead_token_cleared_after_three_push_failures(tenant_a, user_in, django_capture_on_commit_callbacks):
     from apps.users.models import Device
+    from core.session_auth import create_session
     from infrastructure.push.fcm_client import MockFCMClient
 
     MockFCMClient.outbox.clear()
@@ -338,6 +342,7 @@ def test_dead_token_cleared_after_three_push_failures(tenant_a, user_in, django_
         device = Device.objects.create(
             user=user, device_id="d1", platform="android", push_token="dead-token-xyz"
         )
+        create_session(user, device_id="d1")
         # push-only dispatch x3 -> 3rd is the dead-token flip. Each dispatch
         # queues the fan-out via on_commit, so each runs in its own capture
         # block (the delivery history accumulates across the three runs).

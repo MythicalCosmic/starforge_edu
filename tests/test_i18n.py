@@ -128,7 +128,7 @@ def test_missing_variant_falls_back_and_logs_warning(tenant_a):
 
 def test_in_app_template_completeness_uz_en_ru(tenant_a):
     """Every in-app event type carries uz + en + ru rows (D4-LF-3 completeness)."""
-    from apps.notifications.models import Channel, NotificationTemplate
+    from apps.notifications.models import Channel, EventType, NotificationTemplate
 
     with schema_context(tenant_a.schema_name):
         rows = NotificationTemplate.objects.filter(channel=Channel.IN_APP, is_active=True)
@@ -137,6 +137,8 @@ def test_in_app_template_completeness_uz_en_ru(tenant_a):
             by_event.setdefault(row.event_type, set()).add(row.locale)
 
     assert by_event, "no in-app templates seeded"
+    missing_events = set(EventType.values) - set(by_event)
+    assert not missing_events, f"event types missing in-app templates: {sorted(missing_events)}"
     incomplete = {ev: locales for ev, locales in by_event.items() if {"uz", "en", "ru"} - locales}
     assert not incomplete, f"in-app events missing locale variants: {incomplete}"
 

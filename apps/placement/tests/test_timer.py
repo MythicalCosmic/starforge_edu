@@ -43,9 +43,7 @@ def _setup(tenant, user_in, as_user, *, minutes):
     hod_u = user_in(tenant, roles=[Role.HEAD_OF_DEPT], branch=branch)
     lead_u = user_in(tenant, roles=[Role.STUDENT], branch=branch)
     with schema_context(tenant.schema_name):
-        lead = StudentProfileFactory.create(
-            user=lead_u, branch=branch, status=StudentProfile.Status.LEAD
-        )
+        lead = StudentProfileFactory.create(user=lead_u, branch=branch, status=StudentProfile.Status.LEAD)
     test, q = _approved_test(tenant, branch, teacher_u, hod_u, minutes=minutes)
     return {
         "branch": branch,
@@ -103,9 +101,7 @@ def test_submit_after_deadline_is_rejected(tenant_a, user_in, as_user):
     with schema_context(tenant_a.schema_name):
         from apps.placement.models import PlacementAttempt
 
-        PlacementAttempt.objects.filter(pk=aid).update(
-            expires_at=timezone.now() - timedelta(minutes=1)
-        )
+        PlacementAttempt.objects.filter(pk=aid).update(expires_at=timezone.now() - timedelta(minutes=1))
     res = s["lead_c"].post(
         f"{ATTEMPTS}{aid}/submit/",
         {"answers": [{"question": s["q"].id, "response": "4"}]},

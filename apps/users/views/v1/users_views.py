@@ -25,13 +25,11 @@ from core.exceptions import NotFoundException, ValidationException
 from core.http import read_json, str_field
 from core.listing import apply_filters, paginate
 from core.responses import created, error, no_content, paginated, success
-from core.utils import user_agent
+from core.utils import current_schema, user_agent
 
 _GENDERS = frozenset(g[0] for g in User.Gender.choices)
 _LANGUAGES = frozenset(lang[0] for lang in User.Language.choices)
 _PLATFORMS = frozenset(p[0] for p in Device.PLATFORM_CHOICES)
-_TRUE = frozenset({"true", "1", "yes", "y", "t", "on"})
-_FALSE = frozenset({"false", "0", "no", "n", "f", "off"})
 
 
 def _service() -> IUserService:
@@ -143,9 +141,8 @@ def _me_changes(request: HttpRequest) -> dict[str, Any]:
     # birthdate: nullable date.
     if "birthdate" in data:
         changes["birthdate"] = _date_value(data["birthdate"])
-    # is_active: NOT-NULL bool (strict DRF-parity coercion; reject null/garbage).
     if "is_active" in data:
-        changes["is_active"] = _bool_value(_reject_null(data["is_active"], "is_active"))
+        raise _reject("is_active", "Account activation can only be changed by an administrator.")
     return changes
 
 
@@ -181,18 +178,6 @@ def _date_value(raw: Any) -> Any:
     return parsed
 
 
-def _bool_value(raw: Any) -> bool:
-    if isinstance(raw, bool):
-        return raw
-    if isinstance(raw, str):
-        low = raw.lower()
-        if low in _TRUE:
-            return True
-        if low in _FALSE:
-            return False
-    raise _reject("is_active", "Must be a boolean.")
-
-
 # --- views ------------------------------------------------------------------
 
 
@@ -224,8 +209,14 @@ def user_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
 def me_view(request: HttpRequest) -> HttpResponse:
     user: Any = request.user
     kind, account = _role_account(request)
+
+    def payload() -> dict[str, Any]:
+        profile = role_account_to_dict(kind, account) if account is not None else user_to_dict(user)
+        profile["tenant_slug"] = current_schema()
+        return profile
+
     if request.method in ("GET", "HEAD"):
-        return success(role_account_to_dict(kind, account) if account is not None else user_to_dict(user))
+        return success(payload())
     if request.method == "PATCH":
         # Self-scoped write with no perm code -> reinstate the read-only-token deny
         # the old DenyWriteForReadOnlyToken gave (an impersonating admin must not
@@ -233,6 +224,11 @@ def me_view(request: HttpRequest) -> HttpResponse:
         deny_read_only_token(request)
         if account is not None:
             body = read_json(request)
+            if "is_active" in body:
+                raise _reject(
+                    "is_active",
+                    "Account activation can only be changed by an administrator.",
+                )
             changes = {
                 field: body[field]
                 for field in ("first_name", "last_name", "middle_name", "phone", "email")
@@ -249,9 +245,11 @@ def me_view(request: HttpRequest) -> HttpResponse:
             from apps.users.services import update_role_identity
 
             update_role_identity(account, changes)
-            return success(role_account_to_dict(kind, account))
+            return success(payload())
         updated = _service().update_me(user=user, changes=_me_changes(request))
-        return success(user_to_dict(updated))
+        profile = user_to_dict(updated)
+        profile["tenant_slug"] = current_schema()
+        return success(profile)
     return _method_not_allowed()
 
 

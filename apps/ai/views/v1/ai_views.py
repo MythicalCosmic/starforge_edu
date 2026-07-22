@@ -28,8 +28,8 @@ from core.listing import apply_filters, paginate
 from core.permissions import _request_overrides, get_user_roles, has_permission_code
 from core.ratelimit import check_rate
 from core.responses import error, paginated, success
+from core.tenant_context import assert_tenant_context
 from core.utils import current_schema
-from core.viewsets import assert_tenant_context
 
 
 def _service() -> IAIService:

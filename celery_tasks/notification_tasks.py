@@ -41,15 +41,14 @@ def dispatch_notification(notification_id: int, *, channels: list[str] | None = 
         ALL_CHANNELS,
         channel_enabled_for_user,
         in_quiet_hours,
+        operator_channel_enabled,
         quiet_hours_eta,
         render_template,
     )
     from apps.org.selectors import get_center_settings
 
     try:
-        notification = (
-            Notification.objects.select_for_update().select_related("user").get(pk=notification_id)
-        )
+        notification = Notification.objects.select_for_update().select_related("user").get(pk=notification_id)
     except Notification.DoesNotExist:
         logger.warning("dispatch_notification: notification %s gone", notification_id)
         return {"notification_id": notification_id, "status": "missing"}
@@ -70,6 +69,16 @@ def dispatch_notification(notification_id: int, *, channels: list[str] | None = 
         # (notification, channel) — never double-send on a Celery retry.
         if _channel_is_complete(notification, channel):
             results[channel] = "already_handled"
+            continue
+
+        if not operator_channel_enabled(channel):
+            _record(
+                notification,
+                channel,
+                NotificationDelivery.Status.SKIPPED_DISABLED,
+                provider_response={"reason": "operator_disabled"},
+            )
+            results[channel] = "skipped_disabled"
             continue
 
         if not channel_enabled_for_user(user_id=user.pk, event_type=event_type, channel=channel):
@@ -164,7 +173,7 @@ def deliver_single_channel(
     from datetime import datetime
 
     from apps.notifications.models import Notification, NotificationDelivery
-    from apps.notifications.services import render_template
+    from apps.notifications.services import operator_channel_enabled, render_template
 
     if deferred_to:
         scheduled = datetime.fromisoformat(deferred_to)
@@ -174,9 +183,7 @@ def deliver_single_channel(
             return "still_deferred"
 
     try:
-        notification = (
-            Notification.objects.select_for_update().select_related("user").get(pk=notification_id)
-        )
+        notification = Notification.objects.select_for_update().select_related("user").get(pk=notification_id)
     except Notification.DoesNotExist:
         return "missing"
 
@@ -187,6 +194,20 @@ def deliver_single_channel(
     # quiet-hours path never double-sends a paid SMS / push.
     if _channel_is_complete(notification, channel):
         return "already_delivered"
+
+    if not operator_channel_enabled(channel):
+        NotificationDelivery.objects.filter(
+            notification=notification,
+            channel=channel,
+            status=NotificationDelivery.Status.SKIPPED_QUIET_HOURS,
+        ).delete()
+        _record(
+            notification,
+            channel,
+            NotificationDelivery.Status.SKIPPED_DISABLED,
+            provider_response={"reason": "operator_disabled"},
+        )
+        return "skipped_disabled"
 
     NotificationDelivery.objects.filter(
         notification=notification,
@@ -283,6 +304,7 @@ def _channel_is_complete(notification, channel: str) -> bool:
     terminal = {
         NotificationDelivery.Status.SENT,
         NotificationDelivery.Status.SKIPPED_PREF,
+        NotificationDelivery.Status.SKIPPED_DISABLED,
         NotificationDelivery.Status.DEAD_TOKEN,
     }
     if channel != Channel.PUSH:
@@ -295,16 +317,14 @@ def _channel_is_complete(notification, channel: str) -> bool:
             for row in rows
         )
 
-    if any(row["status"] == NotificationDelivery.Status.SKIPPED_PREF for row in rows):
+    if any(
+        row["status"]
+        in (NotificationDelivery.Status.SKIPPED_PREF, NotificationDelivery.Status.SKIPPED_DISABLED)
+        for row in rows
+    ):
         return True
 
-    from apps.users.models import Device
-
-    active_device_ids = set(
-        Device.objects.filter(user=notification.user, revoked_at__isnull=True)
-        .exclude(push_token="")
-        .values_list("device_id", flat=True)
-    )
+    active_device_ids = set(_active_push_devices(notification.user).values_list("device_id", flat=True))
     if not active_device_ids:
         return bool(rows)
 
@@ -314,13 +334,40 @@ def _channel_is_complete(notification, channel: str) -> bool:
         if (response := row["provider_response"] or {}).get("device_id")
         and (
             row["status"] in terminal
-            or (
-                row["status"] == NotificationDelivery.Status.FAILED
-                and not response.get("retryable", False)
-            )
+            or (row["status"] == NotificationDelivery.Status.FAILED and not response.get("retryable", False))
         )
     }
     return active_device_ids.issubset(complete_device_ids)
+
+
+def _active_push_devices(user):
+    """Return push devices backed by a live session for this exact device.
+
+    A token can outlive logout, password reset, or an expired app session. Push
+    must follow the same authorization boundary as the API, so a registered
+    token alone is never sufficient to receive private notification content.
+    """
+    from django.db.models import Exists, OuterRef
+
+    from apps.users.models import Device, Session
+
+    active_sessions = Session.objects.filter(
+        user_id=user.pk,
+        device_id=OuterRef("device_id"),
+        revoked_at__isnull=True,
+        expires_at__gt=timezone.now(),
+        read_only=False,
+    )
+    return (
+        Device.objects.filter(
+            user=user,
+            user__is_active=True,
+            revoked_at__isnull=True,
+        )
+        .exclude(push_token="")
+        .annotate(has_active_session=Exists(active_sessions))
+        .filter(has_active_session=True)
+    )
 
 
 def _record_retryable_failure(notification, channel: str, exc: Exception, **extra):
@@ -363,7 +410,7 @@ def _deliver_sms(notification, user, text) -> str:
     from apps.notifications.models import Channel, NotificationDelivery
     from infrastructure.sms.eskiz_client import get_sms_client
 
-    phone = getattr(user, "phone", None)
+    phone = _role_contact(user, "phone")
     if not phone:
         _record(
             notification,
@@ -381,7 +428,7 @@ def _deliver_email(notification, user, subject, body) -> str:
     from apps.notifications.models import Channel, NotificationDelivery
     from infrastructure.email.email_client import send_email
 
-    email = getattr(user, "email", None)
+    email = _role_contact(user, "email")
     if not email:
         _record(
             notification,
@@ -396,12 +443,13 @@ def _deliver_email(notification, user, subject, body) -> str:
 
 
 def _deliver_push(notification, user, title, body, context) -> str:
-    """Send to every non-revoked device; clear a token after 3 consecutive fails."""
+    """Send to devices with a live session; clear dead provider tokens."""
     from apps.notifications.models import Channel, NotificationDelivery
     from apps.users.models import Device
+    from core.utils import current_schema
     from infrastructure.push.fcm_client import get_push_client
 
-    devices = list(Device.objects.filter(user=user, revoked_at__isnull=True).exclude(push_token=""))
+    devices = list(_active_push_devices(user))
     if not devices:
         _record(
             notification,
@@ -423,36 +471,23 @@ def _deliver_push(notification, user, title, body, context) -> str:
                 token=device.push_token,
                 title=title,
                 body=body,
-                data={k: str(v) for k, v in context.items()},
+                data={
+                    **{k: str(v) for k, v in context.items()},
+                    "event_type": notification.event_type,
+                    "notification_id": str(notification.pk),
+                    "tenant_slug": current_schema(),
+                },
             )
         except Exception as exc:
-            failure_status = NotificationDelivery.Status.FAILED
-            if (
-                _consecutive_push_failures(user_id=user.pk, device_id=device.device_id) + 1
-                >= PUSH_DEAD_TOKEN_THRESHOLD
-            ):
-                Device.objects.filter(pk=device.pk).update(push_token="")
-                failure_status = NotificationDelivery.Status.DEAD_TOKEN
-                any_dead = True
-            if failure_status == NotificationDelivery.Status.FAILED:
-                _record_retryable_failure(
-                    notification,
-                    Channel.PUSH,
-                    exc,
-                    device_id=device.device_id,
-                )
-                retry_error = exc
-            else:
-                _record(
-                    notification,
-                    Channel.PUSH,
-                    failure_status,
-                    provider_response={
-                        "device_id": device.device_id,
-                        "error": type(exc).__name__,
-                        "retryable": False,
-                    },
-                )
+            # Dependency, credential, timeout, and provider outages say nothing
+            # about token validity. Never erase a token for a generic exception.
+            _record_retryable_failure(
+                notification,
+                Channel.PUSH,
+                exc,
+                device_id=device.device_id,
+            )
+            retry_error = exc
             continue
         if response.get("success"):
             any_sent = True
@@ -462,7 +497,7 @@ def _deliver_push(notification, user, title, body, context) -> str:
                 NotificationDelivery.Status.SENT,
                 provider_response={"device_id": device.device_id, **response},
             )
-        else:
+        elif response.get("error") == "unregistered":
             failure_status = NotificationDelivery.Status.FAILED
             if (
                 _consecutive_push_failures(user_id=user.pk, device_id=device.device_id) + 1
@@ -478,11 +513,44 @@ def _deliver_push(notification, user, title, body, context) -> str:
                 failure_status,
                 provider_response={"device_id": device.device_id, **response},
             )
+        else:
+            failure_exc = RetryableDeliveryError(str(response.get("error") or "push provider failure"))
+            _record_retryable_failure(
+                notification,
+                Channel.PUSH,
+                failure_exc,
+                device_id=device.device_id,
+            )
+            retry_error = failure_exc
     if retry_error is not None:
         raise RetryableDeliveryError("push notification delivery failed") from retry_error
     if any_sent:
         return "sent"
     return "dead_token" if any_dead else "failed"
+
+
+def _role_contact(user, field: str) -> str:
+    """Resolve delivery contacts from the role principal, not its hidden User bridge.
+
+    A legacy user can be linked to multiple profiles. Identical values are safe;
+    conflicting values fail closed rather than notifying the wrong person.
+    """
+    from django.core.exceptions import ObjectDoesNotExist
+
+    values: set[str] = set()
+    for relation in ("student_profile", "teacher_profile", "parent_profile", "staff_profile"):
+        try:
+            profile = getattr(user, relation)
+        except ObjectDoesNotExist:
+            continue
+        value = str(getattr(profile, field, "") or "").strip()
+        if value and getattr(profile, "is_active", True):
+            values.add(value)
+    if len(values) == 1:
+        return values.pop()
+    if len(values) > 1:
+        return ""
+    return str(getattr(user, field, "") or "").strip()
 
 
 def _push_device_is_complete(notification, device_id: str) -> bool:
@@ -584,6 +652,9 @@ def dispatch_many_chunk(
     sent = 0
     for uid in user_ids:
         dedupe_key = f"{dedupe_prefix}:{uid}" if dedupe_prefix else None
-        if dispatch(event_type=event_type, recipient_id=uid, context=context, dedupe_key=dedupe_key) is not None:
+        if (
+            dispatch(event_type=event_type, recipient_id=uid, context=context, dedupe_key=dedupe_key)
+            is not None
+        ):
             sent += 1
     return sent

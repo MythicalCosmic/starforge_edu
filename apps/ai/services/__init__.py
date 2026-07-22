@@ -44,11 +44,21 @@ class AIBudgetExceeded(StarforgeError):
 
 
 class AIFeatureDisabled(StarforgeError):
-    """403 when a feature is gated off via CenterSettings (D4-LA-7)."""
+    """403 when AI or one AI feature is disabled (D4-LA-7)."""
 
     code = "feature_disabled"
     status_code = status.HTTP_403_FORBIDDEN
-    default_detail = _("This AI feature is disabled for your center.")
+    default_detail = _("This AI feature is currently disabled.")
+
+
+def ai_enabled() -> bool:
+    """Global operator switch for all model-provider work."""
+    return bool(getattr(settings, "AI_ENABLED", True))
+
+
+def ensure_ai_enabled() -> None:
+    if not ai_enabled():
+        raise AIFeatureDisabled()
 
 
 @dataclass(frozen=True)
@@ -109,6 +119,7 @@ def _get_budget_locked() -> TenantAIBudget:
 
 def active_prompt(feature: str) -> AIPrompt:
     """The active prompt version for ``feature`` (422 if none seeded)."""
+    ensure_ai_enabled()
     try:
         return AIPrompt.objects.get(feature=feature, is_active=True)
     except AIPrompt.DoesNotExist as exc:
@@ -170,6 +181,7 @@ def check_and_reserve_budget(
     row MUST survive the raised exception, so it is committed in its own atomic
     block before raising (an outer rollback would otherwise discard it).
     """
+    ensure_ai_enabled()
     prompt = active_prompt(feature)
     key = make_idempotency_key(
         feature=feature, source_app=source_app, source_id=source_id, version=prompt.version, params=params

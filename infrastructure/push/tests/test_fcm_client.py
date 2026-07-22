@@ -6,7 +6,7 @@ token containing "dead" reports failure so the bounce path is testable.
 
 from __future__ import annotations
 
-from infrastructure.push.fcm_client import MockFCMClient, PushClient, get_push_client
+from infrastructure.push.fcm_client import FCMClient, MockFCMClient, PushClient, get_push_client
 
 
 def test_get_push_client_returns_mock_by_default():
@@ -46,3 +46,32 @@ def test_fcm_module_imports_without_firebase_admin():
 
     module = importlib.import_module("infrastructure.push.fcm_client")
     assert module is not None
+
+
+def test_real_fcm_message_has_private_chat_routing_metadata(monkeypatch):
+    from firebase_admin import messaging
+
+    captured = []
+    client = FCMClient(credentials_file="unused-in-test.json")
+    monkeypatch.setattr(client, "_ensure_app", lambda: object())
+    monkeypatch.setattr(messaging, "send", lambda message: captured.append(message) or "fcm-1")
+
+    result = client.send(
+        token="device-token",
+        title="New message",
+        body="You received a new message.",
+        data={"thread_id": "42", "message_id": "8"},
+    )
+
+    assert result == {"success": True, "message_id": "fcm-1", "error": None}
+    message = captured[0]
+    assert message.data == {"thread_id": "42", "message_id": "8"}
+    assert message.android.priority == "high"
+    assert message.android.notification.channel_id == "starforge_messages"
+    # No custom click action: Android's launcher intent is always available and
+    # firebase_messaging still receives the tap payload for deep-link routing.
+    assert message.android.notification.click_action is None
+    assert message.android.notification.tag == "thread-42"
+    assert message.apns.payload.aps.thread_id == "thread-42"
+    # Privacy contract: no actual chat body is ever placed in data.
+    assert "body" not in message.data

@@ -17,7 +17,9 @@ class MeetingService(IMeetingService):
     def __init__(self, meetings: IMeetingRepository) -> None:
         self._meetings = meetings
 
-    def scoped_list(self, *, user, is_unscoped: bool, is_manager: bool, branch_ids: set[int]) -> QuerySet[StaffMeeting]:
+    def scoped_list(
+        self, *, user, is_unscoped: bool, is_manager: bool, branch_ids: set[int]
+    ) -> QuerySet[StaffMeeting]:
         return self._meetings.scoped(
             user=user, is_unscoped=is_unscoped, is_manager=is_manager, branch_ids=branch_ids
         )
@@ -32,7 +34,7 @@ class MeetingService(IMeetingService):
     def upcoming_for(self, user) -> QuerySet[StaffMeeting]:
         return self._meetings.upcoming_for(user)
 
-    def schedule(self, data: ScheduleMeetingDTO, *, created_by) -> StaffMeeting:
+    def schedule(self, data: ScheduleMeetingDTO, *, created_by, branch, attendees: list) -> StaffMeeting:
         from apps.meetings.services import schedule_meeting
 
         return schedule_meeting(
@@ -41,9 +43,9 @@ class MeetingService(IMeetingService):
             starts_at=data.starts_at,
             ends_at=data.ends_at,
             location=data.location,
-            attendees=self._resolve_attendees(data.attendee_ids),
+            attendees=attendees,
             created_by=created_by,
-            branch=self.resolve_branch(data.branch_id),
+            branch=branch,
         )
 
     def cancel(self, meeting: StaffMeeting, *, actor) -> StaffMeeting:
@@ -70,9 +72,10 @@ class MeetingService(IMeetingService):
         return branch
 
     @staticmethod
-    def _resolve_attendees(ids: list[int]) -> list:
+    def resolve_attendees(ids: list[int]) -> list:
+        from apps.access.models import AccountType
         from apps.users.models import User
-        from core.permissions import Role
+        from core.permissions import role_memberships_for_account_kinds
 
         if not ids:
             raise ValidationException(
@@ -82,14 +85,15 @@ class MeetingService(IMeetingService):
             )
         # Meetings are staff coordination — invitees must be active staff (not students/
         # parents), mirroring the old ScheduleMeetingSerializer attendees queryset.
-        staff_roles = tuple(r for r in Role.ALL if r not in (Role.STUDENT, Role.PARENT))
+        staff_memberships = role_memberships_for_account_kinds(
+            (AccountType.AccountKind.STAFF, AccountType.AccountKind.TEACHER)
+        )
         deduped = list(dict.fromkeys(ids))
         users = list(
             User.objects.filter(
                 pk__in=deduped,
                 is_active=True,
-                role_memberships__revoked_at__isnull=True,
-                role_memberships__role__in=staff_roles,
+                role_memberships__in=staff_memberships,
             ).distinct()
         )
         if len(users) != len(deduped):

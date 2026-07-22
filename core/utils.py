@@ -4,18 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import secrets
-from typing import TYPE_CHECKING
+from typing import Any, Protocol
 
 from django.conf import settings
 from django.db import connection
 
-if TYPE_CHECKING:
-    from django.http import HttpRequest
-    from rest_framework.request import Request
 
-    # Both the DRF Request and a plain Django HttpRequest expose ``.META`` — these
-    # helpers serve both view styles during the off-DRF migration.
-    AnyRequest = HttpRequest | Request
+class AnyRequest(Protocol):
+    """Structural request type shared by Django and DRF request objects."""
+
+    META: dict[str, Any]
 
 
 def current_schema() -> str:

@@ -2,8 +2,8 @@
 
 The migrated plain FBVs bypass DRF dispatch, so DRF's UserRateThrottle /
 AnonRateThrottle no longer cover them — this middleware restores the blanket
-caps for BOTH view styles. Buckets: per Bearer token (hashed) at the user rate,
-per client IP at the anon rate. The autouse ``_clear_cache`` fixture resets the
+caps for BOTH view styles. Buckets: pre-authentication client IP plus stable user
+id after successful authentication. The autouse ``_clear_cache`` fixture resets the
 buckets around every test.
 """
 
@@ -42,7 +42,7 @@ def test_anon_flood_is_throttled_with_envelope(tenant_a, client_for):
 
 
 @override_settings(API_RATELIMIT_USER="2/min")
-def test_authenticated_flood_is_throttled_per_token(tenant_a, as_role):
+def test_authenticated_flood_is_throttled_per_user(tenant_a, as_role):
     client, _ = as_role(Role.DIRECTOR)
     assert client.get(URL).status_code == 200
     assert client.get(URL).status_code == 200
@@ -51,6 +51,16 @@ def test_authenticated_flood_is_throttled_per_token(tenant_a, as_role):
     # A DIFFERENT user's token is a separate bucket — not collateral damage.
     other, _ = as_role(Role.TEACHER)
     assert other.get(URL).status_code == 200
+
+
+@override_settings(API_RATELIMIT_PREAUTH="2/min", API_RATELIMIT_ANON="100/min")
+def test_rotating_invalid_bearers_cannot_bypass_ip_cap(tenant_a, client_for):
+    client = client_for(tenant_a)
+    for token in ("random-one", "random-two"):
+        client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+        assert client.get(URL).status_code == 401
+    client.credentials(HTTP_AUTHORIZATION="Bearer random-three")
+    assert client.get(URL).status_code == 429
 
 
 @override_settings(API_RATELIMIT_ANON="1/min")

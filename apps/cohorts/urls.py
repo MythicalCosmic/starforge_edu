@@ -14,10 +14,18 @@ from apps.cohorts.views.v1.cohort_views import (
     cohort_teachers_view,
     cohort_unarchive_view,
     cohorts_collection_view,
+    teacher_type_detail_view,
+    teacher_types_collection_view,
 )
 
 urlpatterns = [
     path("", cohorts_collection_view, name="cohorts-collection"),
+    path("teacher-types/", teacher_types_collection_view, name="teacher-types-collection"),
+    path(
+        "teacher-types/<int:type_id>/",
+        teacher_type_detail_view,
+        name="teacher-types-detail",
+    ),
     path("<int:pk>/", cohort_detail_view, name="cohorts-detail"),
     path("<int:pk>/enroll/", cohort_enroll_view, name="cohorts-enroll"),
     path("<int:pk>/move-student/", cohort_move_student_view, name="cohorts-move-student"),
@@ -25,7 +33,7 @@ urlpatterns = [
     path("<int:pk>/members/", cohort_members_view, name="cohorts-members"),
     path("<int:pk>/teachers/", cohort_teachers_view, name="cohorts-teachers"),
     path(
-        "<int:pk>/teachers/<int:teacher_id>/",
+        "<int:pk>/teachers/<int:assignment_id>/",
         cohort_teacher_detail_view,
         name="cohorts-teacher-detail",
     ),

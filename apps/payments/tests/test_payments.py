@@ -185,7 +185,7 @@ def test_refund_on_non_completed_payment_rejected(invoice_a):
             services.refund_payment(payment_id=payment.pk, reason="oops")
 
 
-def test_refund_completed_payment_drives_finance_refund(invoice_a):
+def test_manual_online_refund_stays_requested_until_provider_confirmation(invoice_a):
     tenant_a, inv = invoice_a
     from apps.finance import selectors as finance_selectors
     from apps.finance.models import Invoice, Refund
@@ -207,22 +207,24 @@ def test_refund_completed_payment_drives_finance_refund(invoice_a):
         assert inv.status == Invoice.Status.PAID
         assert finance_selectors.outstanding_balance(inv.student_id) == Decimal("0.00")
 
-        services.refund_payment(payment_id=payment.pk, reason="customer_request")
+        _payment, refund = services.refund_payment(payment_id=payment.pk, reason="customer_request")
         payment.refresh_from_db()
-        assert payment.status == Payment.Status.REFUNDED
+        assert payment.status == Payment.Status.COMPLETED
 
-        refund = Refund.objects.filter(payment_id=payment.pk).first()
-        assert refund is not None
-        assert refund.state == Refund.State.COMPLETED
+        refund.refresh_from_db()
+        assert refund.state == Refund.State.REQUESTED
+        assert refund.provider == Payment.Method.CLICK
+        assert refund.provider_confirmed_at is None
 
-        # BLOCKER fix: the refund must REVERSE the allocation + invoice status, so
-        # the invoice is no longer PAID and the outstanding balance is restored.
+        # An operator request is not proof that an online provider returned the
+        # money. Accounting remains unchanged until a signed provider event calls
+        # register_refund_completion.
         inv.refresh_from_db()
-        assert inv.status == Invoice.Status.ISSUED, "refunded invoice must leave PAID"
+        assert inv.status == Invoice.Status.PAID
         from apps.finance.models import PaymentAllocation
 
-        assert PaymentAllocation.objects.filter(payment_id=payment.pk).count() == 0
-        assert finance_selectors.outstanding_balance(inv.student_id) == Decimal(AMOUNT_UZS)
+        assert PaymentAllocation.objects.filter(payment_id=payment.pk).count() == 1
+        assert finance_selectors.outstanding_balance(inv.student_id) == Decimal("0.00")
 
 
 def test_refund_explicit_zero_amount_is_rejected_not_full_refund(invoice_a):
@@ -256,7 +258,7 @@ def test_refund_cannot_be_applied_twice(invoice_a):
     payment is no longer COMPLETED, and the net-paid guard would also block it."""
     tenant_a, inv = invoice_a
     from apps.payments import services
-    from core.exceptions import UnprocessableEntity
+    from core.exceptions import ValidationException
 
     with schema_context(tenant_a.schema_name):
         payment = services.process_click_complete(
@@ -268,7 +270,7 @@ def test_refund_cannot_be_applied_twice(invoice_a):
             invoice=inv,
         )
         services.refund_payment(payment_id=payment.pk, reason="first")
-        with pytest.raises(UnprocessableEntity):
+        with pytest.raises(ValidationException):
             services.refund_payment(payment_id=payment.pk, reason="second")
 
 
@@ -363,9 +365,7 @@ def test_uzum_complete_rejects_amount_mismatch(invoice_a):
 # every real Click/Uzum callback resolve to number="<pk>" (no such invoice) so
 # the payment was ACKed to the provider yet the invoice was never credited.
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize(
-    ("provider", "ref_key"), [("click", "merchant_trans_id"), ("uzum", "order_id")]
-)
+@pytest.mark.parametrize(("provider", "ref_key"), [("click", "merchant_trans_id"), ("uzum", "order_id")])
 def test_checkout_merchant_ref_is_invoice_number_not_pk(invoice_a, provider, ref_key):
     tenant_a, inv = invoice_a
     from apps.payments import services
@@ -395,9 +395,7 @@ def test_click_complete_credits_fractional_invoice_at_rounded_soum(tenant_a):
     inv = helpers.seed_open_invoice(tenant_a, number="INV-2026-000777", amount_uzs="149999.99")
     with schema_context(tenant_a.schema_name):
         # Checkout charges the whole-soum rounded figure (149999.99 -> 150000).
-        payload = services.create_checkout(
-            invoice_id=inv.id, provider="click", idempotency_key="co-frac-1"
-        )
+        payload = services.create_checkout(invoice_id=inv.id, provider="click", idempotency_key="co-frac-1")
         assert "amount=150000" in payload["redirect_url"]
         # The provider reports the amount it charged; the webhook must accept it.
         payment = services.process_click_complete(
@@ -501,9 +499,7 @@ def test_cash_payment_stamps_shift_and_shows_in_report(invoice_a, user_in):
 
     cashier = user_in(tenant_a, roles=[Role.CASHIER])
     with schema_context(tenant_a.schema_name):
-        from apps.org.tests.factories import BranchFactory
-
-        branch = BranchFactory()
+        branch = inv.student.branch
         shift = finance_services.open_cashier_shift(
             cashier=cashier, branch=branch, opening_cash_uzs=Decimal("10000.00")
         )
@@ -519,7 +515,9 @@ def test_cash_payment_stamps_shift_and_shows_in_report(invoice_a, user_in):
         assert report["payments_total_uzs"] == AMOUNT_UZS
 
         # discrepancy = closing - (opening + cash_in); cash_in is now non-zero
-        closed = finance_services.close_cashier_shift(shift=shift, closing_cash_uzs=Decimal("160000.00"))
+        closed = finance_services.close_cashier_shift(
+            shift=shift, closing_cash_uzs=Decimal("160000.00"), actor=cashier
+        )
         # 160000 - (10000 + 150000) == 0
         assert closed.discrepancy_uzs == Decimal("0.00")
 
@@ -643,3 +641,52 @@ def test_allocate_manual_rejects_over_payment_amount(tenant_a):
                 payment_id=payment.pk,
                 allocations=[{"invoice": inv.pk, "amount": Decimal("90000.00")}],
             )
+
+
+def test_payment_detail_eager_data_and_receipt_head_has_no_enqueue(
+    tenant_a,
+    user_in,
+    as_user,
+    monkeypatch,
+):
+    from apps.payments import services
+    from apps.payments.models import FiscalReceipt, Payment, PaymentAttempt
+    from core.permissions import Role
+
+    invoice = helpers.seed_open_invoice(
+        tenant_a,
+        number="INV-PAYMENT-DETAIL-1",
+        amount_uzs="100.00",
+    )
+    with schema_context(tenant_a.schema_name):
+        payment = Payment.objects.create(
+            provider=Payment.Method.CLICK,
+            amount_uzs=Decimal("100.00"),
+            status=Payment.Status.COMPLETED,
+            idempotency_key="payment-detail-eager-1",
+            account_ref=invoice.number,
+        )
+        FiscalReceipt.objects.create(payment=payment)
+        attempt = PaymentAttempt.objects.create(payment=payment, attempt_no=1, error_code="")
+        branch = invoice.student.branch
+
+    actor = user_in(tenant_a, roles=[Role.ACCOUNTANT], branch=branch)
+    client = as_user(tenant_a, actor)
+    queued: list[tuple[int, str]] = []
+    monkeypatch.setattr(
+        services,
+        "enqueue_receipt_pdf",
+        lambda payment_id, schema: queued.append((payment_id, schema)),
+    )
+
+    detail = client.get(f"/api/v1/payments/{payment.pk}/")
+    assert detail.status_code == 200, detail.content
+    assert detail.json()["data"]["fiscal_receipt"]["status"] == FiscalReceipt.Status.PENDING
+    assert [row["id"] for row in detail.json()["data"]["attempts"]] == [attempt.pk]
+
+    head = client.head(f"/api/v1/payments/{payment.pk}/receipt/")
+    assert head.status_code == 202
+    assert queued == []
+    get = client.get(f"/api/v1/payments/{payment.pk}/receipt/")
+    assert get.status_code == 202
+    assert queued == [(payment.pk, tenant_a.schema_name)]

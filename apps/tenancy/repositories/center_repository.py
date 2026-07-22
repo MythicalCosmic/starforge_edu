@@ -13,7 +13,7 @@ class CenterRepository(BaseRepository[Center], ICenterRepository):
     model = Center
 
     def query(self) -> QuerySet[Center]:
-        return Center.objects.prefetch_related("domains").all()
+        return Center.objects.prefetch_related("domains", "domain_claims").all()
 
     def get(self, pk: int) -> Center | None:
         return self.query().filter(pk=pk).first()

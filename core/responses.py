@@ -36,22 +36,35 @@ def created(data: Any = None, *, message: str = "") -> JsonResponse:
 
 
 def paginated(
-    items: list[Any], *, total: int, page: int, page_size: int, status: int = 200
+    items: list[Any],
+    *,
+    total: int,
+    page: int,
+    page_size: int,
+    status: int = 200,
+    pagination_extra: dict[str, Any] | None = None,
 ) -> JsonResponse:
     """A page of ``items`` plus the cursor metadata a client needs to page on."""
     pages = (total + page_size - 1) // page_size if page_size else 0
+    pagination = {
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "pages": pages,
+        "has_next": page < pages,
+        "has_prev": page > 1,
+    }
+    if pagination_extra:
+        # Endpoint-specific metadata may extend, but never replace, the canonical
+        # pagination contract used by every layered API collection.
+        pagination.update(
+            {key: value for key, value in pagination_extra.items() if key not in pagination}
+        )
     return JsonResponse(
         {
             "success": True,
             "data": items,
-            "pagination": {
-                "total": total,
-                "page": page,
-                "page_size": page_size,
-                "pages": pages,
-                "has_next": page < pages,
-                "has_prev": page > 1,
-            },
+            "pagination": pagination,
         },
         status=status,
     )
@@ -70,7 +83,9 @@ def validation_error(errors: Any, *, message: str = "Validation failed") -> Json
     return error(message, code="validation_error", errors=errors, status=422)
 
 
-def unauthorized(message: str = "Authentication credentials were not provided or are invalid.") -> JsonResponse:
+def unauthorized(
+    message: str = "Authentication credentials were not provided or are invalid.",
+) -> JsonResponse:
     return error(message, code="authentication_failed", status=401)
 
 

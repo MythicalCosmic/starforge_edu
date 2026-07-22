@@ -231,3 +231,85 @@ def test_manager_cannot_see_other_branch_tasks(tenant_a, user_in, as_user):
     # branch-A manager neither sees nor can fetch branch-B's task
     assert mgr_a.get(f"{TASKS}{tid}/").status_code == 404
     assert _rows(mgr_a.get(TASKS).json()) == []
+
+
+def test_role_grade_detail_full_update_and_delete_are_wired(tenant_a, as_role):
+    director, _ = as_role(Role.DIRECTOR)
+    created = director.post(GRADES, {"role": "teacher", "level": 2, "label": "Teacher"}, format="json")
+    grade_id = created.json()["data"]["id"]
+    detail = f"{GRADES}{grade_id}/"
+
+    assert director.get(detail).json()["data"]["level"] == 2
+    assert director.head(detail).status_code == 200
+    missing = director.put(detail, {"level": 3}, format="json")
+    assert missing.status_code == 400
+    assert "role" in missing.json()["errors"]
+    assert director.patch(detail, {"label": "Senior teacher"}, format="json").status_code == 200
+    replaced = director.put(detail, {"role": "teacher", "level": 4}, format="json")
+    assert replaced.status_code == 200
+    assert replaced.json()["data"]["level"] == 4
+    assert director.delete(detail).status_code == 204
+    assert director.get(detail).status_code == 404
+
+
+def test_assign_action_and_detail_happy_path(tenant_a, as_role):
+    director, _ = as_role(Role.DIRECTOR)
+    _worker_client, worker = as_role(Role.SUPPORT)
+    task_id = director.post(TASKS, {"title": "Assign later"}, format="json").json()["data"]["id"]
+    assigned = director.post(f"{TASKS}{task_id}/assign/", {"assignee": worker.id}, format="json")
+    assert assigned.status_code == 200, assigned.content
+    assert assigned.json()["data"]["assignee"] == worker.id
+    assert director.get(f"{TASKS}{task_id}/").json()["data"]["title"] == "Assign later"
+
+
+def test_department_peer_cannot_transition_someone_elses_task(tenant_a, user_in, as_user, as_role):
+    from apps.org.tests.factories import BranchFactory, DepartmentFactory
+    from apps.users.models import RoleMembership
+
+    director, _ = as_role(Role.DIRECTOR)
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory.create()
+        department = DepartmentFactory.create(branch=branch)
+    assignee = user_in(tenant_a, roles=[Role.SUPPORT], branch=branch)
+    peer = user_in(tenant_a, roles=[Role.SUPPORT], branch=branch)
+    with schema_context(tenant_a.schema_name):
+        RoleMembership.objects.filter(user_id__in=(assignee.id, peer.id), branch=branch).update(
+            department=department
+        )
+    task_id = director.post(
+        TASKS,
+        {"title": "Private ownership", "department": department.id, "assignee": assignee.id},
+        format="json",
+    ).json()["data"]["id"]
+
+    peer_client = as_user(tenant_a, peer)
+    assert peer_client.get(f"{TASKS}{task_id}/").status_code == 200  # visible through department
+    denied = peer_client.post(f"{TASKS}{task_id}/transition/", {"status": "done"}, format="json")
+    assert denied.status_code == 403
+    assert denied.json()["code"] == "not_task_assignee"
+    assert (
+        as_user(tenant_a, assignee)
+        .post(f"{TASKS}{task_id}/transition/", {"status": "done"}, format="json")
+        .status_code
+        == 200
+    )
+
+
+def test_single_archived_branch_is_not_auto_selected(tenant_a, user_in, as_user):
+    from django.utils import timezone
+
+    from apps.org.tests.factories import BranchFactory
+
+    with schema_context(tenant_a.schema_name):
+        archived = BranchFactory.create(archived_at=timezone.now())
+    client = as_user(tenant_a, user_in(tenant_a, roles=[Role.TEACHER], branch=archived))
+    response = client.post(TASKS, {"title": "Do not pin me"}, format="json")
+    assert response.status_code == 400
+    assert response.json()["code"] == "validation_error"
+
+
+def test_task_list_routes_support_head(tenant_a, as_role):
+    director, _ = as_role(Role.DIRECTOR)
+    assert director.head(TASKS).status_code == 200
+    assert director.head(f"{TASKS}mine/").status_code == 200
+    assert director.head(GRADES).status_code == 200

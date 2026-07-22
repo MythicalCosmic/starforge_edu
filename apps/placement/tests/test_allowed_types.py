@@ -43,8 +43,11 @@ def test_no_restriction_allows_every_type(tenant_a):
     test, _ = _draft(tenant_a)  # default empty list = no restriction
     with schema_context(tenant_a.schema_name):
         q = services.add_question(
-            test=test, prompt="even?", question_type="multiple_choice",
-            options=["1", "2", "3"], correct_answer=["2"],
+            test=test,
+            prompt="even?",
+            question_type="multiple_choice",
+            options=["1", "2", "3"],
+            correct_answer=["2"],
         )
         assert q.id  # multiple_choice accepted when no policy is set
 
@@ -58,15 +61,21 @@ def test_manual_authoring_blocks_a_disallowed_type(tenant_a):
     with schema_context(tenant_a.schema_name):
         # an enabled type still works
         ok = services.add_question(
-            test=test, prompt="capital?", question_type="single_choice",
-            options=["A", "B"], correct_answer="A",
+            test=test,
+            prompt="capital?",
+            question_type="single_choice",
+            options=["A", "B"],
+            correct_answer="A",
         )
         assert ok.id
         # a disabled type is refused with a clean 422
         with pytest.raises(UnprocessableEntity) as exc:
             services.add_question(
-                test=test, prompt="even?", question_type="multiple_choice",
-                options=["1", "2"], correct_answer=["2"],
+                test=test,
+                prompt="even?",
+                question_type="multiple_choice",
+                options=["1", "2"],
+                correct_answer=["2"],
             )
         assert exc.value.code == "question_type_not_allowed"
 
@@ -80,9 +89,18 @@ def test_ai_generation_drops_disallowed_types(tenant_a):
     test, _ = _draft(tenant_a)
     payload = json.dumps(
         [
-            {"prompt": "1+1?", "question_type": "single_choice", "options": ["1", "2"], "correct_answer": "2"},
-            {"prompt": "evens?", "question_type": "multiple_choice", "options": ["1", "2", "4"],
-             "correct_answer": ["2", "4"]},
+            {
+                "prompt": "1+1?",
+                "question_type": "single_choice",
+                "options": ["1", "2"],
+                "correct_answer": "2",
+            },
+            {
+                "prompt": "evens?",
+                "question_type": "multiple_choice",
+                "options": ["1", "2", "4"],
+                "correct_answer": ["2", "4"],
+            },
             {"prompt": "essay", "question_type": "writing"},
         ]
     )
@@ -101,7 +119,10 @@ def test_setting_round_trips_and_dedupes_through_the_api(tenant_a, as_role):
         format="json",
     )
     assert patched.status_code == 200, patched.content
-    assert patched.json()["data"]["placement_allowed_question_types"] == ["writing", "single_choice"]  # deduped
+    assert patched.json()["data"]["placement_allowed_question_types"] == [
+        "writing",
+        "single_choice",
+    ]  # deduped
     got = director.get(SETTINGS).json()["data"]["placement_allowed_question_types"]
     assert got == ["writing", "single_choice"]
 

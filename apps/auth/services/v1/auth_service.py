@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from django.contrib.auth.hashers import check_password
+from django.db import transaction
 from django.utils.translation import gettext_lazy as _
 
 from apps.auth.dto.auth_dto import (
@@ -22,7 +23,7 @@ from apps.auth.dto.auth_dto import (
 )
 from apps.auth.interfaces.auth_service import IAuthService
 from apps.auth.interfaces.repositories import ISessionRepository, IUserRepository
-from apps.users.models import User
+from apps.users.models import Device, User
 from core.exceptions import AuthenticationException, ValidationException
 
 
@@ -51,19 +52,31 @@ class AuthService(IAuthService):
             raise AuthenticationException(_("Invalid username or password."), code="invalid_credentials")
 
         self._users.touch_last_seen(user)
+        normalized_device_id = credentials.device_id[:128]
+        was_known_device = bool(
+            normalized_device_id
+            and credentials.platform
+            and Device.objects.filter(
+                user=user,
+                device_id=normalized_device_id,
+                revoked_at__isnull=True,
+            ).exists()
+        )
+        device = register_device(
+            user=user,
+            device_id=normalized_device_id,
+            platform=credentials.platform,
+            user_agent=ctx.user_agent,
+        )
         login_succeeded.send(
             sender=User,
             username=username,
             user_id=user.pk,
             ip=ctx.ip,
             user_agent=ctx.user_agent,
+            device_id=device.device_id if device is not None else "",
+            is_new_device=device is not None and not was_known_device,
             schema_name=current_schema(),
-        )
-        register_device(
-            user=user,
-            device_id=credentials.device_id,
-            platform=credentials.platform,
-            user_agent=ctx.user_agent,
         )
         session = self._sessions.create_for(
             user, ip=ctx.ip, user_agent=ctx.user_agent, device_id=credentials.device_id
@@ -79,6 +92,7 @@ class AuthService(IAuthService):
             ip=ctx.ip,
             user_agent=ctx.user_agent,
             device_id=credentials.device_id,
+            platform=credentials.platform,
         )
 
     def logout(self, user: User) -> None:
@@ -88,6 +102,7 @@ class AuthService(IAuthService):
 
         logout_everywhere(user)
 
+    @transaction.atomic
     def change_password(
         self,
         user: User,
@@ -95,6 +110,9 @@ class AuthService(IAuthService):
         *,
         principal_kind: str = "",
         principal_id: int | None = None,
+        device_id: str = "",
+        ip: str = "",
+        user_agent: str = "",
     ) -> dict[str, str]:
         from apps.auth.services import _validate_new_password
         from apps.users.services import set_role_account_password, set_user_password
@@ -112,6 +130,9 @@ class AuthService(IAuthService):
             set_role_account_password(account, data.new_password, must_change=False)
             session = self._sessions.create_for(
                 user,
+                ip=ip,
+                user_agent=user_agent,
+                device_id=device_id,
                 principal_kind=principal_kind,
                 principal_id=principal_id,
             )
@@ -120,8 +141,34 @@ class AuthService(IAuthService):
         if not user.check_password(data.old_password):
             raise ValidationException(_("Current password is incorrect."), code="wrong_password")
         _validate_new_password(data.new_password, user)
+        current_device = None
+        if device_id:
+            current_device = (
+                Device.objects.filter(
+                    user=user,
+                    device_id=device_id[:128],
+                    revoked_at__isnull=True,
+                )
+                .values("device_id", "platform", "push_token", "user_agent")
+                .first()
+            )
         set_user_password(user, data.new_password)  # revokes every session for the user
-        session = self._sessions.create_for(user)  # fresh session for THIS device
+        session = self._sessions.create_for(
+            user,
+            ip=ip,
+            user_agent=user_agent,
+            device_id=device_id,
+        )
+        if current_device is not None:
+            from apps.users.services import register_device
+
+            register_device(
+                user=user,
+                device_id=current_device["device_id"],
+                platform=current_device["platform"],
+                push_token=current_device["push_token"],
+                user_agent=user_agent or current_device["user_agent"],
+            )
         return {"access": session.key}
 
     def request_reset(self, data: ResetRequestDTO, ctx: SessionContextDTO) -> None:

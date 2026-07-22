@@ -36,11 +36,19 @@ def _active_centers():
 
 @app.task
 def run_nightly_metering() -> int:
-    """Public dispatcher: meter + evaluate every active Center. Returns count."""
+    """Public dispatcher: enqueue one isolated metering task per active Center."""
     centers = _active_centers()
     for center in centers:
-        meter_center(center_id=center.pk)
+        meter_center_task.delay(center_id=center.pk, _schema_name=center.schema_name)
     return len(centers)
+
+
+@app.task(bind=True, max_retries=3, retry_backoff=True)
+def meter_center_task(self, *, center_id: int) -> None:
+    try:
+        meter_center(center_id=center_id)
+    except Exception as exc:
+        raise self.retry(exc=exc) from exc
 
 
 def meter_center(*, center_id: int) -> None:

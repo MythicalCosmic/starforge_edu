@@ -132,7 +132,9 @@ class AiUsageCharge(models.Model):
             # The unique (center, period) index this constraint creates also serves the
             # by-center / by-(center,period) lookups, so no separate Index is needed.
             models.UniqueConstraint(fields=("center", "period"), name="ai_charge_one_per_center_period"),
-            models.CheckConstraint(condition=models.Q(amount_uzs__gte=0), name="ai_charge_amount_non_negative"),
+            models.CheckConstraint(
+                condition=models.Q(amount_uzs__gte=0), name="ai_charge_amount_non_negative"
+            ),
             models.CheckConstraint(
                 condition=models.Q(overage_tokens__gte=0), name="ai_charge_overage_non_negative"
             ),

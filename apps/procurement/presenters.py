@@ -29,6 +29,8 @@ def po_to_dict(po: PurchaseOrder) -> dict:
     return {
         "id": po.id,
         "request": po.request_id,
+        "title": po.request.title,
+        "description": po.request.description,
         "supplier": po.supplier,
         "branch": po.branch_id,
         "status": po.request.status,

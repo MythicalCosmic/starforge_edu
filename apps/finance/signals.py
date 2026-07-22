@@ -15,12 +15,13 @@ receivers can fan out Celery work across tenant contexts.
 
 `payment_reminder` fires once per overdue/unpaid invoice per reminder cycle
 (the `late_payment_reminders` beat task; dedupe via Lane C
-`dedupe_key=f"finance.payment_reminder:{invoice_id}:{date}"`):
+`dedupe_key=f"finance.payment_reminder:{invoice_id}:{reminder_cycle}"`):
 
     payment_reminder.send(
         sender=Invoice,
         invoice_id=int,
         student_id=int,
+        reminder_cycle=str,  # ``due_date:interval_days:bucket``
         schema_name=str,
     )
 """

@@ -109,11 +109,12 @@ def test_director_sees_any_balance(tenant_a, as_role):
 # --------------------------------------------------------------------------- #
 
 
-def test_create_invoice_endpoint(tenant_a, as_role):
-    client, _ = as_role(Role.ACCOUNTANT)
+def test_create_invoice_endpoint(tenant_a, user_in, as_user):
     with schema_context(tenant_a.schema_name):
         student = StudentProfileFactory()
         fs = FeeScheduleFactory(amount_uzs=Decimal("777000.00"))
+    accountant = user_in(tenant_a, roles=[Role.ACCOUNTANT], branch=student.branch)
+    client = as_user(tenant_a, accountant)
     resp = client.post(INVOICES_URL, {"student": student.pk, "fee_schedule": fs.pk}, format="json")
     assert resp.status_code == 201
     body = resp.json()["data"]
@@ -122,15 +123,19 @@ def test_create_invoice_endpoint(tenant_a, as_role):
     assert len(body["lines"]) == 1
 
 
-def test_invoice_line_explicit_zero_quantity_is_not_coerced_to_one(tenant_a, as_role):
+def test_invoice_line_explicit_zero_quantity_is_not_coerced_to_one(tenant_a, user_in, as_user):
     """An explicit quantity of 0 must bill 0 (a waived line), not be defaulted to 1
     (the default applies only when the key is absent) — no money over-charge."""
-    client, _ = as_role(Role.ACCOUNTANT)
     with schema_context(tenant_a.schema_name):
         student = StudentProfileFactory()
+    accountant = user_in(tenant_a, roles=[Role.ACCOUNTANT], branch=student.branch)
+    client = as_user(tenant_a, accountant)
     resp = client.post(
         INVOICES_URL,
-        {"student": student.pk, "lines": [{"description": "waived", "unit_price_uzs": "100000", "quantity": 0}]},
+        {
+            "student": student.pk,
+            "lines": [{"description": "waived", "unit_price_uzs": "100000", "quantity": 0}],
+        },
         format="json",
     )
     assert resp.status_code == 201, resp.content
@@ -139,29 +144,105 @@ def test_invoice_line_explicit_zero_quantity_is_not_coerced_to_one(tenant_a, as_
     assert Decimal(body["total_uzs"]) == Decimal("0.00")
 
 
-def test_invoice_line_oversized_quantity_is_400_not_500(tenant_a, as_role):
+def test_invoice_line_oversized_quantity_is_400_not_500(tenant_a, user_in, as_user):
     """A quantity beyond the column's 8 digits is a clean 400, not a decimal-context
     overflow -> 500 in the line-amount quantize."""
-    client, _ = as_role(Role.ACCOUNTANT)
     with schema_context(tenant_a.schema_name):
         student = StudentProfileFactory()
+    accountant = user_in(tenant_a, roles=[Role.ACCOUNTANT], branch=student.branch)
+    client = as_user(tenant_a, accountant)
     resp = client.post(
         INVOICES_URL,
         {
             "student": student.pk,
-            "lines": [{"description": "x", "unit_price_uzs": "9999999999999999", "quantity": "9999999999999999"}],
+            "lines": [
+                {"description": "x", "unit_price_uzs": "9999999999999999", "quantity": "9999999999999999"}
+            ],
         },
         format="json",
     )
     assert resp.status_code == 400, resp.content
 
 
-def test_create_invoice_validation_empty(tenant_a, as_role):
-    client, _ = as_role(Role.ACCOUNTANT)
+def test_create_invoice_validation_empty(tenant_a, user_in, as_user):
     with schema_context(tenant_a.schema_name):
         student = StudentProfileFactory()
+    accountant = user_in(tenant_a, roles=[Role.ACCOUNTANT], branch=student.branch)
+    client = as_user(tenant_a, accountant)
     resp = client.post(INVOICES_URL, {"student": student.pk}, format="json")
     assert resp.status_code == 400
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        {"description": "bad price", "unit_price_uzs": "-1.00", "quantity": "1"},
+        {
+            "description": "bad quantity",
+            "line_type": "discount",
+            "unit_price_uzs": "-1.00",
+            "quantity": "-1",
+        },
+    ],
+)
+def test_invoice_negative_line_values_are_field_validation_errors(
+    tenant_a,
+    user_in,
+    as_user,
+    line,
+):
+    with schema_context(tenant_a.schema_name):
+        student = StudentProfileFactory()
+        branch = student.branch
+    accountant = user_in(tenant_a, roles=[Role.ACCOUNTANT], branch=branch)
+    response = as_user(tenant_a, accountant).post(
+        INVOICES_URL,
+        {"student": student.pk, "lines": [line]},
+        format="json",
+    )
+    assert response.status_code == 400, response.content
+    assert response.json()["code"] == "validation_error"
+
+
+def test_accountant_invoice_and_statement_access_is_branch_scoped(tenant_a, user_in, as_user):
+    from apps.cohorts.tests.factories import CohortFactory
+
+    with schema_context(tenant_a.schema_name):
+        own_student = StudentProfileFactory()
+        other_student = StudentProfileFactory()
+        own_invoice = InvoiceFactory(student=own_student)
+        other_invoice = InvoiceFactory(student=other_student)
+        other_schedule = FeeScheduleFactory(
+            cohort=CohortFactory(branch=other_student.branch),
+        )
+        own_branch = own_student.branch
+    accountant = user_in(tenant_a, roles=[Role.ACCOUNTANT], branch=own_branch)
+    client = as_user(tenant_a, accountant)
+
+    listing = client.get(INVOICES_URL)
+    assert listing.status_code == 200
+    assert {row["id"] for row in listing.json()["data"]} == {own_invoice.pk}
+    assert client.get(f"{INVOICES_URL}{other_invoice.pk}/").status_code == 404
+    assert (
+        client.post(
+            INVOICES_URL,
+            {
+                "student": other_student.pk,
+                "lines": [{"description": "x", "unit_price_uzs": "1.00"}],
+            },
+            format="json",
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post(
+            INVOICES_URL,
+            {"student": own_student.pk, "fee_schedule": other_schedule.pk},
+            format="json",
+        ).status_code
+        == 403
+    )
+    assert client.post(f"/api/v1/finance/students/{other_student.pk}/statement/").status_code == 403
 
 
 # --------------------------------------------------------------------------- #
@@ -197,17 +278,114 @@ def test_fee_schedule_write_requires_finance_write(tenant_a, as_role):
     assert ok.status_code == 201
 
 
+def test_fee_schedule_authorized_detail_crud(tenant_a, as_role):
+    client, _ = as_role(Role.DIRECTOR)
+    created_response = client.post(
+        FEE_URL,
+        {
+            "name": "Monthly",
+            "amount_uzs": "100000.00",
+            "billing_period": "monthly",
+            "due_day_of_month": 5,
+        },
+        format="json",
+    )
+    assert created_response.status_code == 201, created_response.content
+    pk = created_response.json()["data"]["id"]
+    assert client.get(f"{FEE_URL}{pk}/").status_code == 200
+    patched = client.patch(f"{FEE_URL}{pk}/", {"amount_uzs": "120000.00"}, format="json")
+    assert patched.status_code == 200
+    assert patched.json()["data"]["amount_uzs"] == "120000.00"
+    replaced = client.put(
+        f"{FEE_URL}{pk}/",
+        {"name": "Monthly renamed", "amount_uzs": "130000.00"},
+        format="json",
+    )
+    assert replaced.status_code == 200
+    assert replaced.json()["data"]["name"] == "Monthly renamed"
+    assert client.delete(f"{FEE_URL}{pk}/").status_code == 204
+
+
+def test_payment_plan_http_validates_dates_and_positive_amounts(tenant_a, as_role):
+    client, _ = as_role(Role.DIRECTOR)
+    with schema_context(tenant_a.schema_name):
+        invoice = InvoiceFactory(total_uzs=Decimal("100.00"))
+    endpoint = f"{INVOICES_URL}{invoice.pk}/payment-plan/"
+    negative = client.post(
+        endpoint,
+        {
+            "installments": [
+                {"due_date": "2026-08-01", "amount_uzs": "110.00"},
+                {"due_date": "2026-09-01", "amount_uzs": "-10.00"},
+            ]
+        },
+        format="json",
+    )
+    assert negative.status_code == 400, negative.content
+    assert (
+        client.post(
+            endpoint,
+            {"installments": [{"due_date": "not-a-date", "amount_uzs": "100.00"}]},
+            format="json",
+        ).status_code
+        == 400
+    )
+    created_plan = client.post(
+        endpoint,
+        {
+            "installments": [
+                {"due_date": "2026-08-01", "amount_uzs": "40.00"},
+                {"due_date": "2026-09-01", "amount_uzs": "60.00"},
+            ]
+        },
+        format="json",
+    )
+    assert created_plan.status_code == 201, created_plan.content
+    assert [row["amount_uzs"] for row in created_plan.json()["data"]["installments"]] == [
+        "40.00",
+        "60.00",
+    ]
+
+
+def test_payment_method_unicode_slug_and_authorized_detail_crud(tenant_a, as_role):
+    client, _ = as_role(Role.DIRECTOR)
+    endpoint = "/api/v1/finance/payment-methods/"
+    first = client.post(endpoint, {"name": "Нақд пул"}, format="json")
+    second = client.post(endpoint, {"name": "Карта"}, format="json")
+    assert first.status_code == 201, first.content
+    assert second.status_code == 201, second.content
+    first_data = first.json()["data"]
+    second_data = second.json()["data"]
+    assert first_data["slug"]
+    assert second_data["slug"]
+    assert first_data["slug"] != second_data["slug"]
+
+    pk = first_data["id"]
+    renamed = client.patch(f"{endpoint}{pk}/", {"name": "Нақд"}, format="json")
+    assert renamed.status_code == 200
+    assert renamed.json()["data"]["slug"] == first_data["slug"]
+    assert client.get(f"{endpoint}{pk}/").status_code == 200
+    assert client.get(endpoint).status_code == 200
+    assert client.patch(f"{endpoint}{pk}/", {"slug": "has spaces"}, format="json").status_code == 400
+    duplicate = client.patch(
+        f"{endpoint}{pk}/",
+        {"slug": second_data["slug"]},
+        format="json",
+    )
+    assert duplicate.status_code == 400, duplicate.content
+    assert duplicate.json()["code"] == "duplicate_slug"
+    assert client.delete(f"{endpoint}{pk}/").status_code == 204
+
+
 # --------------------------------------------------------------------------- #
 # cashier shift endpoints
 # --------------------------------------------------------------------------- #
 
 
 def test_cashier_shift_open_close_endpoints(tenant_a, user_in, as_user):
-    from apps.org.tests.factories import BranchFactory
-
     cashier = user_in(tenant_a, roles=[Role.CASHIER])
     with schema_context(tenant_a.schema_name):
-        branch = BranchFactory()
+        branch = cashier.role_memberships.get(role=Role.CASHIER).branch
     client = as_user(tenant_a, cashier)
     opened = client.post(
         "/api/v1/finance/cashier-shifts/open/",
@@ -234,12 +412,39 @@ def test_cashier_shift_open_close_endpoints(tenant_a, user_in, as_user):
     assert report.json()["data"]["payments_total_uzs"] == "0.00"
 
 
+def test_cashier_can_only_read_and_close_own_shift(tenant_a, user_in, as_user):
+    from apps.finance import services
+    from apps.org.tests.factories import BranchFactory
+
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+    first = user_in(tenant_a, roles=[Role.CASHIER], branch=branch)
+    second = user_in(tenant_a, roles=[Role.CASHIER], branch=branch)
+    with schema_context(tenant_a.schema_name):
+        own = services.open_cashier_shift(cashier=first, branch=branch)
+        other = services.open_cashier_shift(cashier=second, branch=branch)
+
+    client = as_user(tenant_a, first)
+    listing = client.get("/api/v1/finance/cashier-shifts/")
+    assert listing.status_code == 200
+    assert [row["id"] for row in listing.json()["data"]] == [own.pk]
+    assert client.get(f"/api/v1/finance/cashier-shifts/{other.pk}/").status_code == 403
+    assert (
+        client.post(
+            f"/api/v1/finance/cashier-shifts/{other.pk}/close/",
+            {"closing_cash_uzs": "0.00"},
+            format="json",
+        ).status_code
+        == 403
+    )
+
+
 # --------------------------------------------------------------------------- #
 # statement async (202 + result)
 # --------------------------------------------------------------------------- #
 
 
-def test_statement_request_returns_202(tenant_a, as_role, monkeypatch):
+def test_statement_request_returns_202(tenant_a, user_in, as_user, monkeypatch):
     from apps.finance import services as fin_services
 
     monkeypatch.setattr(fin_services, "render_statement_pdf", lambda *, student, locale="en": b"%PDF")
@@ -247,12 +452,48 @@ def test_statement_request_returns_202(tenant_a, as_role, monkeypatch):
         "infrastructure.storage.s3_client.upload_bytes",
         lambda key, data, *, content_type="application/octet-stream": key,
     )
-    client, _ = as_role(Role.ACCOUNTANT)
     with schema_context(tenant_a.schema_name):
         student = StudentProfileFactory()
+    accountant = user_in(tenant_a, roles=[Role.ACCOUNTANT], branch=student.branch)
+    client = as_user(tenant_a, accountant)
     resp = client.post(f"/api/v1/finance/students/{student.pk}/statement/", {"locale": "en"}, format="json")
     assert resp.status_code == 202
     assert "task_id" in resp.json()["data"]
+
+
+def test_statement_request_rejects_missing_student_before_enqueue(tenant_a, as_role, monkeypatch):
+    from celery_tasks.finance_tasks import generate_statement_pdf
+
+    called = False
+
+    def should_not_enqueue(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("missing students must not reach Celery")
+
+    monkeypatch.setattr(generate_statement_pdf, "delay", should_not_enqueue)
+    client, _ = as_role(Role.DIRECTOR)
+    response = client.post("/api/v1/finance/students/999999999/statement/")
+    assert response.status_code == 404
+    assert response.json()["code"] == "student_not_found"
+    assert called is False
+
+
+def test_statement_result_authorized_done_path(tenant_a, as_role, monkeypatch):
+    from django.core.cache import cache
+
+    client, _ = as_role(Role.DIRECTOR)
+    cache.set(f"finance:statement:{tenant_a.schema_name}:task-ready", "statements/ready.pdf")
+    monkeypatch.setattr(
+        "infrastructure.storage.s3_client.presign_download",
+        lambda key, *, expires_in: f"signed:{key}:{expires_in}",
+    )
+    response = client.get("/api/v1/finance/statements/task-ready/")
+    assert response.status_code == 200
+    assert response.json()["data"] == {
+        "status": "done",
+        "url": "signed:statements/ready.pdf:600",
+    }
 
 
 # --------------------------------------------------------------------------- #

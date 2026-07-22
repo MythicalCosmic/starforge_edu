@@ -77,9 +77,11 @@ def test_assign_to_an_offboarded_teacher_is_rejected(tenant_a, user_in, as_user)
     reassign a live lesson to someone who can't act on it. The assign path must reject
     an inactive teacher, matching the pool path (which only surfaces active staff)."""
     s = _setup(tenant_a, user_in, as_user)
-    cid = s["a_client"].post(COVER, {"lesson": s["lesson"].id, "reason": "sick"}, format="json").json()[
-        "data"
-    ]["id"]
+    cid = (
+        s["a_client"]
+        .post(COVER, {"lesson": s["lesson"].id, "reason": "sick"}, format="json")
+        .json()["data"]["id"]
+    )
     # Offboard teacher B: disable their login (the TeacherProfile row survives).
     with schema_context(tenant_a.schema_name):
         b_user = s["b_prof"].user
@@ -307,3 +309,38 @@ def test_pool_board_lists_only_pooled_open_covers(tenant_a, user_in, as_user):
 def test_role_without_cover_is_denied(tenant_a, as_role):
     cashier_client, _ = as_role(Role.CASHIER)  # cashier holds no cover permission
     assert cashier_client.get(COVER).status_code == 403
+
+
+def test_cover_collection_detail_and_pool_head_are_scoped(tenant_a, user_in, as_user):
+    from apps.org.tests.factories import BranchFactory
+
+    s = _setup(tenant_a, user_in, as_user)
+    cover_id = s["a_client"].post(COVER, {"lesson": s["lesson"].id}, format="json").json()["data"]["id"]
+
+    assert cover_id in _ids(s["a_client"].get(COVER))
+    assert s["a_client"].get(f"{COVER}{cover_id}/").status_code == 200
+    assert s["a_client"].head(COVER).status_code == 200
+    assert s["a_client"].head(f"{COVER}{cover_id}/").status_code == 200
+    assert s["a_client"].head(f"{COVER}pool/").status_code == 200
+
+    with schema_context(tenant_a.schema_name):
+        other_branch = BranchFactory.create()
+    outsider = as_user(tenant_a, user_in(tenant_a, roles=[Role.TEACHER], branch=other_branch))
+    assert outsider.get(f"{COVER}{cover_id}/").status_code == 404
+
+
+def test_cover_assignment_locks_the_lesson_row(tenant_a, user_in, as_user):
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    s = _setup(tenant_a, user_in, as_user)
+    cover_id = s["a_client"].post(COVER, {"lesson": s["lesson"].id}, format="json").json()["data"]["id"]
+    with CaptureQueriesContext(connection) as queries:
+        response = s["manager"].post(
+            f"{COVER}{cover_id}/assign/", {"cover_teacher": s["b_prof"].id}, format="json"
+        )
+    assert response.status_code == 200, response.content
+    assert any(
+        "schedule_lesson" in query["sql"] and "FOR UPDATE" in query["sql"].upper()
+        for query in queries.captured_queries
+    )

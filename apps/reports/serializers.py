@@ -42,6 +42,7 @@ class ReportSerializer(serializers.ModelSerializer):
 
 class ReportRunReadSerializer(serializers.ModelSerializer):
     report_key = serializers.CharField(source="report.key", read_only=True)
+    params = serializers.SerializerMethodField()
     download_url = serializers.SerializerMethodField()
     created_at = UtcDateTimeField(read_only=True)
     started_at = UtcDateTimeField(read_only=True)
@@ -73,6 +74,9 @@ class ReportRunReadSerializer(serializers.ModelSerializer):
             return None
         return presign_run(obj)
 
+    def get_params(self, obj: ReportRun) -> dict:
+        return {key: value for key, value in (obj.params or {}).items() if not key.startswith("_")}
+
 
 class ReportRunCreateSerializer(serializers.Serializer):
     report_key = serializers.ChoiceField(choices=ReportKey.choices)
@@ -82,6 +86,7 @@ class ReportRunCreateSerializer(serializers.Serializer):
 
 class ReportScheduleReadSerializer(serializers.ModelSerializer):
     report_key = serializers.CharField(source="report.key", read_only=True)
+    params = serializers.SerializerMethodField()
     last_run_at = UtcDateTimeField(read_only=True)
     created_at = UtcDateTimeField(read_only=True)
     updated_at = UtcDateTimeField(read_only=True)
@@ -106,6 +111,9 @@ class ReportScheduleReadSerializer(serializers.ModelSerializer):
         )
         read_only_fields = ("id", "report", "report_key", "last_run_at", "created_at", "updated_at")
 
+    def get_params(self, obj: ReportSchedule) -> dict:
+        return {key: value for key, value in (obj.params or {}).items() if not key.startswith("_")}
+
 
 class ReportScheduleWriteSerializer(serializers.Serializer):
     report_key = serializers.ChoiceField(choices=ReportKey.choices)
@@ -115,13 +123,25 @@ class ReportScheduleWriteSerializer(serializers.Serializer):
     hour = serializers.IntegerField(min_value=0, max_value=23, required=False, default=7)
     format = serializers.ChoiceField(choices=ReportFormat.choices, required=False, default=ReportFormat.PDF)
     params = serializers.DictField(required=False, default=dict)
-    recipient_ids = serializers.ListField(child=serializers.IntegerField(), required=False, default=list)
+    recipient_ids = serializers.ListField(
+        child=serializers.IntegerField(min_value=1), required=False, default=list, max_length=50
+    )
     is_active = serializers.BooleanField(required=False, default=True)
 
     def validate(self, attrs: dict) -> dict:
-        cadence = attrs["cadence"]
-        if cadence == ReportSchedule.Cadence.WEEKLY and attrs.get("weekday") is None:
+        instance = self.instance
+        cadence = attrs.get("cadence", getattr(instance, "cadence", None))
+        weekday = attrs.get("weekday", getattr(instance, "weekday", None))
+        day_of_month = attrs.get("day_of_month", getattr(instance, "day_of_month", None))
+        if cadence == ReportSchedule.Cadence.WEEKLY and weekday is None:
             raise serializers.ValidationError({"weekday": "Required for a weekly cadence."})
-        if cadence == ReportSchedule.Cadence.MONTHLY and attrs.get("day_of_month") is None:
+        if cadence == ReportSchedule.Cadence.MONTHLY and day_of_month is None:
             raise serializers.ValidationError({"day_of_month": "Required for a monthly cadence."})
+        # Clear the opposite anchor when cadence changes, otherwise the model may
+        # retain stale values that confuse operators and future validation.
+        if "cadence" in attrs:
+            if cadence == ReportSchedule.Cadence.WEEKLY:
+                attrs["day_of_month"] = None
+            else:
+                attrs["weekday"] = None
         return attrs

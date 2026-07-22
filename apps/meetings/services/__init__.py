@@ -58,15 +58,13 @@ def cancel_meeting(*, meeting_id: int, actor) -> StaffMeeting:
 @transaction.atomic
 def respond_to_meeting(*, meeting_id: int, user, response: str) -> MeetingAttendee:
     """An invitee accepts or declines their own invitation."""
-    attendee = (
-        MeetingAttendee.objects.select_for_update()
-        .select_related("meeting")
-        .filter(meeting_id=meeting_id, user=user)
-        .first()
-    )
+    meeting = StaffMeeting.objects.select_for_update().filter(pk=meeting_id).first()
+    if meeting is None:
+        raise NotFoundException(_("Meeting not found."), code="meeting_not_found")
+    attendee = MeetingAttendee.objects.select_for_update().filter(meeting_id=meeting_id, user=user).first()
     if attendee is None:
         raise NotFoundException(_("You were not invited to this meeting."), code="not_invited")
-    if attendee.meeting.status != StaffMeeting.Status.SCHEDULED:
+    if meeting.status != StaffMeeting.Status.SCHEDULED:
         raise UnprocessableEntity(
             _("This meeting is no longer open for responses."), code="meeting_not_scheduled"
         )

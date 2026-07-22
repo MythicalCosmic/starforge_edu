@@ -27,11 +27,11 @@ from apps.campaigns.presenters import (
 )
 from core.api_auth import check_perm, require_auth
 from core.container import container
-from core.exceptions import NotFoundException, ValidationException
+from core.exceptions import NotFoundException, PermissionException, ValidationException
 from core.http import bool_field, int_field, read_json, str_field
 from core.listing import apply_filters, paginate
-from core.permissions import Role, get_role_memberships, get_user_roles
 from core.responses import created, error, no_content, paginated, success
+from core.scoping import is_unscoped, permission_membership_branch_ids
 
 _RESOURCE = "campaign"
 
@@ -48,17 +48,18 @@ def _template_service() -> ITemplateService:
     return container.resolve(ITemplateService)  # type: ignore[type-abstract]
 
 
-def _scope(request: HttpRequest) -> tuple[bool, set[int]]:
+def _scope(request: HttpRequest, permission: str) -> tuple[bool, set[int]]:
     req: Any = request  # perm helpers are duck-typed on .user (typed Request upstream)
-    roles = get_user_roles(req)
-    is_unscoped = getattr(req.user, "is_superuser", False) or Role.DIRECTOR in roles
-    branch_ids = {m.branch_id for m in get_role_memberships(req) if m.branch_id}
-    return is_unscoped, branch_ids
+    from core.permissions import get_user_roles
+
+    return is_unscoped(req), permission_membership_branch_ids(
+        roles=get_user_roles(req), permission=permission
+    )
 
 
-def _get_campaign(request: HttpRequest, pk: int):
-    is_unscoped, branch_ids = _scope(request)
-    campaign = _campaign_service().get_visible(is_unscoped=is_unscoped, branch_ids=branch_ids, pk=pk)
+def _get_campaign(request: HttpRequest, pk: int, *, permission: str = "campaign:read"):
+    unscoped, branch_ids = _scope(request, permission)
+    campaign = _campaign_service().get_visible(is_unscoped=unscoped, branch_ids=branch_ids, pk=pk)
     if campaign is None:
         raise NotFoundException(code="not_found")  # out-of-branch campaign -> 404, no leak
     return campaign
@@ -68,12 +69,12 @@ def _get_campaign(request: HttpRequest, pk: int):
 @csrf_exempt
 @require_auth
 def campaigns_collection_view(request: HttpRequest) -> HttpResponse:
-    if request.method == "GET":
+    if request.method in ("GET", "HEAD"):
         check_perm(request, f"{_RESOURCE}:read")
-        is_unscoped, branch_ids = _scope(request)
+        unscoped, branch_ids = _scope(request, "campaign:read")
         qs = apply_filters(
             request,
-            _campaign_service().scoped_list(is_unscoped=is_unscoped, branch_ids=branch_ids),
+            _campaign_service().scoped_list(is_unscoped=unscoped, branch_ids=branch_ids),
             filter_fields=("status", "branch"),
             ordering_fields=("created_at",),
             default_ordering="-created_at",
@@ -101,14 +102,17 @@ def campaign_send_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method != "POST":
         return error("Method not allowed.", code="method_not_allowed", status=405)
     check_perm(request, f"{_RESOURCE}:send")
-    campaign = _get_campaign(request, pk)
-    return success(campaign_to_dict(_campaign_service().send(campaign_id=campaign.pk, actor=request.user)))
+    campaign = _get_campaign(request, pk, permission="campaign:send")
+    return success(
+        campaign_to_dict(_campaign_service().send(campaign_id=campaign.pk, actor=request.user)),
+        status=202,
+    )
 
 
 @csrf_exempt
 @require_auth
 def campaign_recipients_view(request: HttpRequest, pk: int) -> HttpResponse:
-    if request.method != "GET":
+    if request.method not in ("GET", "HEAD"):
         return error("Method not allowed.", code="method_not_allowed", status=405)
     check_perm(request, f"{_RESOURCE}:read")
     campaign = _get_campaign(request, pk)
@@ -148,9 +152,9 @@ def _create_campaign(request: HttpRequest) -> HttpResponse:
         segment=segment,
         scheduled_at=_datetime(body, "scheduled_at"),
     )
-    is_unscoped, branch_ids = _scope(request)
+    unscoped, branch_ids = _scope(request, "campaign:write")
     campaign = _campaign_service().create(
-        dto, creator=request.user, is_unscoped=is_unscoped, branch_ids=branch_ids
+        dto, creator=request.user, is_unscoped=unscoped, branch_ids=branch_ids
     )
     return created(campaign_to_dict(campaign))
 
@@ -159,7 +163,7 @@ def _create_campaign(request: HttpRequest) -> HttpResponse:
 @csrf_exempt
 @require_auth
 def dnc_collection_view(request: HttpRequest) -> HttpResponse:
-    if request.method == "GET":
+    if request.method in ("GET", "HEAD"):
         check_perm(request, f"{_RESOURCE}:read")
         qs = apply_filters(
             request,
@@ -194,7 +198,12 @@ def dnc_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
     if read:
         return success(do_not_contact_to_dict(entry))
     if request.method == "DELETE":
-        _dnc_service().delete(entry)  # opt back in
+        if not is_unscoped(request):
+            raise PermissionException(
+                "Only a director can remove a do-not-contact entry.",
+                code="forbidden",
+            )
+        _dnc_service().delete(entry, actor=request.user)  # opt back in, immutably audited
         return no_content()
     return error("Method not allowed.", code="method_not_allowed", status=405)
 
@@ -203,7 +212,7 @@ def dnc_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
 @csrf_exempt
 @require_auth
 def templates_collection_view(request: HttpRequest) -> HttpResponse:
-    if request.method == "GET":
+    if request.method in ("GET", "HEAD"):
         check_perm(request, f"{_RESOURCE}:read")
         qs = apply_filters(
             request,
@@ -301,7 +310,7 @@ def _template_changes(body: dict[str, Any]) -> dict[str, Any]:
             raise ValidationException(
                 "Name may not be blank.", code="validation_error", fields={"name": ["May not be blank."]}
             )
-        changes["name"] = name
+        changes["name"] = name.strip()
     if "category" in body:
         changes["category"] = str_field(body, "category", max_length=40)
     if "purpose" in body:

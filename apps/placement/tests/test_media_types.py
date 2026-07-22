@@ -24,15 +24,24 @@ def test_add_media_questions_are_human_graded(tenant_a):
 
         test = services.create_test(title="Skills", created_by=UserFactory.create())
         reading = services.add_question(
-            test=test, prompt="Read the passage and answer.", question_type="reading",
-            media={"passage": "Once upon a time..."}, points=5,
+            test=test,
+            prompt="Read the passage and answer.",
+            question_type="reading",
+            media={"passage": "Once upon a time..."},
+            points=5,
         )
         listening = services.add_question(
-            test=test, prompt="What did the speaker order?", question_type="listening",
-            media={"audio_url": "https://cdn.example/clip.mp3"}, points=5,
+            test=test,
+            prompt="What did the speaker order?",
+            question_type="listening",
+            media={"audio_url": "https://cdn.example/clip.mp3"},
+            points=5,
         )
         speaking = services.add_question(
-            test=test, prompt="Describe your hometown.", question_type="speaking", points=10,
+            test=test,
+            prompt="Describe your hometown.",
+            question_type="speaking",
+            points=10,
         )
         for q in (reading, listening, speaking):
             assert q.question_type in PlacementQuestion.HUMAN_GRADED_TYPES
@@ -81,7 +90,9 @@ def test_taker_sees_media_but_not_the_answer_key(tenant_a):
 
         test = services.create_test(title="T", created_by=UserFactory.create())
         q = services.add_question(
-            test=test, prompt="Listen", question_type="listening",
+            test=test,
+            prompt="Listen",
+            question_type="listening",
             media={"audio_url": "https://cdn.example/a.mp3"},
         )
         taker = attempt_question_to_dict(q)

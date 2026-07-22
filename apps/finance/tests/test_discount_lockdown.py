@@ -44,9 +44,13 @@ def test_edit_and_delete_are_blocked(tenant_a, as_role):
     assert accountant.delete(f"{URL}{did}/").status_code == 405
 
 
-def test_deactivate_ends_a_discount(tenant_a, as_role):
-    accountant, _ = as_role(Role.ACCOUNTANT)
-    did = _discount_id(tenant_a, is_active=True)
+def test_deactivate_ends_a_discount(tenant_a, user_in, as_user):
+    with schema_context(tenant_a.schema_name):
+        discount = DiscountFactory.create(is_active=True)
+        did = discount.pk
+        branch = discount.student.branch
+    user = user_in(tenant_a, roles=[Role.ACCOUNTANT], branch=branch)
+    accountant = as_user(tenant_a, user)
     resp = accountant.post(f"{URL}{did}/deactivate/", {}, format="json")
     assert resp.status_code == 200, resp.content
     assert resp.json()["data"]["is_active"] is False
@@ -56,10 +60,14 @@ def test_deactivate_ends_a_discount(tenant_a, as_role):
         assert Discount.objects.get(pk=did).is_active is False
 
 
-def test_deactivate_requires_finance_write(tenant_a, as_role):
+def test_deactivate_requires_finance_write(tenant_a, user_in, as_user):
     # A cashier has finance:read but not finance:write -> cannot end a discount.
-    cashier, _ = as_role(Role.CASHIER)
-    did = _discount_id(tenant_a, is_active=True)
+    with schema_context(tenant_a.schema_name):
+        discount = DiscountFactory.create(is_active=True)
+        did = discount.pk
+        branch = discount.student.branch
+    user = user_in(tenant_a, roles=[Role.CASHIER], branch=branch)
+    cashier = as_user(tenant_a, user)
     assert cashier.post(f"{URL}{did}/deactivate/", {}, format="json").status_code == 403
     with schema_context(tenant_a.schema_name):
         from apps.finance.models import Discount
@@ -67,9 +75,13 @@ def test_deactivate_requires_finance_write(tenant_a, as_role):
         assert Discount.objects.get(pk=did).is_active is True  # untouched
 
 
-def test_read_still_works(tenant_a, as_role):
-    accountant, _ = as_role(Role.ACCOUNTANT)
-    did = _discount_id(tenant_a)
+def test_read_still_works(tenant_a, user_in, as_user):
+    with schema_context(tenant_a.schema_name):
+        discount = DiscountFactory.create()
+        did = discount.pk
+        branch = discount.student.branch
+    user = user_in(tenant_a, roles=[Role.ACCOUNTANT], branch=branch)
+    accountant = as_user(tenant_a, user)
     listing = accountant.get(URL)
     assert listing.status_code == 200
     assert any(row["id"] == did for row in listing.json()["data"])

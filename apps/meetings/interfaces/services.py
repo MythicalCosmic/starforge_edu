@@ -12,7 +12,9 @@ from apps.meetings.models import MeetingAttendee, StaffMeeting
 
 class IMeetingService(ABC):
     @abstractmethod
-    def scoped_list(self, *, user, is_unscoped: bool, is_manager: bool, branch_ids: set[int]) -> QuerySet[StaffMeeting]: ...
+    def scoped_list(
+        self, *, user, is_unscoped: bool, is_manager: bool, branch_ids: set[int]
+    ) -> QuerySet[StaffMeeting]: ...
 
     @abstractmethod
     def get_visible(
@@ -23,7 +25,7 @@ class IMeetingService(ABC):
     def upcoming_for(self, user) -> QuerySet[StaffMeeting]: ...
 
     @abstractmethod
-    def schedule(self, data: ScheduleMeetingDTO, *, created_by) -> StaffMeeting: ...
+    def schedule(self, data: ScheduleMeetingDTO, *, created_by, branch, attendees: list) -> StaffMeeting: ...
 
     @abstractmethod
     def cancel(self, meeting: StaffMeeting, *, actor) -> StaffMeeting: ...
@@ -34,3 +36,7 @@ class IMeetingService(ABC):
     @abstractmethod
     def resolve_branch(self, branch_id: int | None):
         """Resolve an active branch by id (400 if archived/missing), or None."""
+
+    @abstractmethod
+    def resolve_attendees(self, ids: list[int]) -> list:
+        """Resolve active staff invitees or raise a field-level 400."""

@@ -38,9 +38,7 @@ def require_platform_admin(view_func: ViewFunc) -> ViewFunc:
             )
         request.user, request.auth = result  # type: ignore[attr-defined]
         if not getattr(request.user, "is_staff", False):
-            raise PermissionException(
-                "You do not have permission to perform this action.", code="forbidden"
-            )
+            raise PermissionException("You do not have permission to perform this action.", code="forbidden")
         return view_func(request, *args, **kwargs)
 
     return wrapper

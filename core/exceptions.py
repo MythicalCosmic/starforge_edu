@@ -27,7 +27,6 @@ from rest_framework.exceptions import (
     ValidationError as DRFValidationError,
 )
 from rest_framework.response import Response
-from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 
 logger = logging.getLogger("starforge.exceptions")
 
@@ -113,12 +112,19 @@ class UnprocessableEntity(StarforgeError):
 
 
 class AuthenticationException(StarforgeError):
-    """401 with a stable code — used by TenantAwareJWTAuthentication (TD-1) for
-    `tenant_mismatch` / `token_stale`, surfaced through the same envelope."""
+    """401 with a stable code for invalid, revoked, or cross-tenant sessions."""
 
     code = "authentication_failed"
     status_code = status.HTTP_401_UNAUTHORIZED
     default_detail = _("Authentication failed.")
+
+
+class ServiceUnavailableException(StarforgeError):
+    """503 for an intentionally disabled or temporarily unavailable capability."""
+
+    code = "service_unavailable"
+    status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    default_detail = _("Service unavailable.")
 
 
 class TenantContextMissing(StarforgeError):
@@ -181,7 +187,7 @@ def _classify(exc: Exception) -> tuple[str, dict[str, Any] | None]:
         detail = exc.detail
         fields = {k: _as_list(v) for k, v in detail.items()} if isinstance(detail, dict) else None
         return "validation_error", fields
-    if isinstance(exc, (NotAuthenticated, AuthenticationFailed, InvalidToken, TokenError)):
+    if isinstance(exc, (NotAuthenticated, AuthenticationFailed)):
         return "authentication_failed", None
     if isinstance(exc, DRFPermissionDenied):
         return "forbidden", None

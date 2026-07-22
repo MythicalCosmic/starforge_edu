@@ -16,10 +16,10 @@ from core.interfaces import IBaseRepository
 
 
 class IPurchaseOrderRepository(IBaseRepository[PurchaseOrder]):
-    def scoped(self, *, is_unscoped: bool, user) -> QuerySet[PurchaseOrder]:
+    def scoped(self, *, is_unscoped: bool, user, branch_ids: set[int]) -> QuerySet[PurchaseOrder]:
         raise NotImplementedError
 
-    def get_scoped(self, *, is_unscoped: bool, user, pk: int) -> PurchaseOrder | None:
+    def get_scoped(self, *, is_unscoped: bool, user, branch_ids: set[int], pk: int) -> PurchaseOrder | None:
         raise NotImplementedError
 
     def get_branch(self, *, branch_id: int) -> Branch | None:

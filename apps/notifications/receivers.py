@@ -42,8 +42,10 @@ from __future__ import annotations
 import logging
 
 from django.dispatch import receiver
+from django.utils import timezone
 
 from apps.notifications import services
+from core.utils import stable_hash
 
 logger = logging.getLogger("starforge.notifications")
 
@@ -113,9 +115,7 @@ def _dispatch_many(*, user_ids, event_type: str, context: dict, dedupe_prefix: s
     if len(unique) <= _FANOUT_INLINE_MAX:
         for uid in unique:
             dedupe_key = f"{dedupe_prefix}:{uid}" if dedupe_prefix else None
-            services.dispatch(
-                event_type=event_type, recipient_id=uid, context=context, dedupe_key=dedupe_key
-            )
+            services.dispatch(event_type=event_type, recipient_id=uid, context=context, dedupe_key=dedupe_key)
         return
     # Large fan-out -> chunked Celery (mirrors announce_cohort); same dedupe contract.
     from celery_tasks.notification_tasks import dispatch_many_chunk
@@ -137,7 +137,7 @@ def _dispatch_many(*, user_ids, event_type: str, context: dict, dedupe_prefix: s
 # ---------------------------------------------------------------------------
 def _connect_attendance() -> None:
     try:
-        from apps.attendance.signals import student_marked_absent
+        from apps.attendance.signals import student_marked_absent, student_marked_late
     except Exception:  # pragma: no cover - sibling lane not present
         return
 
@@ -166,6 +166,27 @@ def _connect_attendance() -> None:
                 "lesson_id": lesson_id,
                 "status": "absent",
                 "auto": auto,
+            },
+        )
+
+    @receiver(student_marked_late, dispatch_uid="notifications.student_marked_late", weak=False)
+    def on_student_marked_late(sender, *, record_id, student_id, lesson_id, schema_name="", **kwargs):
+        from apps.notifications.models import EventType
+
+        _dispatch_many(
+            user_ids=_guardian_user_ids(student_id),
+            event_type=EventType.ATTENDANCE_LATE,
+            context={"student_id": student_id, "lesson_id": lesson_id},
+            dedupe_prefix=f"attendance.late:{record_id}",
+        )
+        _push_cohort_attendance(
+            lesson_id=lesson_id,
+            payload={
+                "record_id": record_id,
+                "student_id": student_id,
+                "lesson_id": lesson_id,
+                "status": "late",
+                "auto": False,
             },
         )
 
@@ -324,22 +345,31 @@ def _connect_auth() -> None:
 
     @receiver(login_succeeded, dispatch_uid="notifications.login_succeeded", weak=False)
     def on_login_succeeded(
-        sender, *, username=None, user_id=None, ip="", user_agent="", schema_name="", **kwargs
+        sender,
+        *,
+        username=None,
+        user_id=None,
+        ip="",
+        user_agent="",
+        device_id="",
+        is_new_device=False,
+        schema_name="",
+        **kwargs,
     ):
-        if user_id is None:
+        if user_id is None or not device_id or not is_new_device:
             return
-        # SUPPRESSED until the login signal carries device info. login_succeeded
-        # fires on EVERY successful login; AUTH_NEW_DEVICE_LOGIN defaults ON for
-        # in-app + push, so dispatching here cried "New device login" on every
-        # routine login — a false security alert. The real fix needs the auth
-        # flow to pass a device_id/fingerprint so we can dispatch ONLY when no
-        # prior non-revoked Device exists for that device (or dedupe per
-        # (user, device)). The receiver stays connected (wiring tested) but
-        # no-ops the dispatch until that signal payload lands.
-        # TODO(device-novelty): once login_succeeded carries device_id, resolve
-        # the device and dispatch EventType.AUTH_NEW_DEVICE_LOGIN only for a
-        # genuinely new device, deduped per (user, device).
-        return
+        from apps.notifications.models import EventType
+
+        # Keep the client-controlled identifier out of the unique key and
+        # persisted payload. Its stable digest remains bounded and makes a
+        # retried signal idempotent for the same device.
+        device_fingerprint = stable_hash(device_id)
+        services.dispatch(
+            event_type=EventType.AUTH_NEW_DEVICE_LOGIN,
+            recipient_id=user_id,
+            context={"ip": ip, "user_agent": user_agent},
+            dedupe_key=f"auth.new_device_login:{user_id}:{device_fingerprint}",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -398,15 +428,31 @@ def _connect_finance() -> None:
         )
 
     @receiver(payment_reminder, dispatch_uid="notifications.payment_reminder", weak=False)
-    def on_payment_reminder(sender, *, invoice_id, student_id, schema_name="", **kwargs):
+    def on_payment_reminder(
+        sender,
+        *,
+        invoice_id,
+        student_id,
+        reminder_cycle="",
+        reminder_date="",
+        schema_name="",
+        **kwargs,
+    ):
         from apps.notifications.models import EventType
 
-        # The finance reminder beat task supplies its own date-bucketed dedupe via
-        # the dispatch call site (DAY-3 D3-A-8); here we still namespace per invoice.
+        # New producers supply their canonical interval bucket.  Keep the date
+        # fallback for old queued events during deployment, but never recompute a
+        # producer bucket when it is present.
+        cycle = reminder_cycle or reminder_date or timezone.localdate().isoformat()
         _dispatch_many(
             user_ids=_invoice_recipients(invoice_id, student_id),
             event_type=EventType.FINANCE_PAYMENT_REMINDER,
-            context={"invoice_id": invoice_id, "student_id": student_id},
+            context={
+                "invoice_id": invoice_id,
+                "student_id": student_id,
+                "reminder_cycle": cycle,
+            },
+            dedupe_prefix=f"finance.payment_reminder:{invoice_id}:{cycle}",
         )
 
 

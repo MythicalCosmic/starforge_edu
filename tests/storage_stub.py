@@ -48,10 +48,14 @@ class InMemoryS3:
         return key
 
     def head_object(self, key):
-        return {"ContentLength": len(self.objects.get(key, b""))}
+        if key not in self.objects:
+            raise FileNotFoundError(key)
+        return {"ContentLength": len(self.objects[key])}
 
     def get_object_range(self, key, *, start=0, end=8191):
-        return self.objects.get(key, b"")[start : end + 1]
+        if key not in self.objects:
+            raise FileNotFoundError(key)
+        return self.objects[key][start : end + 1]
 
     def download_bytes(self, key):
         return self.objects[key]

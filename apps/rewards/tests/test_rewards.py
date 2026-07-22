@@ -131,7 +131,9 @@ def test_non_cash_reward_recorded_without_approval(tenant_a, as_role):
 def test_cash_reward_requires_an_amount(tenant_a, as_role):
     hod_client, _h = as_role(Role.HEAD_OF_DEPT)
     _tc, teacher = as_role(Role.TEACHER)
-    rt = hod_client.post(TYPES, {"name": "Bonus", "is_cash": True}, format="json").json()["data"]["id"]  # no default
+    rt = hod_client.post(TYPES, {"name": "Bonus", "is_cash": True}, format="json").json()["data"][
+        "id"
+    ]  # no default
     grant = hod_client.post(GRANTS, {"reward_type": rt, "recipient": teacher.id}, format="json")  # no amount
     assert grant.status_code == 400
     assert grant.json()["code"] == "amount_required"
@@ -250,6 +252,60 @@ def test_non_manager_cannot_retrieve_anothers_grant(tenant_a, as_role):
     _ac, alice = as_role(Role.TEACHER)
     bob_client, _b = as_role(Role.TEACHER)
     rt = director.post(TYPES, {"name": "Cert", "is_cash": False}, format="json").json()["data"]["id"]
-    gid = director.post(GRANTS, {"reward_type": rt, "recipient": alice.id}, format="json").json()["data"]["id"]
+    gid = director.post(GRANTS, {"reward_type": rt, "recipient": alice.id}, format="json").json()["data"][
+        "id"
+    ]
     # bob (a teacher) can't fetch alice's reward by id — it's not in his scope
     assert bob_client.get(f"{GRANTS}{gid}/").status_code == 404
+
+
+def test_type_reads_full_put_and_manager_grant_reads_are_wired(tenant_a, as_role):
+    director, _ = as_role(Role.DIRECTOR)
+    _teacher_client, teacher = as_role(Role.TEACHER)
+    reward_type = director.post(TYPES, {"name": "  Certificate  ", "is_cash": False}, format="json").json()[
+        "data"
+    ]
+    type_id = reward_type["id"]
+    assert reward_type["name"] == "Certificate"
+    assert director.get(TYPES).status_code == 200
+    assert director.get(f"{TYPES}{type_id}/").json()["data"]["name"] == "Certificate"
+
+    missing = director.put(f"{TYPES}{type_id}/", {"description": "x"}, format="json")
+    assert missing.status_code == 400
+    assert "name" in missing.json()["errors"]
+    replaced = director.put(
+        f"{TYPES}{type_id}/",
+        {"name": "  Service certificate  ", "description": "  Great work  ", "is_cash": False},
+        format="json",
+    )
+    assert replaced.status_code == 200
+    assert replaced.json()["data"]["name"] == "Service certificate"
+    assert replaced.json()["data"]["description"] == "Great work"
+
+    grant = director.post(
+        GRANTS,
+        {"reward_type": type_id, "recipient": teacher.id, "reason": "  Excellent service  "},
+        format="json",
+    ).json()["data"]
+    assert grant["reason"] == "Excellent service"
+    assert director.get(GRANTS).status_code == 200
+    assert director.get(f"{GRANTS}{grant['id']}/").status_code == 200
+    assert director.head(TYPES).status_code == 200
+    assert director.head(f"{TYPES}{type_id}/").status_code == 200
+    assert director.head(GRANTS).status_code == 200
+    assert director.head(f"{GRANTS}mine/").status_code == 200
+
+
+def test_reward_explicit_null_text_and_boolean_are_rejected(tenant_a, as_role):
+    director, _ = as_role(Role.DIRECTOR)
+    _teacher_client, teacher = as_role(Role.TEACHER)
+    type_id = director.post(TYPES, {"name": "Null guard", "is_cash": False}, format="json").json()["data"][
+        "id"
+    ]
+    assert director.patch(f"{TYPES}{type_id}/", {"is_cash": None}, format="json").status_code == 400
+    assert director.patch(f"{TYPES}{type_id}/", {"description": None}, format="json").status_code == 400
+    grant = director.post(
+        GRANTS, {"reward_type": type_id, "recipient": teacher.id, "reason": None}, format="json"
+    )
+    assert grant.status_code == 400
+    assert "reason" in grant.json()["errors"]

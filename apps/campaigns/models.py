@@ -43,6 +43,15 @@ class Campaign(models.Model):
         "users.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
     )
     sent_at = models.DateTimeField(null=True, blank=True)
+    # Durable worker lease.  The HTTP request only claims/enqueues a campaign; a
+    # background task owns delivery while this token is current and heartbeats it.
+    # A stale lease is recoverable by the periodic dispatcher, so SENDING is never
+    # a permanent terminal state after a worker/broker failure.
+    send_claim_token = models.UUIDField(null=True, blank=True, editable=False)
+    send_claimed_at = models.DateTimeField(null=True, blank=True)
+    send_heartbeat_at = models.DateTimeField(null=True, blank=True)
+    send_attempts = models.PositiveIntegerField(default=0)
+    last_error = models.CharField(max_length=255, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -50,6 +59,8 @@ class Campaign(models.Model):
         ordering = ("-created_at",)
         indexes = [
             models.Index(fields=("branch", "status")),
+            models.Index(fields=("status", "scheduled_at"), name="campaign_due_idx"),
+            models.Index(fields=("status", "send_heartbeat_at"), name="campaign_lease_idx"),
         ]
 
     def __str__(self) -> str:  # pragma: no cover
@@ -77,6 +88,9 @@ class CampaignRecipient(models.Model):
             models.UniqueConstraint(
                 fields=("campaign", "student"), name="one_recipient_per_campaign_student"
             ),
+        ]
+        indexes = [
+            models.Index(fields=("campaign", "status", "id"), name="campaign_recipient_work_idx"),
         ]
 
     def __str__(self) -> str:  # pragma: no cover

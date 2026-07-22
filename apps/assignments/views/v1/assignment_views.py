@@ -62,7 +62,7 @@ def _get_submission(request: HttpRequest, pk: int):
 @csrf_exempt
 @require_auth
 def assignments_collection_view(request: HttpRequest) -> HttpResponse:
-    if request.method == "GET":
+    if request.method in ("GET", "HEAD"):
         check_perm(request, f"{_RESOURCE}:read")
         qs = _assignment_service().scoped_list(user=request.user, roles=_roles(request))
         qs = apply_filters(
@@ -90,7 +90,10 @@ def assignment_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
         return success(assignment_to_dict(assignment))
     if request.method in ("PUT", "PATCH"):
         result = _assignment_service().update(
-            assignment, _update_changes(request), user=request.user, roles=_roles(request)
+            assignment,
+            _update_changes(request, partial=request.method == "PATCH"),
+            user=request.user,
+            roles=_roles(request),
         )
         return success(assignment_to_dict(result))
     if request.method == "DELETE":
@@ -111,12 +114,28 @@ def assignment_publish_view(request: HttpRequest, pk: int) -> HttpResponse:
 
 @csrf_exempt
 @require_auth
+def assignment_close_view(request: HttpRequest, pk: int) -> HttpResponse:
+    if request.method != "POST":
+        return error("Method not allowed.", code="method_not_allowed", status=405)
+    check_perm(request, f"{_RESOURCE}:write")
+    assignment = _get_assignment(request, pk)
+    return success(assignment_to_dict(_assignment_service().close(assignment, actor=request.user)))
+
+
+@csrf_exempt
+@require_auth
 def assignment_submissions_view(request: HttpRequest, pk: int) -> HttpResponse:
-    if request.method == "GET":
+    if request.method in ("GET", "HEAD"):
         check_perm(request, f"{_RESOURCE}:write")  # teacher list
         assignment = _get_assignment(request, pk)
         rows = _assignment_service().submissions_of(assignment, user=request.user, roles=_roles(request))
-        return success([submission_to_dict(s) for s in rows])
+        items, total, page, size = paginate(request, rows)
+        return paginated(
+            [submission_to_dict(s) for s in items],
+            total=total,
+            page=page,
+            page_size=size,
+        )
     if request.method == "POST":
         check_perm(request, f"{_RESOURCE}:submit")  # student submit
         assignment = _get_assignment(request, pk)
@@ -130,6 +149,7 @@ def assignment_submissions_view(request: HttpRequest, pk: int) -> HttpResponse:
             student=student,
             text=str_field(body, "text", max_length=20_000),
             attachment_keys=_attachment_keys(body),
+            actor=request.user,
         )
         return created(submission_to_dict(submission))
     return error("Method not allowed.", code="method_not_allowed", status=405)
@@ -158,6 +178,7 @@ def assignment_upload_url_view(request: HttpRequest) -> HttpResponse:
         filename=filename,
         content_type=str_field(body, "content_type", default="application/octet-stream", max_length=127),
         size_bytes=size_bytes,
+        requested_by=request.user,
     )
     return success(result)
 
@@ -166,7 +187,7 @@ def assignment_upload_url_view(request: HttpRequest) -> HttpResponse:
 @csrf_exempt
 @require_auth
 def submissions_collection_view(request: HttpRequest) -> HttpResponse:
-    if request.method == "GET":
+    if request.method in ("GET", "HEAD"):
         check_perm(request, f"{_RESOURCE}:read")
         qs = _submission_service().scoped_list(user=request.user, roles=_roles(request))
         items, total, page, size = paginate(request, qs)
@@ -226,6 +247,33 @@ def submission_grade_view(request: HttpRequest, pk: int) -> HttpResponse:
 
 @csrf_exempt
 @require_auth
+def submission_return_view(request: HttpRequest, pk: int) -> HttpResponse:
+    if request.method != "POST":
+        return error("Method not allowed.", code="method_not_allowed", status=405)
+    check_perm(request, f"{_RESOURCE}:write")
+    submission = _get_submission(request, pk)
+    returned = _submission_service().return_for_revision(submission, actor=request.user)
+    return success(submission_to_dict(returned))
+
+
+@csrf_exempt
+@require_auth
+def submission_plagiarism_view(request: HttpRequest, pk: int) -> HttpResponse:
+    if request.method != "POST":
+        return error("Method not allowed.", code="method_not_allowed", status=405)
+    check_perm(request, f"{_RESOURCE}:write")
+    result = _submission_service().check_plagiarism(_get_submission(request, pk))
+    return success(
+        {
+            "status": result.status,
+            "score": result.score,
+            "matched_submission_id": result.matched_submission_id,
+        }
+    )
+
+
+@csrf_exempt
+@require_auth
 def submission_ai_feedback_view(request: HttpRequest, pk: int) -> HttpResponse:
     if request.method != "POST":
         return error("Method not allowed.", code="method_not_allowed", status=405)
@@ -260,8 +308,18 @@ def _create_assignment(request: HttpRequest) -> HttpResponse:
     return created(assignment_to_dict(assignment))
 
 
-def _update_changes(request: HttpRequest) -> dict[str, Any]:
+def _update_changes(request: HttpRequest, *, partial: bool) -> dict[str, Any]:
     body = read_json(request)
+    if not partial:
+        missing = [field for field in ("cohort", "title", "due_at") if field not in body]
+        if missing:
+            raise ValidationException(
+                "Required fields are missing.",
+                code="validation_error",
+                fields={field: ["This field is required."] for field in missing},
+            )
+    # DRF-style PUT: required fields must be present, while omitted optional fields
+    # retain their current values (ModelSerializer did not reset them to defaults).
     changes: dict[str, Any] = {}
     if "cohort" in body:
         changes["cohort"] = int_field(body, "cohort", required=True)

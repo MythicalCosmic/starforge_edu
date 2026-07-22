@@ -24,7 +24,16 @@ class ReportScheduleInline(admin.TabularInline):
 
     model = ReportSchedule
     extra = 0
-    fields = ("cadence", "weekday", "day_of_month", "hour", "format", "is_active", "last_run_at", "created_by")
+    fields = (
+        "cadence",
+        "weekday",
+        "day_of_month",
+        "hour",
+        "format",
+        "is_active",
+        "last_run_at",
+        "created_by",
+    )
     readonly_fields = ("last_run_at",)
     autocomplete_fields = ("created_by",)
     show_change_link = True
