@@ -42,6 +42,9 @@ class IAuthService(ABC):
         *,
         principal_kind: str = "",
         principal_id: int | None = None,
+        device_id: str = "",
+        ip: str = "",
+        user_agent: str = "",
     ) -> dict[str, str]:
         """Verify the old password, set the new one (revoking all sessions), and return
         a fresh session so the current device stays logged in."""

@@ -264,15 +264,19 @@ def post_message(*, thread: Thread, sender, body: str, attachments=None) -> Mess
 
 
 def _notify_others(*, thread: Thread, sender, message: Message) -> None:
+    from apps.notifications.models import Channel
     from apps.notifications.services import dispatch
 
-    recipient_ids = (
-        ThreadParticipant.objects.filter(thread=thread).exclude(user=sender).values_list("user_id", flat=True)
+    recipients = (
+        ThreadParticipant.objects.filter(thread=thread)
+        .exclude(user=sender)
+        .values("user_id", "notifications_muted")
     )
     # Privacy: the notification carries only pointers (thread/message/sender) — never
     # the message body. Content lives once, in the access-scoped thread, so it can't
     # leak through (or be stranded in) a recipient's notification feed.
-    for uid in recipient_ids:
+    for recipient in recipients:
+        uid = recipient["user_id"]
         dispatch(
             event_type="message.received",
             recipient_id=uid,
@@ -282,8 +286,14 @@ def _notify_others(*, thread: Thread, sender, message: Message) -> None:
                 "sender": sender.get_full_name() if sender else "",
             },
             dedupe_key=f"message:{message.pk}:{uid}",
+            channels=([Channel.IN_APP] if recipient["notifications_muted"] else None),
         )
 
 
 def mark_read(*, thread: Thread, user) -> None:
     ThreadParticipant.objects.filter(thread=thread, user=user).update(last_read_at=timezone.now())
+
+
+def set_notifications_muted(*, thread: Thread, user, muted: bool) -> None:
+    """Persist the caller's own push preference for one participant thread."""
+    ThreadParticipant.objects.filter(thread=thread, user=user).update(notifications_muted=muted)

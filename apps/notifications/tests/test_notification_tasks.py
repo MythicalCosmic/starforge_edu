@@ -9,11 +9,12 @@ Covers the verified bugs in the messaging cluster:
 
 from __future__ import annotations
 
-from datetime import time
+from datetime import time, timedelta
 
 import pytest
 import time_machine
 from django.test import override_settings
+from django.utils import timezone
 from django_tenants.utils import schema_context
 
 pytestmark = pytest.mark.django_db
@@ -459,6 +460,7 @@ def test_push_retry_targets_only_the_failed_device(
     import celery_tasks.notification_tasks as nt
     from apps.notifications.models import Channel, EventType, Notification, NotificationDelivery
     from apps.users.models import Device
+    from core.session_auth import create_session
     from infrastructure.push import fcm_client
 
     user = _user_with_phone(tenant_a)
@@ -481,6 +483,8 @@ def test_push_retry_targets_only_the_failed_device(
     with schema_context(tenant_a.schema_name):
         Device.objects.create(user=user, device_id="device-1", platform="android", push_token="fails-once")
         Device.objects.create(user=user, device_id="device-2", platform="ios", push_token="already-sent")
+        create_session(user, device_id="device-1")
+        create_session(user, device_id="device-2")
         notification = Notification.objects.create(
             user=user,
             event_type=EventType.ASSIGNMENTS_CREATED,
@@ -509,3 +513,105 @@ def test_push_retry_targets_only_the_failed_device(
         monkeypatch.setattr(fcm_client, "get_push_client", lambda: RecoveredPush())
         assert nt.deliver_single_channel(notification.pk, Channel.PUSH, attempt=1) == "sent"
         assert retried_tokens == ["fails-once"]
+
+
+@override_settings(PUSH_NOTIFICATIONS_ENABLED=True)
+@time_machine.travel("2026-06-16 12:00:00 +05:00", tick=False)
+def test_push_targets_only_devices_with_active_unexpired_sessions(tenant_a, monkeypatch):
+    import celery_tasks.notification_tasks as nt
+    from apps.notifications.models import Channel, EventType, Notification
+    from apps.users.models import Device, Session
+    from core.session_auth import create_session
+    from infrastructure.push import fcm_client
+
+    user = _user_with_phone(tenant_a)
+    sent_tokens: list[str] = []
+    sent_payloads: list[dict[str, str]] = []
+
+    class RecordingPush:
+        def send(self, *, token, **kwargs):
+            sent_tokens.append(token)
+            sent_payloads.append(kwargs["data"])
+            return {"success": True, "message_id": f"sent-{token}"}
+
+    monkeypatch.setattr(fcm_client, "get_push_client", lambda: RecordingPush())
+
+    with schema_context(tenant_a.schema_name):
+        Device.objects.create(
+            user=user,
+            device_id="live-device",
+            platform="ios",
+            push_token="live-token",
+        )
+        Device.objects.create(
+            user=user,
+            device_id="expired-device",
+            platform="android",
+            push_token="expired-token",
+        )
+        Device.objects.create(
+            user=user,
+            device_id="revoked-device",
+            platform="android",
+            push_token="revoked-token",
+        )
+        create_session(user, device_id="live-device")
+        expired = create_session(user, device_id="expired-device")
+        revoked = create_session(user, device_id="revoked-device")
+        Session.objects.filter(pk=expired.pk).update(expires_at=timezone.now() - timedelta(seconds=1))
+        Session.objects.filter(pk=revoked.pk).update(revoked_at=timezone.now())
+        notification = Notification.objects.create(
+            user=user,
+            event_type=EventType.ASSIGNMENTS_CREATED,
+            title="Assignment",
+            body="A new assignment is ready.",
+        )
+
+        result = nt.dispatch_notification(notification.pk, channels=[Channel.PUSH])
+
+    assert result["results"][Channel.PUSH] == "sent"
+    assert sent_tokens == ["live-token"]
+    assert sent_payloads[0]["tenant_slug"] == tenant_a.schema_name
+
+
+@override_settings(PUSH_NOTIFICATIONS_ENABLED=True)
+@time_machine.travel("2026-06-16 12:00:00 +05:00", tick=False)
+def test_push_with_only_expired_session_records_no_devices(tenant_a, monkeypatch):
+    import celery_tasks.notification_tasks as nt
+    from apps.notifications.models import Channel, EventType, Notification, NotificationDelivery
+    from apps.users.models import Device, Session
+    from core.session_auth import create_session
+    from infrastructure.push import fcm_client
+
+    user = _user_with_phone(tenant_a)
+
+    class UnexpectedPush:
+        def send(self, **kwargs):
+            pytest.fail("an expired app session received a private push")
+
+    monkeypatch.setattr(fcm_client, "get_push_client", lambda: UnexpectedPush())
+
+    with schema_context(tenant_a.schema_name):
+        Device.objects.create(
+            user=user,
+            device_id="expired-only",
+            platform="ios",
+            push_token="must-not-send",
+        )
+        session = create_session(user, device_id="expired-only")
+        Session.objects.filter(pk=session.pk).update(expires_at=timezone.now() - timedelta(seconds=1))
+        notification = Notification.objects.create(
+            user=user,
+            event_type=EventType.ASSIGNMENTS_CREATED,
+            title="Assignment",
+            body="A new assignment is ready.",
+        )
+
+        result = nt.dispatch_notification(notification.pk, channels=[Channel.PUSH])
+        delivery = NotificationDelivery.objects.get(
+            notification=notification,
+            channel=Channel.PUSH,
+        )
+
+    assert result["results"][Channel.PUSH] == "failed_no_devices"
+    assert delivery.provider_response == {"error": "no_devices"}

@@ -324,13 +324,7 @@ def _channel_is_complete(notification, channel: str) -> bool:
     ):
         return True
 
-    from apps.users.models import Device
-
-    active_device_ids = set(
-        Device.objects.filter(user=notification.user, revoked_at__isnull=True)
-        .exclude(push_token="")
-        .values_list("device_id", flat=True)
-    )
+    active_device_ids = set(_active_push_devices(notification.user).values_list("device_id", flat=True))
     if not active_device_ids:
         return bool(rows)
 
@@ -344,6 +338,36 @@ def _channel_is_complete(notification, channel: str) -> bool:
         )
     }
     return active_device_ids.issubset(complete_device_ids)
+
+
+def _active_push_devices(user):
+    """Return push devices backed by a live session for this exact device.
+
+    A token can outlive logout, password reset, or an expired app session. Push
+    must follow the same authorization boundary as the API, so a registered
+    token alone is never sufficient to receive private notification content.
+    """
+    from django.db.models import Exists, OuterRef
+
+    from apps.users.models import Device, Session
+
+    active_sessions = Session.objects.filter(
+        user_id=user.pk,
+        device_id=OuterRef("device_id"),
+        revoked_at__isnull=True,
+        expires_at__gt=timezone.now(),
+        read_only=False,
+    )
+    return (
+        Device.objects.filter(
+            user=user,
+            user__is_active=True,
+            revoked_at__isnull=True,
+        )
+        .exclude(push_token="")
+        .annotate(has_active_session=Exists(active_sessions))
+        .filter(has_active_session=True)
+    )
 
 
 def _record_retryable_failure(notification, channel: str, exc: Exception, **extra):
@@ -419,12 +443,13 @@ def _deliver_email(notification, user, subject, body) -> str:
 
 
 def _deliver_push(notification, user, title, body, context) -> str:
-    """Send to every non-revoked device; clear a token after 3 consecutive fails."""
+    """Send to devices with a live session; clear dead provider tokens."""
     from apps.notifications.models import Channel, NotificationDelivery
     from apps.users.models import Device
+    from core.utils import current_schema
     from infrastructure.push.fcm_client import get_push_client
 
-    devices = list(Device.objects.filter(user=user, revoked_at__isnull=True).exclude(push_token=""))
+    devices = list(_active_push_devices(user))
     if not devices:
         _record(
             notification,
@@ -446,7 +471,12 @@ def _deliver_push(notification, user, title, body, context) -> str:
                 token=device.push_token,
                 title=title,
                 body=body,
-                data={k: str(v) for k, v in context.items()},
+                data={
+                    **{k: str(v) for k, v in context.items()},
+                    "event_type": notification.event_type,
+                    "notification_id": str(notification.pk),
+                    "tenant_slug": current_schema(),
+                },
             )
         except Exception as exc:
             # Dependency, credential, timeout, and provider outages say nothing

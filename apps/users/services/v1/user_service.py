@@ -75,5 +75,8 @@ class UserService(IUserService):
         if device is None:
             return False
         device.revoked_at = timezone.now()
-        device.save(update_fields=["revoked_at"])
+        # The provider token is a credential-like endpoint. Erase it on revoke
+        # so a shared or signed-out installation cannot be targeted again.
+        device.push_token = ""
+        device.save(update_fields=["revoked_at", "push_token"])
         return True

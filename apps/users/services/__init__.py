@@ -10,16 +10,18 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.validators import UnicodeUsernameValidator
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.validators import validate_email
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
 from apps.users.models import Device
 from core.exceptions import ValidationException
+from core.utils import stable_hash
 from core.validators import normalize_phone
 
 _NAME_MAX = 150  # User first/last/middle_name column length
 _USERNAME_MAX = 150
+_MAX_PUSH_TOKEN_BYTES = 8 * 1024
 
 if TYPE_CHECKING:
     from apps.users.models import User
@@ -324,7 +326,10 @@ def revoke_role_account_access(account, *, deactivate_profile: bool = True) -> N
     account.user = user
     RoleMembership.objects.filter(user_id=account.user_id, revoked_at__isnull=True).update(revoked_at=now)
     Session.objects.filter(user_id=account.user_id, revoked_at__isnull=True).update(revoked_at=now)
-    Device.objects.filter(user_id=account.user_id, revoked_at__isnull=True).update(revoked_at=now)
+    Device.objects.filter(user_id=account.user_id, revoked_at__isnull=True).update(
+        revoked_at=now,
+        push_token="",
+    )
 
 
 @transaction.atomic
@@ -529,6 +534,7 @@ def generate_temp_password(length: int = 10) -> str:
     return "".join(chars)
 
 
+@transaction.atomic
 def register_device(
     *,
     user: User,
@@ -550,7 +556,40 @@ def register_device(
         "last_seen_at": timezone.now(),
         "revoked_at": None,
     }
-    if push_token:
-        defaults["push_token"] = push_token
-    device, _created = Device.objects.update_or_create(user=user, device_id=device_id, defaults=defaults)
-    return device
+    normalized_push_token = push_token.strip()
+    if len(normalized_push_token.encode("utf-8")) > _MAX_PUSH_TOKEN_BYTES:
+        raise ValidationException(
+            _("Push token is too large."),
+            fields={"push_token": [f"Must be at most {_MAX_PUSH_TOKEN_BYTES} bytes."]},
+        )
+    push_token_fingerprint = stable_hash(normalized_push_token) if normalized_push_token else ""
+    if normalized_push_token:
+        defaults["push_token"] = normalized_push_token
+
+    # The partial unique constraint is the final cross-account privacy boundary.
+    # If two accounts claim a newly-issued provider token concurrently, one may
+    # discover the other only after its first write conflicts. Retry once in a
+    # fresh savepoint, lock the now-visible owner, clear it, and let last writer
+    # win without ever storing the same token on two accounts.
+    for attempt in range(2):
+        try:
+            with transaction.atomic():
+                if normalized_push_token:
+                    conflicting_ids = list(
+                        Device.objects.select_for_update()
+                        .filter(push_token_fingerprint=push_token_fingerprint)
+                        .exclude(user=user, device_id=device_id)
+                        .values_list("pk", flat=True)
+                    )
+                    if conflicting_ids:
+                        Device.objects.filter(pk__in=conflicting_ids).update(push_token="")
+                device, _created = Device.objects.update_or_create(
+                    user=user,
+                    device_id=device_id,
+                    defaults=defaults,
+                )
+                return device
+        except IntegrityError:
+            if not normalized_push_token or attempt == 1:
+                raise
+    raise AssertionError("unreachable device registration retry state")

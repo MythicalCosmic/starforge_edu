@@ -18,9 +18,13 @@ def participant_to_dict(participant: ThreadParticipant) -> dict:
     }
 
 
-def thread_to_dict(thread: Thread, *, unread_count: int) -> dict:
+def thread_to_dict(thread: Thread, *, unread_count: int, viewer_id: int | None = None) -> dict:
     # unread_count is supplied by the caller (computed in one bounded query via
     # ThreadService.unread_counts) rather than derived from a prefetch of every message.
+    viewer_participant = next(
+        (participant for participant in thread.participants.all() if participant.user_id == viewer_id),
+        None,
+    )
     return {
         "id": thread.id,
         "subject": thread.subject,
@@ -30,6 +34,7 @@ def thread_to_dict(thread: Thread, *, unread_count: int) -> dict:
         "created_at": thread.created_at.isoformat(),
         "participants": [participant_to_dict(p) for p in thread.participants.all()],
         "unread_count": unread_count,
+        "notifications_muted": bool(viewer_participant and viewer_participant.notifications_muted),
     }
 
 
@@ -92,7 +97,5 @@ def contact_to_dict(user) -> dict:
         "username": username,
         "role_label": role_label,
         "role_slug": role_slug,
-        "is_online": bool(
-            last_seen and last_seen >= timezone.now() - timedelta(minutes=5)
-        ),
+        "is_online": bool(last_seen and last_seen >= timezone.now() - timedelta(minutes=5)),
     }

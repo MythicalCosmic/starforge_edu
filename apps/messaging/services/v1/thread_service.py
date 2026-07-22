@@ -10,7 +10,12 @@ from apps.messaging.dto.thread_dto import CreateThreadDTO
 from apps.messaging.interfaces.repositories import IThreadRepository
 from apps.messaging.interfaces.services import IThreadService
 from apps.messaging.models import Message, Thread
-from apps.messaging.services import create_thread, mark_read, post_message
+from apps.messaging.services import (
+    create_thread,
+    mark_read,
+    post_message,
+    set_notifications_muted,
+)
 from apps.users.models import User
 from core.exceptions import PermissionException, ValidationException
 
@@ -65,6 +70,9 @@ class ThreadService(IThreadService):
 
     def mark_read(self, *, thread: Thread, user) -> None:
         mark_read(thread=thread, user=user)
+
+    def set_notifications_muted(self, *, thread: Thread, user, muted: bool) -> None:
+        set_notifications_muted(thread=thread, user=user, muted=muted)
 
     def presign_attachment(self, *, filename: str, content_type: str, size_bytes: int, requested_by) -> dict:
         from apps.messaging.services import presign_attachment_upload

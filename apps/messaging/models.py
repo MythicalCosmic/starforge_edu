@@ -50,6 +50,7 @@ class ThreadParticipant(models.Model):
     thread = models.ForeignKey(Thread, on_delete=models.CASCADE, related_name="participants")
     user = models.ForeignKey("users.User", on_delete=models.CASCADE, related_name="thread_participations")
     last_read_at = models.DateTimeField(null=True, blank=True)
+    notifications_muted = models.BooleanField(default=False)
     added_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

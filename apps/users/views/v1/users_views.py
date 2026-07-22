@@ -25,7 +25,7 @@ from core.exceptions import NotFoundException, ValidationException
 from core.http import read_json, str_field
 from core.listing import apply_filters, paginate
 from core.responses import created, error, no_content, paginated, success
-from core.utils import user_agent
+from core.utils import current_schema, user_agent
 
 _GENDERS = frozenset(g[0] for g in User.Gender.choices)
 _LANGUAGES = frozenset(lang[0] for lang in User.Language.choices)
@@ -209,8 +209,14 @@ def user_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
 def me_view(request: HttpRequest) -> HttpResponse:
     user: Any = request.user
     kind, account = _role_account(request)
+
+    def payload() -> dict[str, Any]:
+        profile = role_account_to_dict(kind, account) if account is not None else user_to_dict(user)
+        profile["tenant_slug"] = current_schema()
+        return profile
+
     if request.method in ("GET", "HEAD"):
-        return success(role_account_to_dict(kind, account) if account is not None else user_to_dict(user))
+        return success(payload())
     if request.method == "PATCH":
         # Self-scoped write with no perm code -> reinstate the read-only-token deny
         # the old DenyWriteForReadOnlyToken gave (an impersonating admin must not
@@ -239,9 +245,11 @@ def me_view(request: HttpRequest) -> HttpResponse:
             from apps.users.services import update_role_identity
 
             update_role_identity(account, changes)
-            return success(role_account_to_dict(kind, account))
+            return success(payload())
         updated = _service().update_me(user=user, changes=_me_changes(request))
-        return success(user_to_dict(updated))
+        profile = user_to_dict(updated)
+        profile["tenant_slug"] = current_schema()
+        return success(profile)
     return _method_not_allowed()
 
 

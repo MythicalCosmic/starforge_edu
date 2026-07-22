@@ -641,6 +641,15 @@ def logout_everywhere(user: User) -> None:
     from core.session_auth import revoke_all_for_user
 
     revoke_all_for_user(user.pk)
+    # Push tokens are credentials for private out-of-app content. Logging out
+    # everywhere (also used by password change/reset) must revoke every device
+    # registration instead of leaving a stale token eligible for delivery.
+    from apps.users.models import Device
+
+    Device.objects.filter(user_id=user.pk, revoked_at__isnull=True).update(
+        revoked_at=timezone.now(),
+        push_token="",
+    )
     bump_token_version(user.pk)
     # TD-9: logout has no signal — audit it directly.
     from apps.audit.services import audit_log

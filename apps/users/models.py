@@ -20,6 +20,7 @@ from django.contrib.auth.hashers import is_password_usable, make_password
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin
 from django.contrib.auth.validators import UnicodeUsernameValidator
 from django.db import models
+from django.db.models.functions import SHA256
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
@@ -177,6 +178,15 @@ class Device(models.Model):
     device_id = models.CharField(max_length=128)
     platform = models.CharField(max_length=16, choices=PLATFORM_CHOICES)
     push_token = models.TextField(blank=True)
+    push_token_fingerprint = models.GeneratedField(
+        expression=models.Case(
+            models.When(push_token="", then=models.Value("")),
+            default=SHA256("push_token"),
+            output_field=models.CharField(max_length=64),
+        ),
+        output_field=models.CharField(max_length=64),
+        db_persist=True,
+    )
     user_agent = models.CharField(max_length=512, blank=True)
     last_seen_at = models.DateTimeField(default=timezone.now)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -184,6 +194,13 @@ class Device(models.Model):
 
     class Meta:
         unique_together = (("user", "device_id"),)
+        constraints = [
+            models.UniqueConstraint(
+                fields=("push_token_fingerprint",),
+                condition=~models.Q(push_token_fingerprint=""),
+                name="device_unique_push_fingerprint",
+            )
+        ]
         ordering = ("-last_seen_at",)
 
 

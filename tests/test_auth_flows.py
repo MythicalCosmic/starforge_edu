@@ -66,6 +66,7 @@ def test_login_happy_path_registers_device(tenant_a, client_for, user_in):
     me = authed.get(ME_URL)
     assert me.status_code == 200
     assert me.json()["data"]["username"] == user.username  # layered envelope
+    assert me.json()["data"]["tenant_slug"] == tenant_a.schema_name
 
 
 def test_role_login_student_signs_in_as_their_role(tenant_a, client_for):
@@ -94,6 +95,7 @@ def test_role_login_student_signs_in_as_their_role(tenant_a, client_for):
     assert me.status_code == 200
     assert me.json()["data"]["id"] == student_id
     assert me.json()["data"]["principal_kind"] == "student"
+    assert me.json()["data"]["tenant_slug"] == tenant_a.schema_name
 
 
 def test_role_login_wrong_password_401(tenant_a, client_for):
@@ -221,6 +223,134 @@ def test_password_change_ends_other_sessions(tenant_a, client_for, user_in, as_u
             LOGIN_URL, {"username": user.username, "password": NEW_PASSWORD}, format="json"
         )
     ).status_code == 200
+
+
+def test_password_change_preserves_current_push_device_binding(
+    tenant_a,
+    client_for,
+    user_in,
+):
+    import celery_tasks.notification_tasks as notification_tasks
+    from apps.users.models import Device
+    from core.session_auth import create_session, validate_session_key
+
+    user = _password_user(tenant_a, user_in)
+    login = client_for(tenant_a).post(
+        LOGIN_URL,
+        {
+            "username": user.username,
+            "password": PASSWORD,
+            "device_id": "current-phone",
+            "platform": "ios",
+        },
+        format="json",
+    )
+    assert login.status_code == 200
+    client = client_for(tenant_a)
+    client.credentials(HTTP_AUTHORIZATION=f"Bearer {login.json()['data']['access']}")
+    registered = client.post(
+        "/api/v1/users/devices/",
+        {
+            "device_id": "current-phone",
+            "platform": "ios",
+            "push_token": "current-private-token",
+        },
+        format="json",
+    )
+    assert registered.status_code == 201
+    with schema_context(tenant_a.schema_name):
+        Device.objects.create(
+            user=user,
+            device_id="old-tablet",
+            platform="android",
+            push_token="old-private-token",
+        )
+        create_session(user, device_id="old-tablet")
+
+    changed = client.post(
+        CHANGE_URL,
+        {"old_password": PASSWORD, "new_password": NEW_PASSWORD},
+        format="json",
+    )
+
+    assert changed.status_code == 200, changed.content
+    new_key = changed.json()["data"]["access"]
+    with schema_context(tenant_a.schema_name):
+        fresh_session = validate_session_key(new_key)
+        assert fresh_session is not None
+        assert fresh_session.device_id == "current-phone"
+        current = Device.objects.get(user=user, device_id="current-phone")
+        old = Device.objects.get(user=user, device_id="old-tablet")
+        assert current.revoked_at is None
+        assert current.push_token == "current-private-token"
+        assert old.revoked_at is not None
+        assert old.push_token == ""
+        assert list(
+            notification_tasks._active_push_devices(user).values_list(
+                "device_id",
+                flat=True,
+            )
+        ) == ["current-phone"]
+
+
+def test_role_password_change_keeps_device_id_and_push_eligibility(
+    tenant_a,
+    client_for,
+):
+    import celery_tasks.notification_tasks as notification_tasks
+    from apps.students.tests.factories import StudentProfileFactory
+    from apps.users.models import Device
+    from core.session_auth import validate_session_key
+
+    with schema_context(tenant_a.schema_name):
+        student = StudentProfileFactory(username="push.student")
+        student.set_password(PASSWORD)
+        student.save(update_fields=["password"])
+        user = student.user
+
+    login = client_for(tenant_a).post(
+        ROLE_LOGIN_URL,
+        {
+            "username": student.username,
+            "password": PASSWORD,
+            "device_id": "role-phone",
+            "platform": "android",
+        },
+        format="json",
+    )
+    assert login.status_code == 200, login.content
+    client = client_for(tenant_a)
+    client.credentials(HTTP_AUTHORIZATION=f"Bearer {login.json()['data']['access']}")
+    registered = client.post(
+        "/api/v1/users/devices/",
+        {
+            "device_id": "role-phone",
+            "platform": "android",
+            "push_token": "role-private-token",
+        },
+        format="json",
+    )
+    assert registered.status_code == 201
+
+    changed = client.post(
+        CHANGE_URL,
+        {"old_password": PASSWORD, "new_password": NEW_PASSWORD},
+        format="json",
+    )
+
+    assert changed.status_code == 200, changed.content
+    with schema_context(tenant_a.schema_name):
+        fresh_session = validate_session_key(changed.json()["data"]["access"])
+        assert fresh_session is not None
+        assert fresh_session.device_id == "role-phone"
+        device = Device.objects.get(user=user, device_id="role-phone")
+        assert device.push_token == "role-private-token"
+        assert list(
+            notification_tasks._active_push_devices(user).values_list(
+                "device_id",
+                flat=True,
+            )
+        ) == ["role-phone"]
 
 
 # ---------------------------------------------------------------------------

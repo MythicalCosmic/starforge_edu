@@ -6,6 +6,7 @@ from apps.messaging.views.v1.thread_views import (
     thread_attachment_download_view,
     thread_detail_view,
     thread_messages_view,
+    thread_preferences_view,
     thread_read_view,
     threads_collection_view,
 )
@@ -17,6 +18,11 @@ urlpatterns = [
     path("threads/<int:pk>/", thread_detail_view, name="thread-detail"),
     path("threads/<int:pk>/messages/", thread_messages_view, name="thread-messages"),
     path("threads/<int:pk>/read/", thread_read_view, name="thread-read"),
+    path(
+        "threads/<int:pk>/preferences/",
+        thread_preferences_view,
+        name="thread-preferences",
+    ),
     path(
         "threads/<int:pk>/attachments/download/",
         thread_attachment_download_view,

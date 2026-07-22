@@ -3,7 +3,7 @@ student↔staff safeguarding, unread counts, and realtime notify."""
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from botocore.exceptions import ClientError
@@ -71,6 +71,71 @@ def test_create_thread_and_exchange_messages(tenant_a, as_role):
     # both messages are visible to a participant
     msgs = _rows(teacher_client.get(f"{THREADS}{tid}/messages/").json())
     assert [m["body"] for m in msgs] == ["Please submit.", "Done!"]
+
+
+def test_message_day_window_is_half_open_paginated_and_totally_ordered(tenant_a, as_role):
+    from apps.messaging.models import Message
+
+    teacher_client, teacher = as_role(Role.TEACHER)
+    _student_client, student = as_role(Role.STUDENT)
+    outsider_client, _outsider = as_role(Role.TEACHER)
+    tid = teacher_client.post(THREADS, {"participant_ids": [student.id]}, format="json").json()["data"]["id"]
+    lower = datetime(2026, 7, 21, tzinfo=UTC)
+    upper = lower + timedelta(days=1)
+    with schema_context(tenant_a.schema_name):
+        first = Message.objects.create(thread_id=tid, sender=teacher, body="first at boundary")
+        second = Message.objects.create(thread_id=tid, sender=teacher, body="second same instant")
+        excluded = Message.objects.create(thread_id=tid, sender=teacher, body="next day boundary")
+        Message.objects.filter(pk__in=(first.pk, second.pk)).update(created_at=lower)
+        Message.objects.filter(pk=excluded.pk).update(created_at=upper)
+
+    url = f"{THREADS}{tid}/messages/"
+    bounds = {
+        "created_at_gte": lower.isoformat(),
+        "created_at_lt": upper.isoformat(),
+        "page_size": 1,
+    }
+    page_one = teacher_client.get(url, bounds)
+    page_two = teacher_client.get(url, {**bounds, "page": 2})
+
+    assert page_one.status_code == 200, page_one.content
+    assert page_two.status_code == 200, page_two.content
+    assert [row["id"] for row in _rows(page_one.json())] == [first.pk]
+    assert [row["id"] for row in _rows(page_two.json())] == [second.pk]
+    assert page_one.json()["pagination"]["total"] == 2
+    assert page_one.json()["pagination"]["pages"] == 2
+    assert excluded.pk not in {row["id"] for row in _rows(page_one.json()) + _rows(page_two.json())}
+    # Scope is resolved before range processing: a guessed thread stays hidden.
+    assert outsider_client.get(url, bounds).status_code == 404
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"created_at_gte": "2026-07-21T00:00:00Z"},
+        {
+            "created_at_gte": "2026-07-21T00:00:00",
+            "created_at_lt": "2026-07-22T00:00:00",
+        },
+        {
+            "created_at_gte": "2026-07-22T00:00:00Z",
+            "created_at_lt": "2026-07-21T00:00:00Z",
+        },
+        {
+            "created_at_gte": "2026-07-21T00:00:00Z",
+            "created_at_lt": "2026-07-22T03:00:01Z",
+        },
+    ],
+)
+def test_message_day_window_rejects_partial_naive_reversed_or_unbounded_ranges(tenant_a, as_role, params):
+    teacher_client, _teacher = as_role(Role.TEACHER)
+    _student_client, student = as_role(Role.STUDENT)
+    tid = teacher_client.post(THREADS, {"participant_ids": [student.id]}, format="json").json()["data"]["id"]
+
+    response = teacher_client.get(f"{THREADS}{tid}/messages/", params)
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "validation_error"
 
 
 def test_non_participant_cannot_access_thread(tenant_a, as_role):

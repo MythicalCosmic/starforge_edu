@@ -4,14 +4,18 @@ Strict participant isolation: you only ever resolve threads you're a member of, 
 detail/action is participant-gated (an out-of-scope thread 404s). Opening a thread is
 messaging:write; reading + listing is messaging:read; POSTing a message additionally
 requires messaging:write (so an A-2 write-revoke makes a role read-only). Messages are
-append-only. No PUT/PATCH/DELETE (405).
+append-only. The only PATCH is the caller's own per-thread notification preference;
+messages themselves have no PUT/PATCH/DELETE surface.
 """
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Any
 
 from django.http import HttpRequest, HttpResponse
+from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from django.views.decorators.csrf import csrf_exempt
 
 from apps.messaging.dto.thread_dto import CreateThreadDTO
@@ -27,6 +31,7 @@ from core.responses import created, error, paginated, success
 _RESOURCE = "messaging"
 _MAX_PARTICIPANTS = 100
 _MAX_ATTACHMENTS = 10
+_MAX_MESSAGE_WINDOW = timedelta(hours=26)
 
 
 def _service() -> IThreadService:
@@ -48,6 +53,56 @@ def _get_thread(request: HttpRequest, pk: int):
     if thread is None:
         raise NotFoundException(code="not_found")  # non-participant -> 404, strict isolation
     return thread
+
+
+def _message_window(request: HttpRequest):
+    """Return a bounded, timezone-aware half-open message range.
+
+    Mobile calendar days are converted to UTC by the client. Requiring both
+    bounds prevents a date jump from accidentally turning into an unbounded
+    history scan, while the half-open interval keeps adjacent days disjoint.
+    """
+    raw_gte = request.GET.get("created_at_gte", "").strip()
+    raw_lt = request.GET.get("created_at_lt", "").strip()
+    if not raw_gte and not raw_lt:
+        return None
+    if not raw_gte or not raw_lt:
+        raise ValidationException(
+            "created_at_gte and created_at_lt must be provided together.",
+            code="validation_error",
+            fields={
+                "created_at_gte": ["Provide both UTC bounds."],
+                "created_at_lt": ["Provide both UTC bounds."],
+            },
+        )
+
+    try:
+        lower = parse_datetime(raw_gte)
+        upper = parse_datetime(raw_lt)
+    except (OverflowError, ValueError):
+        lower = upper = None
+    if lower is None or upper is None or not timezone.is_aware(lower) or not timezone.is_aware(upper):
+        raise ValidationException(
+            "Message date bounds must be timezone-aware ISO-8601 datetimes.",
+            code="validation_error",
+            fields={
+                "created_at_gte": ["Use an ISO-8601 datetime with an offset or Z."],
+                "created_at_lt": ["Use an ISO-8601 datetime with an offset or Z."],
+            },
+        )
+    if lower >= upper:
+        raise ValidationException(
+            "created_at_gte must be earlier than created_at_lt.",
+            code="validation_error",
+            fields={"created_at_lt": ["Must be later than created_at_gte."]},
+        )
+    if upper - lower > _MAX_MESSAGE_WINDOW:
+        raise ValidationException(
+            "A message date window cannot exceed 26 hours.",
+            code="validation_error",
+            fields={"created_at_lt": ["Choose one local calendar day."]},
+        )
+    return lower, upper
 
 
 @csrf_exempt
@@ -101,7 +156,14 @@ def threads_collection_view(request: HttpRequest) -> HttpResponse:
         qs = apply_filters(request, qs, ordering_fields=("last_message_at", "created_at"))
         items, total, page, size = paginate(request, qs)
         unread = _unread_map(request, items)
-        rows = [thread_to_dict(t, unread_count=unread.get(t.id, 0)) for t in items]
+        rows = [
+            thread_to_dict(
+                t,
+                unread_count=unread.get(t.id, 0),
+                viewer_id=_viewer_id(request),
+            )
+            for t in items
+        ]
         return paginated(rows, total=total, page=page, page_size=size)
     if request.method == "POST":
         check_perm(request, f"{_RESOURCE}:write")
@@ -117,7 +179,13 @@ def thread_detail_view(request: HttpRequest, pk: int) -> HttpResponse:
     check_perm(request, f"{_RESOURCE}:read")
     thread = _get_thread(request, pk)
     unread = _unread_map(request, [thread])
-    return success(thread_to_dict(thread, unread_count=unread.get(thread.id, 0)))
+    return success(
+        thread_to_dict(
+            thread,
+            unread_count=unread.get(thread.id, 0),
+            viewer_id=_viewer_id(request),
+        )
+    )
 
 
 @csrf_exempt
@@ -131,6 +199,10 @@ def thread_messages_view(request: HttpRequest, pk: int) -> HttpResponse:
         check_perm(request, f"{_RESOURCE}:write")  # posting additionally needs write
         return _send_message(request, thread)
     qs = _service().messages_of(thread=thread)
+    window = _message_window(request)
+    if window is not None:
+        lower, upper = window
+        qs = qs.filter(created_at__gte=lower, created_at__lt=upper)
     items, total, page, size = paginate(request, qs)
     return paginated([message_to_dict(m) for m in items], total=total, page=page, page_size=size)
 
@@ -144,6 +216,29 @@ def thread_read_view(request: HttpRequest, pk: int) -> HttpResponse:
     thread = _get_thread(request, pk)
     _service().mark_read(thread=thread, user=request.user)
     return success({"status": "ok"})
+
+
+@csrf_exempt
+@require_auth
+def thread_preferences_view(request: HttpRequest, pk: int) -> HttpResponse:
+    if request.method != "PATCH":
+        return error("Method not allowed.", code="method_not_allowed", status=405)
+    check_perm(request, f"{_RESOURCE}:read")
+    thread = _get_thread(request, pk)
+    body = read_json(request)
+    if not isinstance(body.get("notifications_muted"), bool):
+        raise ValidationException(
+            "notifications_muted must be a boolean.",
+            code="validation_error",
+            fields={"notifications_muted": ["Provide true or false."]},
+        )
+    muted = body["notifications_muted"]
+    _service().set_notifications_muted(
+        thread=thread,
+        user=request.user,
+        muted=muted,
+    )
+    return success({"notifications_muted": muted})
 
 
 @csrf_exempt
@@ -202,7 +297,7 @@ def _create_thread(request: HttpRequest) -> HttpResponse:
     )
     thread = _service().create(dto, creator=request.user)
     # A freshly created thread's only message is the creator's own opener -> unread 0.
-    return created(thread_to_dict(thread, unread_count=0))
+    return created(thread_to_dict(thread, unread_count=0, viewer_id=_viewer_id(request)))
 
 
 def _send_message(request: HttpRequest, thread) -> HttpResponse:

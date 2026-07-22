@@ -37,6 +37,9 @@ class IThreadService(ABC):
     def mark_read(self, *, thread: Thread, user) -> None: ...
 
     @abstractmethod
+    def set_notifications_muted(self, *, thread: Thread, user, muted: bool) -> None: ...
+
+    @abstractmethod
     def presign_attachment(
         self, *, filename: str, content_type: str, size_bytes: int, requested_by
     ) -> dict: ...
