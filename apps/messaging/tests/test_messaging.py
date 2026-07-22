@@ -16,6 +16,7 @@ pytestmark = pytest.mark.django_db
 
 THREADS = "/api/v1/messaging/threads/"
 UPLOAD = "/api/v1/messaging/attachments/upload-url/"
+CONTACTS = "/api/v1/messaging/contacts/"
 
 
 def _rows(body):
@@ -152,10 +153,165 @@ def test_thread_needs_another_participant(tenant_a, as_role):
 def test_role_without_messaging_is_denied(tenant_a, as_role):
     sec_client, _s = as_role(Role.SECURITY)  # security holds no messaging permission
     assert sec_client.get(THREADS).status_code == 403
+    assert sec_client.get(CONTACTS).status_code == 403
     assert (
         sec_client.post(THREADS, {"participant_ids": [1], "first_body": "x"}, format="json").status_code
         == 403
     )
+
+
+def test_teacher_contact_directory_and_thread_scope(tenant_a, user_in, as_user):
+    """The directory and create policy share one fail-closed recipient scope."""
+    from apps.cohorts.tests.factories import CohortFactory
+    from apps.org.models import StaffProfile
+    from apps.org.tests.factories import BranchFactory
+    from apps.students.models import StudentProfile
+    from apps.students.tests.factories import StudentProfileFactory
+    from apps.teachers.tests.factories import TeacherProfileFactory
+
+    with schema_context(tenant_a.schema_name):
+        branch = BranchFactory()
+
+    teacher_user = user_in(tenant_a, roles=[Role.TEACHER], branch=branch)
+    staff_user = user_in(tenant_a, roles=[Role.REGISTRAR], branch=branch)
+    colleague_user = user_in(tenant_a, roles=[Role.TEACHER], branch=branch)
+    manager_user = user_in(tenant_a, roles=[Role.HEAD_OF_DEPT], branch=branch)
+    custom_manager_user = user_in(tenant_a, roles=[Role.SUPPORT], branch=branch)
+    own_student_user = user_in(tenant_a, roles=[Role.STUDENT], branch=branch)
+    untaught_student_user = user_in(tenant_a, roles=[Role.STUDENT], branch=branch)
+    withdrawn_student_user = user_in(tenant_a, roles=[Role.STUDENT], branch=branch)
+    parent_user = user_in(tenant_a, roles=[Role.PARENT], branch=branch)
+
+    with schema_context(tenant_a.schema_name):
+        from apps.access.models import AccountType
+
+        custom_manager_type = AccountType.objects.create(
+            name="School manager",
+            slug="school-manager",
+            account_kind=AccountType.AccountKind.STAFF,
+        )
+        custom_manager_membership = custom_manager_user.role_memberships.get()
+        custom_manager_membership.account_type = custom_manager_type
+        custom_manager_membership.save(update_fields=["account_type"])
+        teacher = TeacherProfileFactory(
+            user=teacher_user,
+            branch=branch,
+            first_name="Scope",
+            last_name="Teacher",
+        )
+        colleague = TeacherProfileFactory(user=colleague_user, branch=branch)
+        taught = CohortFactory(branch=branch, primary_teacher=teacher)
+        untaught = CohortFactory(branch=branch)
+        own_student = StudentProfileFactory(
+            user=own_student_user,
+            branch=branch,
+            current_cohort=taught,
+            first_name="Own",
+            last_name="Student",
+            status=StudentProfile.Status.ACTIVE,
+        )
+        StudentProfileFactory(
+            user=untaught_student_user,
+            branch=branch,
+            current_cohort=untaught,
+            status=StudentProfile.Status.ACTIVE,
+        )
+        StudentProfileFactory(
+            user=withdrawn_student_user,
+            branch=branch,
+            current_cohort=taught,
+            status=StudentProfile.Status.WITHDRAWN,
+        )
+        StaffProfile.objects.create(
+            user=staff_user,
+            username=staff_user.username,
+            password=staff_user.password,
+            first_name="Helpful",
+            last_name="Registrar",
+        )
+        StaffProfile.objects.create(
+            user=manager_user,
+            username=manager_user.username,
+            password=manager_user.password,
+            first_name="Hidden",
+            last_name="Manager",
+        )
+        StaffProfile.objects.create(
+            user=custom_manager_user,
+            username=custom_manager_user.username,
+            password=custom_manager_user.password,
+            first_name="Custom",
+            last_name="Manager",
+        )
+
+    client = as_user(tenant_a, teacher_user)
+    response = client.get(CONTACTS)
+    assert response.status_code == 200, response.content
+    body = response.json()
+    assert body["pagination"]["self_user_id"] == teacher_user.id
+    rows = body["data"]
+    ids = {row["user_id"] for row in rows}
+    assert {staff_user.id, colleague_user.id, own_student_user.id} <= ids
+    assert teacher_user.id not in ids
+    assert manager_user.id not in ids
+    assert custom_manager_user.id not in ids
+    assert untaught_student_user.id not in ids
+    assert withdrawn_student_user.id not in ids
+    assert parent_user.id not in ids
+
+    student_row = next(row for row in rows if row["user_id"] == own_student_user.id)
+    assert student_row == {
+        "id": own_student_user.id,
+        "user_id": own_student_user.id,
+        "principal_kind": "student",
+        "category": "student",
+        "profile_id": own_student.id,
+        "display_name": "Own Student",
+        "username": own_student.username,
+        "role_label": "Student",
+        "role_slug": Role.STUDENT,
+        "is_online": False,
+    }
+    assert "phone" not in student_row
+    assert "email" not in student_row
+
+    colleague_row = next(row for row in rows if row["user_id"] == colleague_user.id)
+    assert colleague_row["profile_id"] == colleague.id
+    assert colleague_row["principal_kind"] == "teacher"
+    assert client.get(f"{CONTACTS}?category=student&search=Own").json()["data"] == [student_row]
+
+    created_for_student = client.post(
+        THREADS,
+        {"participant_ids": [own_student_user.id], "first_body": "Welcome"},
+        format="json",
+    )
+    assert created_for_student.status_code == 201, created_for_student.content
+    participant_ids = {
+        participant["user"] for participant in created_for_student.json()["data"]["participants"]
+    }
+    assert participant_ids == {teacher_user.id, own_student_user.id}
+
+    created_for_staff = client.post(
+        THREADS,
+        {"participant_ids": [staff_user.id], "first_body": "Hello"},
+        format="json",
+    )
+    assert created_for_staff.status_code == 201, created_for_staff.content
+
+    for forbidden_id in (
+        untaught_student_user.id,
+        withdrawn_student_user.id,
+        parent_user.id,
+        manager_user.id,
+        custom_manager_user.id,
+    ):
+        denied = client.post(
+            THREADS,
+            {"participant_ids": [forbidden_id], "first_body": "guess"},
+            format="json",
+        )
+        assert denied.status_code == 403, denied.content
+        assert denied.json()["code"] == "recipient_out_of_scope"
 
 
 # --------------------------------------------------------------------------- #

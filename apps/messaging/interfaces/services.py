@@ -8,6 +8,7 @@ from django.db.models import QuerySet
 
 from apps.messaging.dto.thread_dto import CreateThreadDTO
 from apps.messaging.models import Message, Thread
+from apps.users.models import User
 
 
 class IThreadService(ABC):
@@ -22,6 +23,9 @@ class IThreadService(ABC):
 
     @abstractmethod
     def unread_counts(self, *, thread_ids: list[int], viewer_id: int) -> dict[int, int]: ...
+
+    @abstractmethod
+    def contacts(self, *, user, category: str = "") -> QuerySet[User]: ...
 
     @abstractmethod
     def create(self, data: CreateThreadDTO, *, creator) -> Thread: ...

@@ -16,7 +16,7 @@ from django.views.decorators.csrf import csrf_exempt
 
 from apps.messaging.dto.thread_dto import CreateThreadDTO
 from apps.messaging.interfaces.services import IThreadService
-from apps.messaging.presenters import message_to_dict, thread_to_dict
+from apps.messaging.presenters import contact_to_dict, message_to_dict, thread_to_dict
 from core.api_auth import check_perm, require_auth
 from core.container import container
 from core.exceptions import NotFoundException, ValidationException
@@ -48,6 +48,46 @@ def _get_thread(request: HttpRequest, pk: int):
     if thread is None:
         raise NotFoundException(code="not_found")  # non-participant -> 404, strict isolation
     return thread
+
+
+@csrf_exempt
+@require_auth
+def contacts_collection_view(request: HttpRequest) -> HttpResponse:
+    if request.method not in ("GET", "HEAD"):
+        return error("Method not allowed.", code="method_not_allowed", status=405)
+    check_perm(request, f"{_RESOURCE}:read")
+    category = request.GET.get("category", "").strip().lower()
+    if category not in ("", "staff", "student"):
+        raise ValidationException(
+            "category must be staff or student.",
+            code="validation_error",
+            fields={"category": ["Choose staff or student."]},
+        )
+    qs = _service().contacts(user=request.user, category=category)
+    qs = apply_filters(
+        request,
+        qs,
+        search_fields=(
+            "username",
+            "staff_profile__first_name",
+            "staff_profile__middle_name",
+            "staff_profile__last_name",
+            "teacher_profile__first_name",
+            "teacher_profile__middle_name",
+            "teacher_profile__last_name",
+            "student_profile__first_name",
+            "student_profile__middle_name",
+            "student_profile__last_name",
+        ),
+    )
+    items, total, page, size = paginate(request, qs)
+    return paginated(
+        [contact_to_dict(contact) for contact in items],
+        total=total,
+        page=page,
+        page_size=size,
+        pagination_extra={"self_user_id": _viewer_id(request)},
+    )
 
 
 @csrf_exempt

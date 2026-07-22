@@ -2,6 +2,7 @@ from django.urls import path
 
 from apps.messaging.views.v1.thread_views import (
     attachment_upload_url_view,
+    contacts_collection_view,
     thread_attachment_download_view,
     thread_detail_view,
     thread_messages_view,
@@ -11,6 +12,7 @@ from apps.messaging.views.v1.thread_views import (
 
 urlpatterns = [
     path("attachments/upload-url/", attachment_upload_url_view, name="message-attachment-upload"),
+    path("contacts/", contacts_collection_view, name="message-contact-list"),
     path("threads/", threads_collection_view, name="thread-list"),
     path("threads/<int:pk>/", thread_detail_view, name="thread-detail"),
     path("threads/<int:pk>/messages/", thread_messages_view, name="thread-messages"),
